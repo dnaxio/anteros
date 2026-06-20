@@ -395,17 +395,18 @@ const thumb = api.getFileUrl('photos', 'abc.jpg', {
 
 ### deleteFile
 
-Delete a file from a file collection.
+Delete a file from a file collection by its document `_id`.
 
 ```typescript
-await api.deleteFile('photos', 'abc.jpg')
+const upload = await api.upload('photos', file);
+await api.deleteFile('photos', upload._id);
 // { message: 'File deleted', ok: true }
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `collection` | `string` | File collection slug |
-| `filename` | `string` | Filename to delete |
+| `fileId` | `string` | Document `_id` (returned by `upload()`) |
 | `signal?` | `AbortSignal` | Cancel the request |
 
 **Returns:** `{ message: string, ok: boolean }`

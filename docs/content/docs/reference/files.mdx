@@ -64,8 +64,8 @@ export default define.FileCollection({
 | Method | Route | Description |
 |---------|-------|-------------|
 | `POST` | `/upload/:tenant_id/:slug` | Upload a file |
-| `GET` | `/files/:tenant_id/:slug/:file` | Serve / download a file |
-| `DELETE` | `/files/:tenant_id/:slug/:file` | Delete a file |
+| `GET` | `/files/:tenant_id/:slug/:filename` | Serve / download a file |
+| `DELETE` | `/files/:tenant_id/:slug/:fileId` | Delete a file (by `_id`) |
 
 ### Upload
 
@@ -112,9 +112,14 @@ curl "/files/v1/photos/a1b2c3d4-....jpg?w=200&h=200&format=webp&q=80"
 
 ### Delete a file
 
+Pass the document `_id` returned by the upload response:
+
 ```bash
-curl -X DELETE /files/v1/photos/a1b2c3d4-....jpg
+# Use the _id from the upload response
+curl -X DELETE /files/v1/photos/a1b2c3d4-...
 ```
+
+> Unlike `GET`, the `DELETE` endpoint uses the document `_id` directly — not the full `_id.ext` filename. The server looks up the stored filename from MongoDB, deletes the physical file from storage, then removes the document.
 
 ## Image Transformations
 
