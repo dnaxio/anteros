@@ -732,13 +732,12 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
       }
       await checkFileAccess(colDelete?.api?.access as any, 'delete', tenant_id, c);
 
-      const filename = basename(c.req.param('file') as string);
-      if (!filename || filename.startsWith('.') || filename.includes('..') || filename.includes('/')) {
-        throw new AppError('Invalid filename', { status: 400, code: 'INVALID_FILENAME' });
+      const fileId = c.req.param('file') as string;
+      if (!fileId || fileId.startsWith('.') || fileId.includes('..') || fileId.includes('/')) {
+        throw new AppError('Invalid file id', { status: 400, code: 'INVALID_FILE_ID' });
       }
-      const fileId = filename.replace(/\.[^.]+$/, '');
 
-      await handleDelete(tenant_id, collection, fileId, filename);
+      await handleDelete(tenant_id, collection, fileId);
 
       return c.json({ message: 'File deleted', ok: true });
     } catch (err: any) {

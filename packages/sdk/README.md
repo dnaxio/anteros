@@ -114,8 +114,8 @@ const url = api.getFileUrl("photos", "abc123.jpg", {
   quality: 80,
 });
 
-// Delete a file
-await api.deleteFile("photos", "abc123.jpg");
+// Delete a file (by its _id)
+await api.deleteFile("photos", fileResult._id);
 ```
 
 ### Services

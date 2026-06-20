@@ -352,12 +352,43 @@ export async function handleDelete(
   tenant_id: string,
   collection: string,
   fileId: string,
-  filename: string,
 ): Promise<void> {
   const storage = getStorageForCollection(collection, tenant_id);
   const col = getFileCollection(collection, tenant_id);
+
+  // Look up the document to get the stored filename
+  let filename: string | undefined;
+  if (col?.trackMetaData !== false) {
+    try {
+      const rest = new useRest({ tenant_id, internal: true, useHook: false, useCustomApi: false });
+      const doc = await rest.findOne<any>(collection, fileId);
+      filename = doc?._file?.filename;
+    } catch {}
+  }
+
+  // Delete the physical file from storage
   const subpath = col?.storage?.path || undefined;
-  await storage.delete(tenant_id, collection, fileId, filename, subpath);
+  if (filename) {
+    await storage.delete(tenant_id, collection, fileId, filename, subpath);
+  } else {
+    // Fallback: try common extensions
+    for (const ext of ['.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif', '.svg', '.pdf', '.mp4', '.webm', '.mp3', '.wav', '.json', '.csv', '.zip', '']) {
+      try {
+        await storage.delete(tenant_id, collection, fileId, fileId + ext, subpath);
+        break;
+      } catch {}
+    }
+  }
+
+  // Delete the metadata document from MongoDB
+  if (col?.trackMetaData !== false) {
+    try {
+      const rest = new useRest({ tenant_id, internal: true, useHook: false, useCustomApi: false });
+      await rest.deleteOne(collection, fileId);
+    } catch (err: any) {
+      console.error('Failed to delete file metadata:', err?.message || err);
+    }
+  }
 }
 
 // ─── Replication ──────────────────────────────────────────────────────────

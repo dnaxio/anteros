@@ -371,14 +371,15 @@ class Rest {
     }
 
     /**
-     * Supprime un fichier via `DELETE /files/:tenant/:collection/:filename`.
+     * Supprime un fichier via `DELETE /files/:tenant/:collection/:fileId`.
+     * @param fileId — the `_id` of the file document (returned by `upload()`)
      */
     async deleteFile<TResponse = { message: string; ok: boolean }>(
         collection: string,
-        filename: string,
+        fileId: string,
         signal?: AbortSignal,
     ): Promise<TResponse> {
-        const url = this.buildFileUrl(collection, filename);
+        const url = joinURL(this.#server, "files", this.#tenant, collection, fileId);
 
         const res = await fetch(url, {
             method: "DELETE",
