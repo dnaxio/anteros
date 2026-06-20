@@ -1,0 +1,175 @@
+---
+title: Access Control
+description: Access control and permissions in anteros Framework.
+icon: Lock
+---
+
+
+Access control defines who can perform which actions on a collection **or service**. You configure it with **`api.access`** on each collection model or service definition.
+
+<Callout type="info">
+`api.access` works identically for both collections and [services](/docs/reference/services). The same rules, wildcards, and functions apply.
+</Callout>
+
+### Request pipeline and JWT
+
+If the client sends **`Authorization: Bearer <jwt>`**, the server **verifies** the JWT first. A bad token yields **401** before `api.access` runs. If there is no Bearer header, verification is skipped; access functions still run, with **`token.value`** and **`token.decoded`** set to **`null`** when unauthenticated.
+
+## How `api.access` is structured
+
+- **Keys** — Built-in action names (for example `find`, `insertOne`, `deleteOne`, `aggregate`, `login`, `logout`, …), the wildcard **`'*'`**, or a **custom string** matching a [named action](/docs/reference/custom-actions) on the same collection.
+- **Values** — Either a **boolean**, or a **function** (usually `async`) that returns whether the action is allowed.
+
+## Configure access rules
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Collection({
+  slug: 'users',
+  fields: [
+    { name: 'name', type: 'string' },
+  ],
+  api: {
+    access: {
+      // Wildcard — applies when no per-action rule is set for that action
+      '*': true,
+
+      // Specific built-in action
+      deleteOne: false,
+
+      // Dynamic check using verified JWT claims
+      updateOne: async ({ token }) => {
+        return token?.decoded?.role === 'admin';
+      },
+    },
+  },
+});
+```
+
+## Access rule types
+
+| Type | Example | Description |
+|------|---------|-------------|
+| `boolean` | `true` \| `false` | Static allow or deny |
+| `function` | `async (ctx) => boolean` (or `Promise<boolean>`) | Decide at runtime using `rest`, `jwt`, `token`, etc. |
+
+## Wildcard (`*`)
+
+Use `'*'` as a default when you do not define a rule for a specific action:
+
+```typescript
+api: {
+  access: {
+    '*': true,   // allow by default (use false to deny by default)
+  },
+},
+```
+
+## Per-action access
+
+Control built-in CRUD/query actions individually:
+
+```typescript
+api: {
+  access: {
+    find: true,
+    findOne: true,
+    insertOne: async ({ token }) => {
+      return token?.decoded?.role === 'admin';
+    },
+    updateOne: async ({ token }) => {
+      return token?.decoded?.role === 'admin';
+    },
+    deleteOne: false,
+    deleteMany: false,
+  },
+},
+```
+
+## Access handler context
+
+Access functions receive **`rest`** (tenant database access), **`error`** (throw structured failures, same pattern as hooks), **`jwt`** (`sign` / `verify`), and **`token`**:
+
+```typescript
+{
+  rest: useRest;
+  error: (message: string, options?: object) => never;
+  jwt: {
+    sign: (payload, options?) => Promise<string>;
+    verify: (token: string) => Promise<{ value: Record<string, unknown> | null; error: string | null }>;
+  };
+  token: {
+    value: string | null;
+    decoded: Record<string, unknown> | null;
+  };
+}
+```
+
+Use **`token.decoded`** for role checks, user id (`sub`), or any claim you issued in `onLogin`. **`token.value`** is the original Bearer string if you need to forward or re-verify it.
+
+## Example: user roles
+
+```typescript
+api: {
+  access: {
+    '*': async ({ token }) => {
+      return !!token?.decoded;
+    },
+
+    deleteOne: async ({ token }) => {
+      return token?.decoded?.role === 'admin';
+    },
+  },
+},
+```
+
+## Example: owner-only edit
+
+```typescript
+api: {
+  access: {
+    updateOne: async ({ jwt, rest, token }) => {
+      const subject = token?.decoded?.sub as string | undefined;
+      if (!subject) return false;
+
+      const doc = await rest.findOne('users', subject);
+      return doc?._id === subject;
+    },
+  },
+},
+```
+
+(Adjust the id field to match how you store the subject in your documents.)
+
+## Private fields
+
+Hide fields from responses:
+
+```typescript
+api: {
+  privateFields: [
+    'password',
+    'internalNote',
+    /^secret_/,
+  ],
+},
+```
+
+Fields matching these patterns are removed from all API responses.
+
+## Read-only fields
+
+Prevent updates to certain fields:
+
+```typescript
+api: {
+  readOnlyFields: [
+    'createdAt',
+    'createdBy',
+    'role',
+  ],
+},
+```
+
+These fields cannot be modified via `insertOne`, `insertMany`, `updateOne`, or `updateMany`.

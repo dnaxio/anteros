@@ -1,0 +1,109 @@
+---
+title: Introduction
+description: What is Anteros Framework? Discover a robust backend solution.
+icon: Rocket
+---
+
+**Anteros Framework** is a robust backend server built on **Bun** as the JavaScript runtime and **MongoDB** as the database. It provides a complete suite of tools to build scalable APIs quickly with multi-tenant support, JWT authentication, real-time capabilities, and more.
+
+```typescript
+import { app } from '@anteros/core';
+
+app.boot({
+  server: { port: 4000 },
+  tenants: [
+    {
+      id: 'v1',
+      dir: 'v1',
+      database: { uri: 'mongodb://localhost:27017/mydb' },
+    },
+  ],
+});
+```
+
+## Why Anteros?
+
+- **Performance** — Powered by Bun, one of the fastest JavaScript runtimes available.
+- **Simplicity** — A single endpoint pattern (`POST /api/:tenant/:collection/:action`) for all operations. No boilerplate.
+- **Multi-Tenant** — Isolate data between tenants with separate databases and configuration, out of the box.
+- **Type Safety** — Full TypeScript support across server, collections, scripts, routes, and the client SDK.
+- **Batteries Included** — Authentication, validation, hooks, custom actions, custom routes, scripts, real-time — all built in.
+
+## Technology Stack
+
+| Technology | Role | Description |
+|------------|------|-------------|
+| **Bun** | Runtime | Fast JavaScript/TypeScript runtime and package manager |
+| **Hono** | Web Framework | Ultrafast HTTP framework for routing and middleware |
+| **MongoDB** | Database | Document database with automatic schema validation and indexing |
+| **Joi** | Validation | Schema validation auto-generated from field definitions |
+| **JWT (jose)** | Authentication | Stateless token-based auth with sign and verify helpers |
+| **Socket.IO** | Real-Time | WebSocket support available at `/socket.io/` |
+
+## Use Cases
+
+### SaaS Platforms
+
+Build multi-tenant applications where each client has isolated data:
+
+```typescript
+tenants: [
+  {
+    id: 'acme',
+    dir: 'src-acme',
+    database: { uri: 'mongodb://localhost:27017/acme' },
+  },
+  {
+    id: 'globex',
+    dir: 'src-globex',
+    database: { uri: 'mongodb://localhost:27017/globex' },
+  },
+]
+```
+
+### REST APIs
+
+Ship a fully-featured API in minutes — define collections, fields, auth, and access control. Anteros handles CRUD, validation, hooks, and error formatting.
+
+```typescript
+define.Collection({
+  slug: 'products',
+  fields: [
+    { name: 'name', type: 'string', required: true },
+    { name: 'price', type: 'number', required: true },
+    { name: 'sku', type: 'random', randomOptions: { length: 8, startWith: 'SKU-' } },
+  ],
+});
+```
+
+### Rapid Prototyping
+
+Go from zero to a running backend with auth, CRUD, and real-time in a single file. Ideal for hackathons, MVPs, and internal tools.
+
+### Agency Projects
+
+Manage multiple client projects from one codebase with separate tenants, databases, routes, and scripts per client.
+
+### Webhooks & Integrations
+
+Use custom routes to receive webhooks or expose public endpoints alongside the collection API:
+
+```typescript
+define.Route({
+  enabled: true,
+  method: 'POST',
+  path: '/webhooks/stripe',
+  handler: async ({ c, rest }) => {
+    const event = await c.req.json();
+    await rest.insertOne('events', event);
+    return c.json({ received: true });
+  },
+});
+```
+
+## Next
+
+- **[Quick Start](/docs/getting-started/quick-start)** — create a project and your first API call step by step
+- [Project structure](/docs/getting-started/project-structure) — recommended repo layout (`config/`, tenant folder e.g. `v1/`, uploads, …)
+- [Installation](/docs/getting-started/installation) — requirements and package install
+- [Tenant](/docs/reference/tenants) — `dir`, database, and folder layout

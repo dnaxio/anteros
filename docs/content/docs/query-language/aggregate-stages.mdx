@@ -1,0 +1,395 @@
+---
+title: Aggregate Stages
+description: Pipeline stages for aggregation operations.
+icon: Layers
+---
+
+An aggregation pipeline passes documents through a sequence of stages. Each stage transforms the document stream. Stages execute in order and can be used with `rest.aggregate()` or embedded in `rest.find()` params.
+
+```typescript
+import { useRest } from '@anteros/core';
+
+const rest = new useRest({ tenant_id: 'v1' });
+```
+
+---
+
+## Filtering & Selection
+
+### `$match`
+
+Filters documents before the next stage. Use it early to reduce the data volume.
+
+```typescript
+const activeAdults = await rest.aggregate('users', [
+  { $match: { status: 'active', age: { $gte: 18 } } }
+]);
+```
+
+### `$limit`
+
+Passes only the first N documents.
+
+```typescript
+const top10 = await rest.aggregate('orders', [
+  { $sort: { total: -1 } },
+  { $limit: 10 }
+]);
+```
+
+### `$skip`
+
+Skips the first N documents (useful for pagination).
+
+```typescript
+const page2 = await rest.aggregate('orders', [
+  { $sort: { createdAt: -1 } },
+  { $skip: 20 },
+  { $limit: 20 }
+]);
+```
+
+### `$sample`
+
+Selects N documents at random.
+
+```typescript
+const random3 = await rest.aggregate('products', [
+  { $match: { stock: { $gt: 0 } } },
+  { $sample: { size: 3 } }
+]);
+```
+
+---
+
+## Shaping Documents
+
+### `$project`
+
+Keeps, removes, or computes fields.
+
+```typescript
+const summary = await rest.aggregate('users', [
+  {
+    $project: {
+      _id: 0,
+      name: 1,
+      email: 1,
+      age: { $subtract: [{ $year: '$$NOW' }, { $year: '$birthDate' }] }
+    }
+  }
+]);
+```
+
+### `$addFields` / `$set`
+
+Adds or modifies fields without dropping the others. `$addFields` and `$set` are interchangeable.
+
+```typescript
+const withDiscount = await rest.aggregate('orders', [
+  {
+    $addFields: {
+      discount:   { $multiply: ['$total', 0.1] },
+      finalPrice: { $subtract: ['$total', { $multiply: ['$total', 0.1] }] }
+    }
+  }
+]);
+```
+
+### `$unset`
+
+Removes one or more fields.
+
+```typescript
+const safe = await rest.aggregate('users', [
+  { $unset: ['password', 'secretKey', 'internalNotes'] }
+]);
+```
+
+---
+
+## Sorting
+
+### `$sort`
+
+Sorts by one or more fields. `1` = ascending, `-1` = descending.
+
+```typescript
+const sorted = await rest.aggregate('orders', [
+  { $sort: { createdAt: -1, priority: 1 } }
+]);
+```
+
+---
+
+## Grouping
+
+### `$group`
+
+Groups by a key and applies accumulators. See [Accumulator](./accumulator) for all available operators.
+
+```typescript
+const byCountry = await rest.aggregate('users', [
+  {
+    $group: {
+      _id: '$country',
+      userCount: { $sum: 1 },
+      avgAge:    { $avg: '$age' },
+      allNames:  { $push: '$name' }
+    }
+  }
+]);
+```
+
+### `$sortByCount`
+
+Shortcut: groups by a field, counts, and sorts descending.
+
+```typescript
+const topCategories = await rest.aggregate('articles', [
+  { $sortByCount: '$category' }
+]);
+```
+
+### `$bucket`
+
+Groups into user-defined boundaries.
+
+```typescript
+const ageGroups = await rest.aggregate('users', [
+  {
+    $bucket: {
+      groupBy: '$age',
+      boundaries: [0, 18, 30, 50, 120],
+      default: 'Other',
+      output: { count: { $sum: 1 } }
+    }
+  }
+]);
+```
+
+### `$bucketAuto`
+
+Automatically distributes documents across N buckets.
+
+```typescript
+const priceDistribution = await rest.aggregate('products', [
+  {
+    $bucketAuto: {
+      groupBy: '$price',
+      buckets: 5,
+      output: { count: { $sum: 1 }, avgPrice: { $avg: '$price' } }
+    }
+  }
+]);
+```
+
+### `$facet`
+
+Runs several pipelines in parallel on the same input — one network call, multiple results.
+
+```typescript
+const dashboard = await rest.aggregate('orders', [
+  {
+    $facet: {
+      byCategory: [{ $sortByCount: '$category' }],
+      byStatus:   [{ $sortByCount: '$status' }],
+      total:      [{ $count: 'value' }]
+    }
+  }
+]);
+// → { byCategory: [...], byStatus: [...], total: [{ value: 1523 }] }
+```
+
+---
+
+## Array Operations
+
+### `$unwind`
+
+Deconstructs an array field — each array element becomes its own document.
+
+```typescript
+// Compter les tags toutes catégories confondues
+const tagCounts = await rest.aggregate('articles', [
+  { $unwind: '$tags' },
+  { $group: { _id: '$tags', count: { $sum: 1 } } },
+  { $sort: { count: -1 } }
+]);
+```
+
+Options :
+
+```typescript
+{ $unwind: {
+    path: '$items',
+    includeArrayIndex: 'itemIndex',
+    preserveNullAndEmptyArrays: true
+} }
+```
+
+---
+
+## Joins
+
+### `$lookup`
+
+Left outer join with another collection.
+
+```typescript
+// Utilisateurs avec leurs commandes
+const usersWithOrders = await rest.aggregate('users', [
+  {
+    $lookup: {
+      from: 'orders',
+      localField: '_id',
+      foreignField: 'userId',
+      as: 'orders'
+    }
+  }
+]);
+```
+
+**Pipeline variant** — more powerful, with filtering and sorting directly inside the join :
+
+```typescript
+const usersWithRecent = await rest.aggregate('users', [
+  {
+    $lookup: {
+      from: 'orders',
+      let: { userId: '$_id' },
+      pipeline: [
+        { $match: {
+            $expr: { $eq: ['$userId', '$$userId'] },
+            status: 'completed'
+        } },
+        { $sort: { createdAt: -1 } },
+        { $limit: 5 }
+      ],
+      as: 'recentOrders'
+    }
+  }
+]);
+```
+
+### `$graphLookup`
+
+Recursive graph traversal — ideal for hierarchies, org charts, categories.
+
+```typescript
+// Remonter toute la chaîne hiérarchique d'un employé
+const hierarchy = await rest.aggregate('users', [
+  {
+    $graphLookup: {
+      from: 'users',
+      connectFromField: 'managerId',
+      connectToField: '_id',
+      startWith: '$managerId',
+      as: 'managers',
+      maxDepth: 5
+    }
+  }
+]);
+```
+
+### `$unionWith`
+
+Appends results from another collection.
+
+```typescript
+const allOrders = await rest.aggregate('orders', [
+  { $match: { status: 'active' } },
+  { $unionWith: { coll: 'archived_orders' } }
+]);
+```
+
+---
+
+## Transforming Documents
+
+### `$replaceRoot`
+
+Replaces the current document with a sub-document.
+
+```typescript
+const profilesOnly = await rest.aggregate('users', [
+  { $replaceRoot: { newRoot: '$profile' } }
+]);
+```
+
+### `$replaceWith`
+
+Alias of `$replaceRoot` — replaces the document with an expression result.
+
+```typescript
+const merged = await rest.aggregate('users', [
+  {
+    $replaceWith: {
+      $mergeObjects: ['$profile', { userId: '$_id' }]
+    }
+  }
+]);
+```
+
+---
+
+## Output Stages
+
+### `$count`
+
+Counts documents and outputs a single document.
+
+```typescript
+const total = await rest.aggregate('orders', [
+  { $match: { status: 'completed' } },
+  { $count: 'completedOrders' }
+]);
+// → [{ completedOrders: 847 }]
+```
+
+### `$merge`
+
+Writes results into an existing collection (merge mode).
+
+```typescript
+await rest.aggregate('orders', [
+  { $match: { status: 'completed' } },
+  {
+    $merge: {
+      into: 'monthly_reports',
+      on: '_id',
+      whenMatched: 'replace',
+      whenNotMatched: 'insert'
+    }
+  }
+]);
+```
+
+### `$out`
+
+Writes results into a collection — replaces it entirely.
+
+```typescript
+await rest.aggregate('raw_logs', [
+  { $match: { level: 'error' } },
+  { $out: 'error_logs' }
+]);
+```
+
+---
+
+## Use in `rest.find`
+
+Plusieurs stages peuvent aussi être passés directement à `rest.find` via les paramètres :
+
+```typescript
+const result = await rest.find('users', {
+  $match:   { status: 'active' },
+  $skip:    10,
+  $limit:   20,
+  $sort:    { createdAt: -1 },
+  $project: { name: 1, email: 1 }
+});
+```
+
+C'est plus concis qu'un `aggregate` pour les requêtes simples.

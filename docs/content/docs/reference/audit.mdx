@@ -1,0 +1,275 @@
+---
+title: Audit
+description: Activity logging and audit trail in anteros Framework.
+icon: ScrollText
+---
+
+Every database operation is automatically logged as an activity in the `_activities_` collection of each tenant's database. You can also query these logs programmatically via `rest.audit`.
+
+## Activity Structure
+
+Each activity document follows the `ActivityInput` type:
+
+```typescript
+{
+  internal: boolean;
+  trace: {
+    id: string;
+    comment?: string;
+    tag?: string;
+    version?: string;
+  };
+  request?: {
+    ip?: string;
+    user_agent?: string;
+    headers?: Record<string, string>;
+    method?: string;
+    path?: string;
+    query?: Record<string, any>;
+  };
+  meta: {
+    environment?: string;
+    hostname?: string;
+    core_version?: string;
+    platform?: string;
+  };
+  operation: {
+    tenant: string;
+    action: string;
+    collection: string;
+    collectionType?: "document" | "file";  // type de collection
+    status: "success" | "error";
+    input: any;
+    result: any;
+    error: { message: string; code: string } | null;
+    duration: number;
+    transaction: boolean;
+    token?: { value: string | null; decoded: Record<string, unknown> | null };
+  };
+  ts: Date;
+}
+```
+
+### Top-Level Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `internal` | `boolean` | `true` when triggered from server-side code, `false` for external API calls |
+| `trace.id` | `string` | Unique identifier to correlate related activities across a request |
+| `trace.comment` | `string` | Optional comment for the trace |
+| `trace.tag` | `string` | Optional tag for filtering traces |
+| `trace.version` | `string` | Optional version identifier |
+
+### Request
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `request.ip` | `string` | Client IP address |
+| `request.user_agent` | `string` | User-Agent header |
+| `request.headers` | `object` | Request headers |
+| `request.method` | `string` | HTTP method |
+| `request.path` | `string` | Request path |
+| `request.query` | `object` | Query parameters |
+
+### Meta
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `environment` | `string` | Environment name (e.g. `production`, `development`) |
+| `hostname` | `string` | Server hostname |
+| `core_version` | `string` | anteros core version |
+| `platform` | `string` | OS platform |
+
+### Operation
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `tenant` | `string` | Tenant ID |
+| `action` | `string` | The operation action (see table below) |
+| `collection` | `string` | Collection or service name |
+| `collectionType` | `"document" \| "file"` | Type de collection : document ou file |
+| `status` | `"success" \| "error"` | Whether the operation succeeded or failed |
+| `input` | `any` | Input data sent to the operation |
+| `result` | `any` | Result returned by the operation |
+| `error` | `object \| null` | Error details when status is `error` |
+| `duration` | `number` | Execution time in milliseconds |
+| `transaction` | `boolean` | Whether the operation was part of a transaction |
+| `token` | `object \| undefined` | JWT token used for the request |
+
+## Recorded Actions
+
+Every CRUD and utility operation is logged automatically with the following `action` values:
+
+| Action | Description |
+|--------|-------------|
+| `insertOne` | Insert a single document |
+| `insertMany` | Insert multiple documents |
+| `updateOne` | Update a single document |
+| `updateMany` | Update multiple documents |
+| `deleteOne` | Delete a single document |
+| `deleteMany` | Delete multiple documents |
+| `findOneAndUpdate` | Find and update a document |
+| `find` | Find documents |
+| `findOne` | Find a single document |
+| `aggregate` | Run an aggregation pipeline |
+| `bulkWrite` | Execute bulk write operations |
+| `bulkUpdate` | Execute bulk update operations |
+| `countDocuments` | Count documents |
+| `dropCollection` | Drop a collection |
+| `dropIndex` | Drop an index |
+| `dropIndexes` | Drop all indexes |
+| `login` | User login |
+| `logout` | User logout |
+| `runService` | Service action execution |
+
+## Querying Activities
+
+### getActivities
+
+Retrieve activity logs using MongoDB aggregation pipeline syntax:
+
+```typescript
+const activities = await rest.audit.getActivities({
+  $match: { "operation.collection": "users" },
+  $sort: { ts: -1 },
+  $limit: 50,
+});
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `opts` | `object` | `{ $match: {}, $limit: 100 }` | Aggregation pipeline parameters |
+
+**Returns:** MongoDB aggregation cursor of activity documents
+
+#### Examples
+
+**Get recent errors:**
+
+```typescript
+const errors = await rest.audit.getActivities({
+  $match: { "operation.status": "error" },
+  $sort: { ts: -1 },
+  $limit: 20,
+});
+```
+
+**Filter by tenant, action and date range:**
+
+```typescript
+const logs = await rest.audit.getActivities({
+  $match: {
+    "operation.tenant": "v1",
+    "operation.action": "insertOne",
+    ts: { $gte: new Date("2025-01-01") },
+  },
+  $sort: { ts: -1 },
+});
+```
+
+**Get activities for a specific trace:**
+
+```typescript
+const trace = await rest.audit.getActivities({
+  $match: { "trace.id": "550e8400-e29b-41d4-a716-446655440000" },
+});
+```
+
+**Count operations by type:**
+
+```typescript
+const stats = await rest.audit.getActivities({
+  $match: { "operation.tenant": "v1" },
+  $group: {
+    _id: "$operation.action",
+    count: { $sum: 1 },
+    avgDuration: { $avg: "$operation.duration" },
+  },
+});
+```
+
+### startTrace
+
+Set a shared `trace` for all subsequent operations in the current async context. Useful for grouping activities under a common identifier.
+
+```typescript
+// Auto-generated trace ID
+rest.startTrace();
+
+// Custom trace ID
+rest.startTrace('my-custom-trace');
+
+// With extra metadata
+rest.startTrace('import-2024-001', {
+  comment: 'Monthly data import',
+  tag: 'import',
+  version: '1.2',
+});
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `traceId` | `string` | Optional custom trace ID (auto-generated if omitted) |
+| `extra.comment` | `string` | Optional comment for the trace |
+| `extra.tag` | `string` | Optional tag for filtering |
+| `extra.version` | `string` | Optional version identifier |
+
+### unsetTrace
+
+Remove the current `trace` from the context. Subsequent operations will each get their own random `trace.id`.
+
+```typescript
+rest.startTrace('batch-job');
+// ... operations here share trace.id = 'batch-job'
+rest.unsetTrace();
+// ... operations here each get a unique trace.id
+```
+
+### addActivities
+
+Insert custom activity entries. Used internally but also available for manual logging:
+
+```typescript
+await rest.audit.addActivities([{
+  internal: false,
+  trace: {
+    id: crypto.randomUUID(),
+    comment: "Manual import",
+    tag: "bulk",
+    version: "2.1",
+  },
+  request: {
+    ip: "192.168.1.42",
+    user_agent: "Mozilla/5.0 ...",
+    method: "POST",
+    path: "/api/v1/users/insertOne",
+  },
+  meta: {
+    environment: "production",
+    hostname: "web-01",
+    core_version: "1.0.0",
+    platform: "linux",
+  },
+  operation: {
+    tenant: "v1",
+    action: "insertOne",
+    collection: "users",
+    status: "success",
+    input: { name: "John" },
+    result: { _id: "...", name: "John" },
+    error: null,
+    duration: 12,
+    transaction: false,
+  },
+  ts: new Date(),
+}]);
+```
+
+## Storage
+
+Activities are stored in the `_activities_` collection of each tenant's database. This collection is created automatically on first write and does not require any schema configuration.
+
+## See also
+
+- [Internal API](/docs/manage-data/internal-api) — using `rest.audit` programmatically
+- [Error Handling](/docs/reference/error-handling) — structured error codes used in activity logs

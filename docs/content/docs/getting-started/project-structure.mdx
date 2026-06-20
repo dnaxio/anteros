@@ -1,0 +1,67 @@
+---
+title: Project structure
+description: Recommended layout for a Anteros backend repository.
+icon: FolderTree
+---
+
+Below is a **recommended** repository layout. This guide uses **`v1/`** as the tenant folder (`id: 'v1'`, `dir: 'v1'`). That directory is your **`tenant.dir`**: Anteros loads collection models, routes, scripts, and services from it. Subfolders like `endpoints/` or `plugins/` are for your own code unless you wire them from `index.ts` or `config/app.ts`.
+
+```
+.
+├── .cache/                 # System caches and temporary backup data
+├── config/
+│   ├── app.ts              # Server configuration (boot, tenants, options)
+│   └── ...
+├── v1/                     # Tenant root for API version 1 (`id: 'v1'`, `dir: 'v1'`)
+│   ├── collections/        # Collection models (`*.model.ts`)
+│   ├── files/              # File collection models (`*.file.ts`)
+│   ├── middlewares/        # Tenant-scoped middlewares (`*.middleware.ts`)
+│   ├── routes/             # Anteros routes (`*.route.ts`)
+│   ├── scripts/            # Anteros boot scripts (`*.run.ts`)
+│   ├── services/           # Anteros services (`*.service.ts`)
+│   ├── sockets/            # WebSocket handlers (`*.ws.ts`)
+│   ├── workflows/          # Workflow definitions (`*.workflow.ts`)
+│   └── endpoints/          # Custom HTTP endpoints (your code)
+├── middlewares/            # Global middlewares (`*.middleware.ts`) — runs for all tenants
+├── uploads/                # Public & private file storage
+├── data/                   # Shared backups or durable local data
+├── index.ts                # Process entrypoint (calls `app.boot` or loads `config/app.ts`)
+├── package.json
+└── tsconfig.json
+```
+
+## What Anteros loads automatically
+
+### Tenant-scoped (from each `tenant.dir`)
+
+| Path | Pattern | Notes |
+|------|---------|--------|
+| `collections/` | `**/*.model.ts` | Defines collections and API rules |
+| `files/` | `**/*.file.ts` | Defines file collections (upload, storage) |
+| `routes/` | `**/*.route.ts` | Registered only if the tenant has `routes.prefix` |
+| `scripts/` | `**/*.run.ts` | Runs shortly after the server is ready |
+| `services/` | `**/*.service.ts` | Exposed under `POST /services/:tenant_id/:service/:action` |
+| `sockets/` | `**/*.ws.ts` | WebSocket handlers — exec called per connection |
+| `middlewares/` | `**/*.middleware.ts` | Tenant-scoped middlewares — runs only for this tenant |
+| `workflows/` | `**/*.workflow.ts` | Workflow definitions |
+
+### Global (project root)
+
+| Path | Pattern | Notes |
+|------|---------|--------|
+| `middlewares/` | `**/*.middleware.ts` | Global middlewares — runs for all tenants, has access to `requestCtxStorage` |
+
+## Root files
+
+- **`index.ts`** — Start the process; typically `import { app } from '@anteros/core'` and `await app.boot(...)` or import from `config/app.ts`.
+- **`config/app.ts`** — Central place for `define.Server` / boot options, tenant list, and shared constants.
+- **`.cache/`** — Optional; local caches (build, temp exports, etc.).
+- **`uploads/`** / **`data/`** — Static files, user uploads, dumps; keep them out of version control as needed.
+
+## See also
+
+- [Tenant](/docs/reference/tenants) — `dir`, `id`, database
+- [Quick Start](/docs/getting-started/quick-start) — minimal tree to run the API
+- [Routes](/docs/reference/routes) — `*.route.ts` and prefix
+- [Scripts](/docs/reference/scripts) — `*.run.ts`
+- [Services](/docs/reference/services) — `*.service.ts`

@@ -1,0 +1,275 @@
+---
+title: Rest API
+description: Complete REST API Reference for anteros Framework.
+icon: Globe
+---
+
+All API requests follow a single pattern:
+
+```
+POST /api/:tenant_id/:collection/:action
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `tenant_id` | Tenant identifier |
+| `collection` | Collection name |
+| `action` | Action to perform |
+
+## Content Types
+
+| Type | Description |
+|------|-------------|
+| `application/json` | JSON body |
+| `multipart/form-data` | File uploads |
+| `application/x-www-form-urlencoded` | Form data |
+
+## Authentication (JWT)
+
+For routes that require a logged-in user, send the token from login in the **`Authorization`** header:
+
+```http
+Authorization: Bearer <jwt_token>
+```
+
+The framework verifies the JWT before the request reaches collection handlers. If the header is present and the token is invalid or expired, the response is **401**. If you omit the header, no token is attached; use collection **`api.access`** rules to allow or deny actions and inspect claims via **`token.decoded`** (see [Access control](/docs/reference/access-control)).
+
+After login, the JSON body includes `"token"` — use that value as the Bearer token for subsequent `POST /api/...` calls.
+
+## Query Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `cleanDeep` | `boolean` | Remove null, undefined, empty arrays |
+| `useCache` | `boolean` | Enable caching |
+
+---
+
+## Actions
+
+### find
+
+Retrieve multiple documents.
+
+```http
+POST /api/:tenant_id/:collection/find
+Content-Type: application/json
+
+{
+  "params": {
+    "$match": { "status": "active" },
+    "$limit": 20,
+    "$skip": 0,
+    "$sort": { "createdAt": -1 }
+  }
+}
+```
+
+**Response:**
+```json
+[{ "_id": "...", "name": "John", ... }, ...]
+```
+
+**Body parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `params` | `FindOptions` | No | Query options (see below) |
+
+**`params` options:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `$match` | `object` | Filter conditions |
+| `$limit` | `number` | Limit results |
+| `$skip` | `number` | Skip results |
+| `$sort` | `object` | Sort order |
+| `$project` | `object` | Select fields |
+| `$include` | `Array<string \| LookupOptions>` | Populate relationship fields via `$lookup` |
+| `$lookup` | `Array<object>` | **Internal API only** — raw `$lookup` stages, no validation |
+| `$graphLookup` | `Array<object>` | **Internal API only** — recursive graph traversal, no validation |
+
+### findOne
+
+Retrieve a single document by ID.
+
+```http
+POST /api/:tenant_id/:collection/findOne
+Content-Type: application/json
+
+{
+  "id": "64f1a2b3c4d5e6f7a8b9c0d1",
+  "params": {}
+}
+```
+
+**Body parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | `string` | Yes | Document `_id` |
+| `params` | `findOneOptions` | No | Query options (`$include`) |
+
+### insertOne
+
+Insert a single document.
+
+```http
+POST /api/:tenant_id/:collection/insertOne
+Content-Type: application/json
+
+{
+  "data": {
+    "name": "John Doe",
+    "email": "john@example.com"
+  }
+}
+```
+
+**Body parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `data` | `object` | Yes | Document to insert |
+
+### insertMany
+
+Insert multiple documents.
+
+```http
+POST /api/:tenant_id/:collection/insertMany
+Content-Type: application/json
+
+{
+  "data": [
+    { "name": "Alice" },
+    { "name": "Bob" }
+  ]
+}
+```
+
+**Body parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `data` | `object[]` | Yes | Array of documents to insert |
+
+### updateOne
+
+Update a single document.
+
+```http
+POST /api/:tenant_id/:collection/updateOne
+Content-Type: application/json
+
+{
+  "id": "64f1a2b3c4d5e6f7a8b9c0d1",
+  "update": {
+    "$set": { "name": "Jane Doe" }
+  }
+}
+```
+
+**Body parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | `string` | Yes | Document `_id` (alias: `_id`) |
+| `update` | `object` | Yes | Update document with operators (`$set`, `$unset`, ...) |
+
+### updateMany
+
+Update multiple documents.
+
+```http
+POST /api/:tenant_id/:collection/updateMany
+Content-Type: application/json
+
+{
+  "ids": ["64f1...", "64f2..."],
+  "update": {
+    "$set": { "status": "archived" }
+  }
+}
+```
+
+**Body parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `ids` | `string[]` | Yes | Document `_id`s (alias: `_ids`) |
+| `update` | `object` | Yes | Update document with operators (`$set`, `$unset`, ...) |
+
+### deleteOne
+
+Delete a single document.
+
+```http
+POST /api/:tenant_id/:collection/deleteOne
+Content-Type: application/json
+
+{
+  "id": "64f1a2b3c4d5e6f7a8b9c0d1"
+}
+```
+
+**Body parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | `string` | Yes | Document `_id` (alias: `_id`) |
+
+### deleteMany
+
+Delete multiple documents.
+
+```http
+POST /api/:tenant_id/:collection/deleteMany
+Content-Type: application/json
+
+{
+  "ids": ["64f1...", "64f2..."]
+}
+```
+
+**Body parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `ids` | `string[]` | Yes | Document `_id`s (alias: `_ids`) |
+
+### aggregate
+
+Run an aggregation pipeline.
+
+```http
+POST /api/:tenant_id/:collection/aggregate
+Content-Type: application/json
+
+{
+  "pipeline": [
+    { "$match": { "status": "active" } },
+    { "$group": { "_id": "$category", "total": { "$sum": 1 } } }
+  ]
+}
+```
+
+**Body parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pipeline` | `object[]` | Yes | MongoDB aggregation pipeline stages |
+
+---
+
+## Update Operators
+
+| Operator | Description |
+|---------|-------------|
+| `$set` | Set field values |
+| `$unset` | Remove fields |
+| `$inc` | Increment value |
+| `$mul` | Multiply value |
+| `$push` | Add to array |
+| `$pull` | Remove from array |
+| `$addToSet` | Add to set (unique) |

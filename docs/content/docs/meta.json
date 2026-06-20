@@ -1,0 +1,12 @@
+{
+  "title": "Anteros Documentation",
+  "root": true,
+  "pages": [
+    "index",
+    "getting-started",
+    "reference",
+    "query-language",
+    "manage-data",
+    "packages"
+  ]
+}

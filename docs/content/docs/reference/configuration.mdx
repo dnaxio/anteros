@@ -1,0 +1,275 @@
+---
+title: Configuration
+description: How to configure anteros Framework backend.
+icon: Settings
+---
+
+
+The anteros Framework backend is configured using the `define.Server()` function. This page covers all configuration options.
+
+## Basic Configuration
+
+```typescript
+import { define, app } from '@anteros/core';
+
+const config = define.Server({
+  server: {
+    name: 'My API',
+    port: 4000,
+  },
+  tenants: [
+    {
+      id: 'v1',
+      dir: 'v1',
+      database: {
+        uri: 'mongodb://localhost:27017/mydb'
+      }
+    }
+  ]
+});
+
+await app.boot(config);
+```
+
+## Server Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `server.name` | `string` | `'SERVER'` | Server name displayed in console |
+| `server.port` | `number` | `4000` | Port number |
+| `server.cors` | `object` | - | CORS configuration |
+| `server.jwt` | `object` | - | JWT configuration |
+| `server.ipRestriction` | `object` | - | IP restriction rules |
+| `server.body.maxSize` | `number` | `104857600` (100MB) | Maximum request body size in bytes |
+| `clusterMode` | `boolean` | `true` | Enable cluster mode |
+
+## CORS Configuration
+
+```typescript
+const config = define.Server({
+  server: {
+    port: 4000,
+    cors: {
+      origin: '*', // or ['https://example.com']
+      credentials: true,
+      allowHeaders: ['Content-Type', 'Authorization'],
+      allowMethods: ['GET', 'POST', 'PUT', 'DELETE'],
+    }
+  }
+});
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `origin` | `string \| string[] \| function` | Allowed origins |
+| `credentials` | `boolean` | Allow credentials |
+| `allowHeaders` | `string[]` | Allowed headers |
+| `allowMethods` | `string[]` | Allowed methods |
+
+## JWT Configuration
+
+```typescript
+const config = define.Server({
+  server: {
+    port: 4000,
+    jwt: {
+      secret: 'your-secret-key',
+      expiresIn: '7d',
+    }
+  }
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `jwt.secret` | `string` | - | JWT signing secret |
+| `jwt.expiresIn` | `string` | `'7d'` | Token expiration |
+
+## Body Size
+
+Control the maximum request body size accepted by the server. Uses [Hono Body Limit Middleware](https://hono.dev/docs/middleware/builtin/body-limit) under the hood.
+
+```typescript
+const config = define.Server({
+  server: {
+    port: 4000,
+    body: {
+      maxSize: 1024 * 1024 * 50, // 50MB
+    },
+  },
+  tenants: [...],
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `body.maxSize` | `number` | `104857600` (100MB) | Maximum request body size in bytes |
+
+## IP Restriction
+
+Block or allow requests based on client IP address. Uses [Hono IP Restriction Middleware](https://hono.dev/docs/middleware/builtin/ip-restriction) under the hood.
+
+```typescript
+const config = define.Server({
+  server: {
+    port: 4000,
+    ipRestriction: {
+      denyList: ['10.0.0.0/8', '192.168.0.50'],
+      allowList: ['127.0.0.1', '::1', '203.0.113.0/24'],
+    },
+  },
+  tenants: [...],
+});
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `denyList` | `IPRestrictionRule[]` | IPs or ranges to block |
+| `allowList` | `IPRestrictionRule[]` | IPs or ranges to allow |
+
+<Callout type="warn">
+`denyList` takes precedence over `allowList`. If an IP matches both lists, it is blocked.
+</Callout>
+
+### Rule Syntax
+
+Rules accept static IPs, CIDR notation, or a wildcard:
+
+| Format | IPv4 example | IPv6 example |
+|--------|-------------|-------------|
+| Static IP | `192.168.2.0` | `::1` |
+| CIDR | `192.168.2.0/24` | `::1/10` |
+| Wildcard | `*` | `*` |
+
+### Block a Subnet
+
+```typescript
+ipRestriction: {
+  denyList: ['10.0.0.0/8'],
+}
+```
+
+### Allow Only Private Network
+
+```typescript
+ipRestriction: {
+  denyList: ['*'],
+  allowList: ['192.168.1.0/24', '127.0.0.1', '::1'],
+}
+```
+
+### Allow Only Specific IPs
+
+```typescript
+ipRestriction: {
+  denyList: ['*'],
+  allowList: ['203.0.113.10', '203.0.113.20'],
+}
+```
+
+## Rate Limiting
+
+Protect your API against brute-force attacks and excessive usage with configurable rate limiting. Uses the built-in middleware from `@anteros/core`.
+
+```typescript
+const config = define.Server({
+  server: {
+    port: 4000,
+    rateLimit: {
+      enabled: true,
+      windowMs: 60_000,      // 1 minute window
+      max: 100,               // 100 requests per window
+      login: {
+        windowMs: 60_000,
+        max: 10,              // 10 login attempts per minute
+      },
+    },
+  },
+  tenants: [...]
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `rateLimit.enabled` | `boolean` | `true` | Enable or disable rate limiting globally |
+| `rateLimit.windowMs` | `number` | `60000` (1 min) | Time window in milliseconds |
+| `rateLimit.max` | `number` | `100` | Maximum requests per window across all routes |
+| `rateLimit.login.windowMs` | `number` | `60000` (1 min) | Time window for login endpoints |
+| `rateLimit.login.max` | `number` | `10` | Maximum login attempts per window |
+
+<Callout type="info">
+Rate limiting uses an in-memory store by default. For production deployments with multiple server instances, configure a [Redis store](/docs/reference/caches) to share rate limit counters across processes.
+</Callout>
+
+### Login Endpoint Protection
+
+The login endpoint (`/api/:tenant_id/:collection/login`) has a **stricter limit** by default (10 requests/minute). This helps prevent credential brute-force attacks.
+
+### Disable Rate Limiting
+
+```typescript
+rateLimit: {
+  enabled: false,
+}
+```
+
+When disabled, no rate limit headers are applied and all requests pass through unrestricted.
+
+## Tenants Configuration
+
+See **[Tenant](/docs/reference/tenants)** for a focused reference on `dir`, URLs, and layout.
+
+Each tenant represents an isolated database and a **code root** on disk. The field **`dir`** is **required**: it is the path (relative to the process working directory, usually the project root) where anteros looks for **`{dir}/collections`**, **`{dir}/routes`**, and **`{dir}/scripts`**.
+
+```typescript
+const config = define.Server({
+  server: { port: 4000 },
+  tenants: [
+    {
+      id: 'v1',
+      dir: 'v1',
+      name: 'v1',
+      database: {
+        uri: 'mongodb://localhost:27017/v1_db',
+        options: { maxPoolSize: 10 }
+      }
+    },
+    {
+      id: 'tenant2',
+      dir: 'tenants/tenant2',
+      name: 'Second Tenant',
+      database: {
+        uri: 'mongodb://localhost:27017/tenant2_db',
+      }
+    }
+  ]
+});
+```
+
+| Option | Type | Required | Description |
+|--------|------|----------|-------------|
+| `id` | `string` | Yes | Unique tenant identifier (used in `/api/:tenant_id/...`) |
+| `dir` | `string` | **Yes** | Relative path to the tenant folder (`collections`, `routes`, `scripts`) |
+| `name` | `string` | No | Tenant display name |
+| `routes.prefix` | `string` | No | URL prefix for custom routes; required to load `routes/**/*.route.ts` |
+| `database.uri` | `string` | Yes | MongoDB connection URI |
+| `database.options` | `object` | No | MongoDB client options |
+
+<Callout type="info">
+La connexion MongoDB est automatiquement injectée par `syncTenants` au démarrage. Voir [Tenant](/docs/reference/tenants) pour les détails.
+</Callout>
+
+
+## Cluster Mode
+
+By default, cluster mode is enabled, allowing the server to use multiple processes:
+
+```typescript
+const config = define.Server({
+  clusterMode: true, // default
+  server: { port: 4000 },
+  tenants: [...]
+});
+```
+
+When enabled, you can run multiple server instances on the same port using `Bun.serve({ reusePort: true })`.

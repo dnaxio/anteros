@@ -1,0 +1,6 @@
+{
+  "title": "Packages",
+  "icon": "Package",
+  "root": false,
+  "pages": ["utils", "sdk"]
+}

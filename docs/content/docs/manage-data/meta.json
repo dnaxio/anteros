@@ -1,0 +1,6 @@
+{
+  "title": "Manage Data",
+  "icon": "Code",
+  "root": false,
+  "pages": ["internal-api", "rest-api"]
+}

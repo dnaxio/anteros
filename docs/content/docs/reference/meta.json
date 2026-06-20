@@ -1,0 +1,27 @@
+{
+  "title": "Reference",
+  "icon": "BookOpen",
+  "root": false,
+  "pages": [
+    "configuration",
+    "tenants",
+    "collections",
+    "fields",
+    "hooks",
+    "authentication",
+    "access-control",
+    "custom-actions",
+    "files",
+    "services",
+    "websockets",
+    "middlewares",
+    "workflows",
+    "routes",
+    "scripts",
+    "caches",
+    "audit",
+    "utils",
+    "error-handling",
+    "crypto"
+  ]
+}

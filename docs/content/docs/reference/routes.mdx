@@ -1,0 +1,277 @@
+---
+title: Routes
+description: Custom HTTP routes in anteros Framework.
+icon: Route
+---
+
+
+Routes let you define custom HTTP endpoints outside of the collection API. They are useful for webhooks, health checks, public pages, or any logic that doesn't belong to a specific collection.
+
+## How It Works
+
+anteros discovers all files matching `**/*.route.ts` inside the `routes/` directory of each tenant. Each file exports a route created with `define.Route()`. Routes are loaded at boot time — after collections are synced — and registered on the Hono app with the tenant's prefix.
+
+## Directory Structure
+
+Place your route files inside `{tenant.dir}/routes/`:
+
+```
+v1/
+├── collections/
+│   └── users.model.ts
+├── scripts/
+│   └── seed.run.ts
+└── routes/
+    ├── health.route.ts
+    ├── webhook.route.ts
+    └── public/
+        └── status.route.ts
+```
+
+<Callout type="info">
+Files are discovered recursively — you can organize routes in subdirectories.
+</Callout>
+
+## Enable Routes
+
+Routes require a `prefix` on the tenant configuration. Without it, the `routes/` directory is ignored.
+
+```typescript
+import { app } from '@anteros/core';
+
+app.boot({
+  server: { port: 5000 },
+  tenants: [
+    {
+      id: 'v1',
+      dir: 'v1',
+      routes: {
+        prefix: '/v1',
+      },
+      database: {
+        uri: 'mongodb://localhost:27017/mydb',
+      },
+    },
+  ],
+});
+```
+
+The final URL for each route is **`prefix + path`**. With the config above, a route with `path: '/health'` is accessible at `/v1/health`.
+
+## Define a Route
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Route({
+  enabled: true,
+  method: 'GET',
+  path: '/health',
+  handler: ({ c }) => {
+    return c.json({ status: 'ok' });
+  },
+});
+```
+
+The file **must** use `export default` and end with `.route.ts`.
+
+## Route Options
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `enabled` | `boolean` | `true` | Whether this route is active |
+| `method` | `'GET' \| 'POST'` | — | HTTP method |
+| `path` | `string` | — | Route path (appended to the tenant prefix) |
+| `handler` | `(ctx) => Response` | — | Request handler |
+
+## Enable / Disable
+
+Toggle `enabled` to control whether a route is registered at boot:
+
+```typescript
+export default define.Route({
+  enabled: false, // This route will be skipped
+  method: 'GET',
+  path: '/debug',
+  handler: ({ c }) => {
+    return c.json({ debug: true });
+  },
+});
+```
+
+Only routes with `enabled: true` (the default) are loaded.
+
+## Route Context
+
+The `handler` function receives:
+
+```typescript
+{
+  c: Context;     // Hono request context
+  rest: useRest;  // Rest instance scoped to the tenant
+  jwt: jwt;       // JWT sign & verify helpers
+  io: Server;     // Socket.IO server instance
+}
+```
+
+### `c` — Hono Context
+
+Full access to the request and response via the [Hono Context API](https://hono.dev/docs/api/context):
+
+```typescript
+handler: async ({ c }) => {
+  const body = await c.req.json();
+  const userAgent = c.req.header('User-Agent');
+  return c.json({ received: body });
+}
+```
+
+### `rest` — Database Access
+
+A `useRest` instance scoped to the owning tenant:
+
+```typescript
+handler: async ({ c, rest }) => {
+  const users = await rest.find('users', {
+    $match: { activated: true },
+  });
+  return c.json(users);
+}
+```
+
+### `jwt` — Authentication
+
+Sign and verify JWT tokens:
+
+```typescript
+handler: async ({ c, jwt }) => {
+  const token = c.req.header('Authorization')?.replace('Bearer ', '');
+  const { value, error } = await jwt.verify(token);
+  if (error) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+  return c.json({ user: value });
+}
+```
+
+### `io` — Socket.IO
+
+Emit real-time events from a route:
+
+```typescript
+handler: async ({ c, rest, io }) => {
+  const order = await c.req.json();
+  await rest.insertOne('orders', order);
+  io.emit('new-order', order);
+  return c.json({ success: true });
+}
+```
+
+## Examples
+
+### Health Check
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Route({
+  enabled: true,
+  method: 'GET',
+  path: '/health',
+  handler: ({ c }) => {
+    return c.json({ status: 'ok', uptime: process.uptime() });
+  },
+});
+```
+
+### Webhook Receiver
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Route({
+  enabled: true,
+  method: 'POST',
+  path: '/webhooks/stripe',
+  handler: async ({ c, rest }) => {
+    const event = await c.req.json();
+
+    if (event.type === 'payment_intent.succeeded') {
+      await rest.updateOne('orders', event.data.object.metadata.orderId, {
+        $set: { status: 'paid' },
+      });
+    }
+
+    return c.json({ received: true });
+  },
+});
+```
+
+### Protected Route
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Route({
+  enabled: true,
+  method: 'GET',
+  path: '/me',
+  handler: async ({ c, jwt, rest }) => {
+    const token = c.req.header('Authorization')?.replace('Bearer ', '');
+    if (!token) {
+      return c.json({ error: 'Missing token' }, 401);
+    }
+
+    const { value, error } = await jwt.verify(token);
+    if (error) {
+      return c.json({ error: 'Invalid token' }, 401);
+    }
+
+    const user = await rest.findOne('users', value.sub);
+    return c.json(user);
+  },
+});
+```
+
+## Multi-Tenant
+
+Each tenant has its own `routes/` directory and its own prefix. Routes are scoped to their tenant — the `rest` instance targets the correct database automatically.
+
+```typescript
+tenants: [
+  {
+    id: 'v1',
+    dir: 'v1',
+    routes: { prefix: '/v1' },
+    database: { uri: 'mongodb://localhost:27017/app_v1' },
+  },
+  {
+    id: 'v2',
+    dir: 'v2',
+    routes: { prefix: '/v2' },
+    database: { uri: 'mongodb://localhost:27017/app_v2' },
+  },
+]
+```
+
+```
+v1/
+└── routes/
+    └── health.route.ts    → GET /v1/health
+
+v2/
+└── routes/
+    └── health.route.ts    → GET /v2/health
+```
+
+## Summary
+
+| Property | Description |
+|----------|-------------|
+| `enabled` | `boolean` — whether the route is registered (default `true`) |
+| `method` | `GET` or `POST` |
+| `path` | Route path, prefixed by the tenant's `routes.prefix` |
+| `handler` | Receives `c` (Hono), `rest`, `jwt`, `io` |
+| File pattern | `**/*.route.ts` inside `{tenant.dir}/routes/` |
+| Requirement | `routes.prefix` must be set on the tenant config |
+| Timing | Loaded at boot, after collections are synced |

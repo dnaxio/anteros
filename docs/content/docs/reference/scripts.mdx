@@ -1,0 +1,184 @@
+---
+title: Scripts
+description: Automatic startup scripts in anteros Framework.
+icon: Terminal
+---
+
+
+Scripts allow you to run logic automatically when the server starts. They are useful for seeding data, running migrations, scheduling tasks, or performing any initialization work after boot.
+
+## How It Works
+
+When the server boots, anteros automatically discovers and executes all script files matching the `**/*.run.ts` glob pattern inside the `scripts/` directory of each tenant.
+
+Scripts run **~500ms after the server is ready**, ensuring all tenants and collections are fully synced before execution.
+
+## Directory Structure
+
+Place your script files inside `{tenant.dir}/scripts/`:
+
+```
+v1/
+├── collections/
+│   └── users.model.ts
+└── scripts/
+    ├── seed.run.ts
+    ├── migrate.run.ts
+    └── reports/
+        └── daily.run.ts
+```
+
+<Callout type="info">
+All files matching `**/*.run.ts` inside the `scripts/` folder are discovered recursively, so you can organize them in subdirectories.
+</Callout>
+
+## Define a Script
+
+Use `define.Script()` to create a script:
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Script({
+  enabled: true,
+  exec: async ({ rest }) => {
+    console.log('Script is running!');
+  },
+});
+```
+
+The file **must** use `export default` and end with `.run.ts`.
+
+## Script Context
+
+The `exec` function receives an object with:
+
+```typescript
+{
+  rest: useRest;  // Rest instance scoped to the tenant
+}
+```
+
+The `rest` instance is automatically configured for the tenant that owns the script, so you can immediately perform database operations.
+
+## Enable / Disable
+
+Toggle the `enabled` property to control whether a script runs at startup:
+
+```typescript
+export default define.Script({
+  enabled: false, // This script will be skipped
+  exec: async ({ rest }) => {
+    // ...
+  },
+});
+```
+
+Only scripts with `enabled: true` are executed.
+
+## Examples
+
+### Seed Default Data
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Script({
+  enabled: true,
+  exec: async ({ rest }) => {
+    const admin = await rest.findOne('users', undefined, {
+      $match: { email: 'admin@example.com' },
+    });
+
+    if (!admin) {
+      await rest.insertOne('users', {
+        name: 'Admin',
+        email: 'admin@example.com',
+        password: 'changeme',
+        activated: true,
+      });
+      console.log('Default admin created');
+    }
+  },
+});
+```
+
+### Run a Migration
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Script({
+  enabled: true,
+  exec: async ({ rest }) => {
+    const users = await rest.find('users', {
+      $match: { role: { $exists: false } },
+    });
+
+    if (users.length > 0) {
+      const ids = users.map((u: any) => u._id);
+      await rest.updateMany('users', ids, {
+        $set: { role: 'member' },
+      });
+      console.log(`Migrated ${ids.length} users with default role`);
+    }
+  },
+});
+```
+
+### Periodic Cleanup
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Script({
+  enabled: true,
+  exec: async ({ rest }) => {
+    setInterval(async () => {
+      const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const expired = await rest.find('sessions', {
+        $match: { createdAt: { $lt: cutoff } },
+      });
+
+      if (expired.length > 0) {
+        const ids = expired.map((s: any) => s._id);
+        await rest.deleteMany('sessions', ids);
+        console.log(`Cleaned up ${ids.length} expired sessions`);
+      }
+    }, 60 * 60 * 1000); // every hour
+  },
+});
+```
+
+## Multi-Tenant
+
+In a multi-tenant setup, scripts are scoped per tenant. If you have multiple tenants, each tenant's `scripts/` directory is scanned independently:
+
+```typescript
+app.boot({
+  tenants: [
+    { id: 'v1', dir: 'v1', database: { uri: '...' } },
+    { id: 'v2', dir: 'v2', database: { uri: '...' } },
+  ],
+});
+```
+
+```
+v1/
+└── scripts/
+    └── seed.run.ts       ← runs with rest scoped to tenant "v1"
+
+v2/
+└── scripts/
+    └── seed.run.ts       ← runs with rest scoped to tenant "v2"
+```
+
+## Summary
+
+| Property | Description |
+|----------|-------------|
+| `enabled` | `boolean` — whether the script runs at startup |
+| `exec` | `(ctx) => void` — the function to execute |
+| `ctx.rest` | `useRest` — database client scoped to the owning tenant |
+| File pattern | `**/*.run.ts` inside `{tenant.dir}/scripts/` |
+| Timing | Runs ~500ms after server boot |

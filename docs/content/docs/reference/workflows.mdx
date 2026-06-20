@@ -1,0 +1,262 @@
+---
+title: Workflows
+description: Workflows — sequential step execution with compensation, versioning, and progress tracking.
+icon: Workflow
+---
+
+## Workflows
+
+Workflows allow you to execute a sequence of steps (`steps`) in an orchestrated manner, with progress tracking, database persistence, compensation on failure, and the ability to resume after failure.
+
+Definitions are loaded from `workflows/**/*.workflow.ts` in each tenant.
+
+## Definition
+
+```typescript
+// tenants/v1/workflows/order.workflow.ts
+import { define } from '@anteros/core'
+
+export default define.Workflow<{ amount: number; email: string }>({
+  id: 'process-order',
+  name: 'Process Order',
+  description: 'Process a customer order',
+  version: 1,
+
+  // Context fields with automatic MongoDB indexes
+  context: {
+    source: { type: 'string', index: true },
+    total: { type: 'number', index: -1 },
+  },
+
+  steps: [
+    {
+      id: 'verify',
+      name: 'Verification',
+      exec: async ({ data, prevOutput, rest }) => {
+        const user = await rest.mongo.findOne('users', data.userId)
+        if (!user) throw new Error('User not found')
+        return { verified: true }
+      }
+    },
+    {
+      id: 'charge',
+      name: 'Charge customer',
+      exec: async ({ data, prevOutput, rest, error }) => {
+        if (data.amount <= 0) {
+          throw error('Invalid amount', { code: 'INVALID_AMOUNT' })
+        }
+        return { charged: true, transactionId: 'tx_123' }
+      }
+    },
+    {
+      id: 'notify',
+      name: 'Send notification',
+      exec: async ({ data, prevOutput }) => {
+        // prevOutput = { charged: true, transactionId: 'tx_123' } (from 'charge' step)
+        return { notified: true }
+      }
+    }
+  ],
+
+  // Compensation: executed in reverse order when a step fails
+  compensations: [
+    {
+      id: 'refund',
+      name: 'Refund customer',
+      depend: ['charge'],
+      exec: async ({ data }) => {
+        // Refund logic
+      }
+    }
+  ]
+})
+```
+
+### Configuration options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `id` | `string` | — | Unique workflow identifier (required) |
+| `name` | `string` | — | Workflow name (required) |
+| `description` | `string` | — | Description |
+| `version` | `number` | — | Workflow version (stored in each run) |
+| `context` | `WorkflowContextFields` | — | Context field definitions with auto-indexing |
+| `exec` | `function` | — | Global handler executed before all steps |
+| `steps` | `WorkflowStep[]` | — | List of steps to execute |
+| `compensations` | `WorkflowStep[]` | — | Compensation handlers (reverse order on failure) |
+
+### Context fields
+
+Define context fields to store metadata about each run and create MongoDB indexes automatically:
+
+```typescript
+context: {
+  source: { type: 'string', index: true },   // index asc on context.source
+  total: { type: 'number', index: -1 },      // index desc on context.total
+  date: { type: 'date', index: true },       // index asc on context.date
+}
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `type` | `'string'` \| `'number'` \| `'date'` | Field type |
+| `index` | `boolean` \| `1` \| `-1` | Create MongoDB index (true/1 = asc, -1 = desc) |
+
+### Step options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `id` | `string` | — | Unique step identifier (required) |
+| `name` | `string` | — | Step name |
+| `description` | `string` | — | Description |
+| `exec` | `function` | — | Step handler (required) |
+| `condition` | `function` | — | Condition to execute or skip this step |
+| `compensate` | `function` | — | Individual compensation handler for this step |
+| `depend` | `string[]` | — | Step IDs this compensation targets |
+
+### Handler context
+
+Each step `exec` receives:
+
+```typescript
+{
+  data: TData,        // Business data passed to run() (typed via generic)
+  prevOutput: any,    // Output of the previous step (null for first step)
+  input?: any,        // Input defined on the step
+  rest: Workflow,     // Workflow instance
+  error: fn,          // Throw structured errors
+  jwt: jwt,           // JWT utilities
+}
+```
+
+## Execution
+
+### Run a workflow
+
+```typescript
+const run = await rest.mongo.workflow.run('process-order',
+  { amount: 50, email: 'test@test.com', userId: '123' },   // data
+  { source: 'web', total: 50 }                               // context (optional)
+)
+```
+
+If the workflow completes successfully, `run` contains the full result. If it fails, the error is thrown.
+
+### Pause a workflow
+
+```typescript
+await rest.mongo.workflow.pause(runId)
+// Sets status to 'paused' (reversible)
+```
+
+### Resume a workflow
+
+```typescript
+const resumed = await rest.mongo.workflow.resume(runId)
+// Resumes from the last non-completed step
+```
+
+### Resume all workflows
+
+```typescript
+const result = await rest.mongo.workflow.resumeAll()
+// { resumed: 3, failed: 1 }
+```
+
+### Cancel a workflow
+
+```typescript
+await rest.mongo.workflow.cancel(runId)
+// Sets status to 'cancelled' (irreversible)
+```
+
+### Track progress
+
+```typescript
+const p = await rest.mongo.workflow.getProgress(runId)
+// {
+//   progress: 66,         // 0-100
+//   status: 'running',    // pending | running | completed | failed | paused | cancelled | skipped
+//   currentStep: 1,
+//   totalSteps: 3,
+//   totalExecuted: 1,
+//   totalSkipped: 0
+// }
+```
+
+### List runs
+
+```typescript
+const runs = await rest.mongo.workflow.listRuns('process-order')
+```
+
+### Query _workflows_ collection
+
+```typescript
+const all = await rest.workflows({ $match: { 'context.source': 'web' } })
+```
+
+## Run lifecycle
+
+```
+pending → running → [step 0 → step 1 → ... → step N] → completed
+                         ↓ (failure)
+                   compensations (reverse order) → failed
+                         ↓
+                      paused → resume() → running → ...
+                      cancelled (irreversible)
+```
+
+## Compensation
+
+When a step fails, compensation handlers are executed **in reverse order** for all previously completed steps. This allows undoing partial work (Saga pattern).
+
+```typescript
+compensations: [
+  {
+    id: 'refund',
+    depend: ['charge'],        // Only runs if 'charge' step completed
+    exec: async ({ data }) => {
+      // Refund the customer
+    }
+  }
+]
+```
+
+Each compensation step can target specific workflow steps via `depend`. If `depend` is not set, it matches by `id` (backward compatible).
+
+## Storage
+
+Each workflow run is stored in the `_workflows_` collection:
+
+```json
+{
+  "_id": "uuid-...",
+  "workflowId": "process-order",
+  "workflowVersion": 1,
+  "tenant_id": "v1",
+  "status": "completed",
+  "progress": 100,
+  "data": { "amount": 50, "email": "test@test.com" },
+  "context": { "source": "web", "total": 50 },
+  "currentStep": 2,
+  "totalExecuted": 3,
+  "totalSkipped": 0,
+  "steps": [
+    { "stepId": "verify", "name": "Verification",  "status": "completed", "output": { "verified": true },  "startedAt": "...", "completedAt": "..." },
+    { "stepId": "charge", "name": "Charge customer", "status": "completed", "output": { "charged": true }, "startedAt": "...", "completedAt": "..." },
+    { "stepId": "notify", "name": "Notification",    "status": "completed", "output": { "notified": true }, "startedAt": "...", "completedAt": "..." }
+  ],
+  "compensations": [],
+  "error": null,
+  "createdAt": "...",
+  "updatedAt": "...",
+  "completedAt": "..."
+}
+```
+
+## See also
+
+- [Services](/docs/reference/services) — isolated business actions
+- [Custom Actions](/docs/reference/custom-actions) — collection actions
+- [Scripts](/docs/reference/scripts) — startup scripts

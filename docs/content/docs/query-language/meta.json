@@ -1,0 +1,11 @@
+{
+  "title": "Query Language",
+  "icon": "Filter",
+  "root": false,
+  "pages": [
+    "query-predicates",
+    "expressions",
+    "accumulator",
+    "aggregate-stages"
+  ]
+}

@@ -1,0 +1,423 @@
+---
+title: Fields
+description: Field types and options for collection schemas in anteros Framework.
+icon: Columns3
+---
+
+
+Fields define the shape and validation rules of each document in a collection. Every field has a `name` and a `type`, plus optional configuration that controls validation, indexing, default values, and more.
+
+## Basic Usage
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Collection({
+  slug: 'users',
+  fields: [
+    { name: 'name', type: 'string', required: true },
+    { name: 'email', type: 'email', required: true, unique: true },
+    { name: 'age', type: 'integer' },
+    { name: 'isActive', type: 'boolean', defaultValue: true },
+  ],
+});
+```
+
+## Field Types
+
+| Type | Validation | Description |
+|------|------------|-------------|
+| `string` | `Joi.string()` | Plain text value |
+| `number` | `Joi.number()` | Floating-point number |
+| `integer` | `Joi.number().integer()` | Integer number |
+| `boolean` | `Joi.boolean()` | `true` or `false` |
+| `email` | `Joi.string().email()` | Valid email address |
+| `password` | `Joi.string()` | Automatically hashed with Bun on insert and update |
+| `uuid` | `Joi.string().uuid()` | UUID string |
+| `url` | `Joi.string().uri()` | Valid URL |
+| `date` | `Joi.date()` | Date value |
+| `datetime-local` | `Joi.date()` | DateTime value |
+| `enum` | `Joi.string().valid(...)` | Value from a predefined list |
+| `array` | `Joi.array()` | Array of values |
+| `json` | `Joi.object()` | Arbitrary JSON object |
+| `random` | `Joi.string()` or `Joi.number()` | Auto-generated value on insert |
+| `relationship` | `Joi.string()` (ObjectId) | Reference to another collection |
+| `ipv4` | `Joi.string().ip({ version: 'ipv4' })` | IPv4 address |
+| `ipv6` | `Joi.string().ip({ version: 'ipv6' })` | IPv6 address |
+| `geojson.Point` | — | GeoJSON Point |
+| `geojson.LineString` | — | GeoJSON LineString |
+| `geojson.Polygon` | — | GeoJSON Polygon |
+
+## Field Options
+
+```typescript
+{
+  name: string;
+  type: FieldType;
+  description?: string;
+  required?: boolean;
+  unique?: boolean;
+  nullable?: boolean;
+  defaultValue?: any;
+  validate?: {
+    schema: Joi.Schema;
+  };
+  index?: boolean;
+  indexType?: 'text' | 'hashed' | '2dsphere' | '2d';
+  indexOptions?: {
+    expireAfterSeconds?: number;
+    sparse?: boolean;
+    unique?: boolean;
+  };
+  enumOptions?: { ... };
+  relation?: { ... };
+  randomOptions?: { ... };
+}
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `name` | `string` | Field name (required) |
+| `type` | `FieldType` | Field type (required) |
+| `description` | `string` | Human-readable description |
+| `required` | `boolean` | Reject the document if this field is missing |
+| `unique` | `boolean` | Create a unique MongoDB index |
+| `nullable` | `boolean` | Allow `null` as a value |
+| `defaultValue` | `any` | Value applied automatically on insert when absent |
+| `validate` | `{ schema: Joi.Schema }` | Custom Joi validation schema (overrides the default) |
+| `index` | `boolean` | Create a MongoDB index on this field |
+| `indexType` | `string` | Index type: `text`, `hashed`, `2dsphere`, or `2d` |
+| `indexOptions` | `object` | Additional MongoDB index options |
+
+## Custom Validation
+
+Each field gets a default Joi schema based on its `type`. To override it with your own rules, use the `validate` option. Import `v` from `@anteros/core@0.0.1` — it is a Joi instance.
+
+```typescript
+import { define, v } from '@anteros/core';
+
+export default define.Collection({
+  slug: 'users',
+  fields: [
+    {
+      name: 'age',
+      type: 'number',
+      validate: {
+        schema: v.number().min(0).max(120),
+      },
+    },
+  ],
+});
+```
+
+When `validate.schema` is provided, it **replaces** the auto-generated schema for that field. The `required` option still applies on top of it.
+
+### Examples
+
+String with length constraints:
+
+```typescript
+{
+  name: 'username',
+  type: 'string',
+  required: true,
+  validate: {
+    schema: v.string().alphanum().min(3).max(30),
+  },
+}
+```
+
+Email restricted to a domain:
+
+```typescript
+{
+  name: 'email',
+  type: 'email',
+  validate: {
+    schema: v.string().email().pattern(/@acme\.com$/),
+  },
+}
+```
+
+Number within a range:
+
+```typescript
+{
+  name: 'rating',
+  type: 'number',
+  validate: {
+    schema: v.number().min(1).max(5),
+  },
+}
+```
+
+Array with item validation:
+
+```typescript
+{
+  name: 'scores',
+  type: 'array',
+  validate: {
+    schema: v.array().items(v.number().min(0).max(100)).max(10),
+  },
+}
+```
+
+JSON object with specific shape:
+
+```typescript
+{
+  name: 'address',
+  type: 'json',
+  validate: {
+    schema: v.object({
+      street: v.string().required(),
+      city: v.string().required(),
+      zip: v.string().pattern(/^\d{5}$/).required(),
+    }),
+  },
+}
+```
+
+<Callout type="idea">
+`v` is a full [Joi](https://joi.dev/api/) instance. Any Joi method (`v.string()`, `v.number()`, `v.object()`, `v.array()`, `v.alternatives()`, etc.) is available.
+</Callout>
+
+## Password
+
+Fields with `type: 'password'` are automatically hashed using `Bun.password.hashSync()` on every **insert** and **update** operation. You never store or receive a plain-text password.
+
+```typescript
+{ name: 'password', type: 'password', required: true }
+```
+
+<Callout type="idea">
+Combine with `privateFields` in the collection API config to hide the hash from REST responses.
+</Callout>
+
+```typescript
+api: {
+  privateFields: [/password/],
+}
+```
+
+## Enum
+
+Use `enumOptions` to restrict a field to a set of allowed values.
+
+### Single value
+
+```typescript
+{
+  name: 'role',
+  type: 'enum',
+  enumOptions: {
+    items: ['admin', 'editor', 'viewer'],
+  },
+}
+```
+
+### Multiple values
+
+When `multiple` is `true`, the field accepts an **array** of values from the list.
+
+```typescript
+{
+  name: 'tags',
+  type: 'enum',
+  enumOptions: {
+    multiple: true,
+    items: ['javascript', 'typescript', 'rust', 'go'],
+  },
+}
+```
+
+## Relationship
+
+Reference documents from another collection. On query, use `$include` to populate the related data with a `$lookup`.
+
+### One-to-one
+
+```typescript
+{
+  name: 'author',
+  type: 'relationship',
+  relation: {
+    to: 'users',
+  },
+}
+```
+
+### One-to-many
+
+```typescript
+{
+  name: 'contributors',
+  type: 'relationship',
+  relation: {
+    to: 'users',
+    hasMany: true,
+  },
+}
+```
+
+### Custom pipeline
+
+Attach an aggregation pipeline to the `$lookup` stage:
+
+```typescript
+{
+  name: 'author',
+  type: 'relationship',
+  relation: {
+    to: 'users',
+    pipeline: [
+      { $project: { name: 1, email: 1 } },
+    ],
+  },
+}
+```
+
+<Callout type="info">
+When inserting or updating, you can pass either a full object with `_id` or just the ObjectId string — anteros extracts the id automatically.
+</Callout>
+
+## Random
+
+Auto-generate a unique value on **insert only**. The value is not regenerated on update.
+
+```typescript
+{
+  name: 'code',
+  type: 'random',
+  randomOptions: {
+    length: 10,
+    startWith: 'BL-',
+  },
+}
+```
+
+### Random Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `length` | `number` | — | Number of random characters to generate (required) |
+| `useLetters` | `boolean` | `false` | Include letters (`a-zA-Z`) |
+| `useNumbers` | `boolean` | `true` | Include digits (`0-9`) |
+| `includeSymbols` | `string` | `''` | Extra characters to include in the charset |
+| `excludeSymbols` | `string` | `''` | Characters to exclude from the charset |
+| `startWith` | `string` | `''` | Prefix prepended to the generated value |
+| `endWith` | `string` | `''` | Suffix appended to the generated value |
+| `toLowerCase` | `boolean` | `false` | Convert to lowercase |
+| `toUpperCase` | `boolean` | `false` | Convert to uppercase |
+| `toNumber` | `boolean` | `false` | Parse the result as an integer |
+
+<Callout type="info">
+When `unique` is set or `randomOptions` is defined, anteros automatically checks the database for duplicates and regenerates until a unique value is found.
+</Callout>
+
+### Examples
+
+Numeric order code:
+
+```typescript
+{
+  name: 'orderNumber',
+  type: 'random',
+  randomOptions: {
+    length: 8,
+    useNumbers: true,
+    startWith: 'ORD-',
+  },
+}
+```
+
+Alphanumeric token:
+
+```typescript
+{
+  name: 'inviteCode',
+  type: 'random',
+  randomOptions: {
+    length: 12,
+    useLetters: true,
+    useNumbers: true,
+    toUpperCase: true,
+  },
+}
+```
+
+## Indexing
+
+Control MongoDB indexes directly from the field definition.
+
+```typescript
+{ name: 'email', type: 'email', unique: true }
+```
+
+Setting `unique: true` automatically creates a unique index. For more control, use `index`, `indexType`, and `indexOptions`:
+
+```typescript
+{
+  name: 'location',
+  type: 'geojson.Point',
+  index: true,
+  indexType: '2dsphere',
+}
+```
+
+### TTL Index
+
+Expire documents automatically:
+
+```typescript
+{
+  name: 'sessionExpires',
+  type: 'date',
+  index: true,
+  indexOptions: {
+    expireAfterSeconds: 3600,
+  },
+}
+```
+
+## Default Values
+
+The `defaultValue` is applied on **insert** when the field is absent from the payload.
+
+```typescript
+{ name: 'role', type: 'string', defaultValue: 'member' }
+{ name: 'isActive', type: 'boolean', defaultValue: true }
+{ name: 'views', type: 'number', defaultValue: 0 }
+```
+
+<Callout type="info">
+`createdAt` and `updatedAt` are managed automatically by anteros — you don't need to declare them. `createdAt` is set on insert, and `updatedAt` is refreshed on every insert and update.
+</Callout>
+
+## Full Example
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Collection({
+  slug: 'products',
+  fields: [
+    { name: 'name', type: 'string', required: true },
+    { name: 'sku', type: 'random', randomOptions: { length: 8, startWith: 'SKU-', useNumbers: true } },
+    { name: 'price', type: 'number', required: true },
+    { name: 'description', type: 'string' },
+    { name: 'email', type: 'email', unique: true },
+    { name: 'category', type: 'enum', enumOptions: { items: ['electronics', 'clothing', 'food'] } },
+    { name: 'tags', type: 'enum', enumOptions: { multiple: true, items: ['new', 'sale', 'featured'] } },
+    { name: 'stock', type: 'integer', defaultValue: 0 },
+    { name: 'isActive', type: 'boolean', defaultValue: true },
+    { name: 'metadata', type: 'json' },
+    { name: 'images', type: 'array' },
+    { name: 'brand', type: 'relationship', relation: { to: 'brands' } },
+    { name: 'relatedProducts', type: 'relationship', relation: { to: 'products', hasMany: true } },
+    { name: 'website', type: 'url' },
+    { name: 'location', type: 'geojson.Point', index: true, indexType: '2dsphere' },
+  ],
+});
+```

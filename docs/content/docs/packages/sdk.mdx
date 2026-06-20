@@ -1,0 +1,529 @@
+---
+title: SDK
+description: "@anteros/sdk@0.0.1 — Client-side SDK for the anteros REST API."
+icon: Braces
+---
+
+
+A lightweight, typed HTTP client for consuming the anteros REST API from any JavaScript or TypeScript environment (browser, Node.js, Bun, etc.).
+
+## Installation
+
+```bash
+bun add @anteros/sdk@0.0.1
+```
+
+## Quick Start
+
+```typescript
+import { Rest } from '@anteros/sdk';
+
+const api = new Rest({
+  server: 'http://localhost:5000',
+  tenant: 'v1',
+});
+
+const users = await api.find('users');
+```
+
+## Constructor
+
+```typescript
+const api = new Rest(options: RestClientOptions);
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `server` | `string` | — | Base URL of the anteros server (required) |
+| `tenant` | `string` | — | Tenant ID (required) |
+| `headers` | `Record<string, string>` | `{}` | Custom headers sent with every request |
+| `token` | `{ persist?: boolean; storageKey?: string }` | — | JWT persistence in `localStorage` |
+| `token.persist` | `boolean` | `true` | Save the JWT token in `localStorage` after login |
+| `token.storageKey` | `string` | `"anteros_token"` | Key used in `localStorage` for the token |
+
+```typescript
+const api = new Rest({
+  server: 'https://api.example.com',
+  tenant: 'v1',
+  headers: {
+    'X-Custom-Header': 'value',
+  },
+  token: {
+    persist: true,
+    storageKey: 'my_app_token',
+  },
+});
+```
+
+<Callout type="info">
+When `token.persist` is `true` (default) and a token is found in `localStorage` at construction, it is automatically loaded into the `Authorization` header.
+</Callout>
+
+## Authentication
+
+### login
+
+Authenticate a user and store the JWT token. The token is automatically attached to all subsequent requests.
+
+```typescript
+const { token, data } = await api.login('users', {
+  email: 'john@example.com',
+  password: 'secret',
+});
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection with auth enabled |
+| `payload` | `Record<string, unknown>` | Login credentials |
+| `options?` | `RestRequestOptions` | Request options |
+
+**Returns:** `{ token: string, data: any }`
+
+### logout
+
+```typescript
+await api.logout('users');
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection with auth enabled |
+| `payload?` | `Record<string, unknown>` | Optional payload |
+| `options?` | `RestRequestOptions` | Request options |
+
+### getToken
+
+Retrieve the current JWT token:
+
+```typescript
+const token = api.getToken(); // string | undefined
+```
+
+### clearToken
+
+Remove the token from memory and `localStorage`:
+
+```typescript
+api.clearToken();
+```
+
+### setHeader
+
+Set or remove a custom header:
+
+```typescript
+api.setHeader('X-Custom', 'value');
+api.setHeader('X-Custom', undefined); // removes it
+```
+
+## CRUD Methods
+
+All CRUD methods target a collection and send a `POST` request to the anteros unified API.
+
+### find
+
+Retrieve multiple documents.
+
+```typescript
+const users = await api.find('users', {
+  $match: { activated: true },
+  $sort: { createdAt: -1 },
+  $limit: 20,
+});
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `params` | `Record<string, unknown>` | Query parameters (`$match`, `$sort`, `$limit`, `$skip`, `$include`, etc.) |
+| `options?` | `RestRequestOptions` | Request options |
+
+**Returns:** `T[]`
+
+### findOne
+
+Retrieve a single document by ID.
+
+```typescript
+const user = await api.findOne('users', '64f1a2b3c4d5e6f7a8b9c0d1');
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `id` | `string` | Document ID |
+| `params` | `Record<string, unknown>` | Query parameters |
+| `options?` | `RestRequestOptions` | Request options |
+
+**Returns:** `T | null`
+
+### insertOne
+
+Create a single document.
+
+```typescript
+const newUser = await api.insertOne('users', {
+  name: 'Jane Doe',
+  email: 'jane@example.com',
+});
+// newUser._id is available
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `data` | `TBody` | Document data |
+| `options?` | `RestRequestOptions` | Request options |
+
+**Returns:** `T & { _id: string }`
+
+### insertMany
+
+Create multiple documents at once.
+
+```typescript
+const products = await api.insertMany('products', [
+  { name: 'Widget A', price: 9.99 },
+  { name: 'Widget B', price: 14.99 },
+]);
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `data` | `TBody[]` | Array of documents |
+| `options?` | `RestRequestOptions` | Request options |
+
+**Returns:** `(T & { _id: string })[]`
+
+### updateOne
+
+Update a single document by ID.
+
+```typescript
+await api.updateOne('users', '64f1a2b3c4d5e6f7a8b9c0d1', {
+  $set: { name: 'Jane Smith' },
+});
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `id` | `string` | Document ID |
+| `update` | `TUpdate` | Update payload |
+| `options?` | `RestRequestOptions` | Request options |
+
+### updateMany
+
+Update multiple documents by IDs.
+
+```typescript
+await api.updateMany('users', ['id1', 'id2', 'id3'], {
+  $set: { activated: true },
+});
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `ids` | `string[]` | Document IDs |
+| `update` | `TUpdate` | Update payload |
+| `options?` | `RestRequestOptions` | Request options |
+
+### deleteOne
+
+Delete a single document by ID.
+
+```typescript
+await api.deleteOne('users', '64f1a2b3c4d5e6f7a8b9c0d1');
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `id` | `string` | Document ID |
+| `options?` | `RestRequestOptions` | Request options |
+
+### deleteMany
+
+Delete multiple documents by IDs.
+
+```typescript
+await api.deleteMany('users', ['id1', 'id2', 'id3']);
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `ids` | `string[]` | Document IDs |
+| `options?` | `RestRequestOptions` | Request options |
+
+## Advanced Methods
+
+### aggregate
+
+Run a MongoDB aggregation pipeline.
+
+```typescript
+const stats = await api.aggregate('orders', [
+  { $match: { status: 'completed' } },
+  { $group: { _id: '$customerId', total: { $sum: '$amount' } } },
+  { $sort: { total: -1 } },
+]);
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `pipeline` | `unknown[]` | Aggregation pipeline stages |
+| `options?` | `RestRequestOptions` | Request options |
+
+**Returns:** `T[]`
+
+### runAction
+
+Call a custom action defined on a collection.
+
+```typescript
+const result = await api.runAction('orders', 'processOrder', {
+  orderId: '64f1a2b3c4d5e6f7a8b9c0d1',
+});
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `action` | `string` | Custom action name |
+| `data?` | `unknown` | Payload passed to the action |
+| `options?` | `RestRequestOptions` | Request options |
+
+### runService
+
+Appelle un **service** enregistré dans la config serveur (`cfg.services`), sur la route **`POST /services/:tenant/:service/:action`** (pas sur `/api/...`).
+
+```typescript
+const report = await api.runService('analytics', 'generateReport', {
+  from: '2025-01-01',
+  to: '2025-12-31',
+});
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `service` | `string` | Nom du service (ex. `analytics`, comme `Service.name` côté config) |
+| `action` | `string` | Nom de l'action exposée dans `service.actions` |
+| `data?` | `unknown` | Corps envoyé dans `{ data: … }` (accessible côté handler via `body.data`) |
+| `options?` | `RestRequestOptions` | En-têtes, `signal`, `query`, `cleanDeep`, etc. |
+
+**Tenant** : celui passé au constructeur `new Rest({ server, tenant, ... })` ; il apparaît dans l'URL après `/services/`.
+
+## File Upload
+
+### upload
+
+Upload one or multiple files to a file collection. Pass custom fields via the `data` parameter.
+
+```typescript
+// Simple upload
+const file = await api.upload('photos', fileInput.files[0])
+// { _id, _file: { filename, name, mimetype, size, url } }
+
+// With custom fields
+const photo = await api.upload('photos', fileInput.files[0], {
+  description: 'Photo de profil',
+  alt: 'Mon avatar',
+})
+// { _id, _file: {...}, description: 'Photo de profil', alt: 'Mon avatar' }
+
+// Multiple files
+const files = await api.upload('photos', [file1, file2, file3])
+// [{ _id, _file: {...} }, ...]
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | File collection slug |
+| `file` | `Blob \| File \| (Blob \| File)[]` | One or multiple files |
+| `data` | `Record<string, any>` | Custom fields to store alongside the file |
+| `opts?.fieldName` | `string` | Form field name (default: `'file'`) |
+| `opts?.signal` | `AbortSignal` | Cancel the upload |
+
+**Returns:** `FileResult` (single file) or `FileResult[]` (multiple files)
+
+```json
+{
+  "_id": "550e8400-...",
+  "_file": {
+    "filename": "550e8400-....jpg",
+    "name": "photo.jpg",
+    "mimetype": "image/jpeg",
+    "size": 2048576,
+    "url": "/files/v1/photos/550e8400-....jpg"
+  },
+  "description": "Photo de profil",
+  "alt": "Mon avatar"
+}
+```
+
+### getFileUrl
+
+Generate the URL to access a file, with optional image transformations.
+
+```typescript
+const url = api.getFileUrl('photos', 'abc.jpg')
+// /files/v1/photos/abc.jpg
+
+const thumb = api.getFileUrl('photos', 'abc.jpg', {
+  width: 200,
+  format: 'webp',
+  quality: 80
+})
+// /files/v1/photos/abc.jpg?w=200&format=webp&q=80
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | File collection slug |
+| `filename` | `string` | Filename returned by upload |
+| `transform?.width` | `number` | Max width in pixels |
+| `transform?.height` | `number` | Max height in pixels |
+| `transform?.format` | `string` | Output format: `webp` \| `jpeg` \| `png` \| `avif` |
+| `transform?.quality` | `number` | Quality 1–100 |
+
+**Returns:** `string` — the full URL
+
+### deleteFile
+
+Delete a file from a file collection.
+
+```typescript
+await api.deleteFile('photos', 'abc.jpg')
+// { message: 'File deleted', ok: true }
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | File collection slug |
+| `filename` | `string` | Filename to delete |
+| `signal?` | `AbortSignal` | Cancel the request |
+
+**Returns:** `{ message: string, ok: boolean }`
+
+## Request Options
+
+Every method accepts an optional `RestRequestOptions` object as its last parameter.
+
+```typescript
+type RestRequestOptions = {
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+  query?: RestQueryOptions;
+  cleanDeep?: boolean;
+};
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `headers` | `Record<string, string>` | Extra headers for this request only |
+| `signal` | `AbortSignal` | Abort signal to cancel the request |
+| `query` | `RestQueryOptions` | URL query parameters |
+| `cleanDeep` | `boolean` | Strip `null`, `undefined`, empty arrays, and empty objects from the body before sending |
+
+### AbortSignal
+
+Cancel a long-running request:
+
+```typescript
+const controller = new AbortController();
+
+api.find('users', {}, { signal: controller.signal });
+
+setTimeout(() => controller.abort(), 5000);
+```
+
+### cleanDeep
+
+Automatically remove empty values from the request body:
+
+```typescript
+await api.insertOne('users', {
+  name: 'Jane',
+  nickname: null,
+  tags: [],
+  meta: {},
+}, { cleanDeep: true });
+// Body sent: { name: 'Jane' }
+```
+
+## Error Handling
+
+When the server returns a non-2xx response, the SDK throws an `Error` with extra properties:
+
+```typescript
+try {
+  await api.findOne('users', 'invalid-id');
+} catch (err) {
+  console.log(err.message); // "Document not found"
+  console.log(err.status);  // 404
+  console.log(err.code);    // "DOCUMENT_NOT_FOUND"
+  console.log(err.meta);    // additional info from server
+}
+```
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `message` | `string` | Error message from the server |
+| `status` | `number` | HTTP status code |
+| `code` | `string` | Application error code |
+| `meta` | `any` | Optional metadata |
+
+## Full Example
+
+```typescript
+import { Rest } from '@anteros/sdk';
+
+const api = new Rest({
+  server: 'http://localhost:5000',
+  tenant: 'v1',
+});
+
+// Login
+const { token } = await api.login('users', {
+  email: 'admin@example.com',
+  password: 'secret',
+});
+
+// Create
+const product = await api.insertOne('products', {
+  name: 'T-Shirt',
+  price: 29.99,
+  category: 'clothing',
+});
+
+// Read
+const products = await api.find('products', {
+  $match: { category: 'clothing' },
+  $sort: { price: 1 },
+  $limit: 10,
+});
+
+// Update
+await api.updateOne('products', product._id, {
+  $set: { price: 24.99 },
+});
+
+// Delete
+await api.deleteOne('products', product._id);
+
+// Custom action
+await api.runAction('orders', 'processOrder', { orderId: '...' });
+
+// Aggregate
+const stats = await api.aggregate('orders', [
+  { $group: { _id: '$status', count: { $sum: 1 } } },
+]);
+
+// Logout
+await api.logout('users');
+```

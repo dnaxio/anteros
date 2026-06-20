@@ -1,0 +1,190 @@
+---
+title: Middlewares
+description: Global and tenant-scoped Hono middlewares in anteros Framework.
+icon: Shield
+---
+
+
+Middlewares let you intercept requests before they reach route handlers. anteros supports two types: **global** (project-wide) and **tenant-scoped** (per tenant).
+
+## Global Middlewares
+
+Loaded from `middlewares/` at the project root. They run **after** the async context storage is set up, so they have access to `requestCtxStorage` (trace, token, meta).
+
+```
+apps/server/
+└── middlewares/          ← global
+    └── cors.middleware.ts
+```
+
+### Definition
+
+```typescript
+// middlewares/cors.middleware.ts
+import { define } from '@anteros/core'
+
+export default define.Middleware({
+  name: 'global-cors',
+  enabled: true,
+  handler: async (c, next) => {
+    const trace = requestCtxStorage.get('trace')
+    console.log(`[${trace?.id}] ${c.req.method} ${c.req.path}`)
+    await next()
+  }
+})
+```
+
+## Tenant Middlewares
+
+Loaded from `{tenant.dir}/middlewares/` for each tenant. They run **only for requests matching their tenant** (`tenant_id` in URL).
+
+```
+apps/server/src/              ← tenant dir
+└── middlewares/              ← tenant-scoped
+    ├── request-logger.middleware.ts
+    └── login-rate-limiter.middleware.ts
+```
+
+### Definition
+
+```typescript
+// src/middlewares/request-logger.middleware.ts
+import { define } from '@anteros/core'
+
+export default define.TenantMiddleware({
+  name: 'request-logger',
+  enabled: true,
+  handler: async (c, next) => {
+    const start = Date.now()
+    await next()
+    console.log(`[v1] ${c.req.method} ${c.req.path} → ${c.res.status} (${Date.now() - start}ms)`)
+  }
+})
+```
+
+## Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `name` | `string` | filename | Middleware name |
+| `enabled` | `boolean` | `true` | Enable or disable the middleware |
+| `handler` | `(c: Context, next: Next) => Promise<void\|Response>` | — | Hono middleware handler |
+
+## Execution flow
+
+```
+Request
+  ├── CORS, compress, IP restriction, security headers
+  ├── Body limit
+  ├── Rate limiting
+  ├── Async context storage (trace, token, meta)
+  │   ├── GLOBAL MIDDLEWARES       ← define.Middleware()
+  │   ├── initializeRoutes (custom routes)
+  │   └── initializeApi
+  │       ├── TENANT MIDDLEWARES   ← define.TenantMiddleware() (filtered)
+  │       ├── API CRUD
+  │       ├── Services
+  │       └── Upload / Files
+```
+
+### Key points
+
+- **Global middlewares** have access to `requestCtxStorage` (trace, token, meta)
+- **Tenant middlewares** are automatically scoped — a middleware from tenant `v1` never runs for `v2`
+- Both types can short-circuit the request by returning a `Response` instead of calling `next()`
+
+## Context Storage Access
+
+Global middlewares can read the current request context:
+
+| Storage | Key | Type | Description |
+|---------|-----|------|-------------|
+| `requestCtxStorage` | `trace` | `{ id: string }` | Unique request trace ID |
+| `requestCtxStorage` | `token` | `{ value, decoded, provided, expired }` | JWT token info |
+| `requestCtxStorage` | `meta` | `{ request, environment, ... }` | Request metadata |
+| `asyncContextStorage` | `getStore()` | `Map` | Async context map |
+
+```typescript
+export default define.Middleware({
+  name: 'auth-logger',
+  handler: async (c, next) => {
+    const token = requestCtxStorage.get('token')
+    const trace = requestCtxStorage.get('trace')
+
+    if (token?.decoded) {
+      console.log(`[${trace?.id}] User: ${token.decoded.sub} Role: ${token.decoded.role}`)
+    }
+
+    await next()
+  }
+})
+```
+
+## Examples
+
+### Rate limiting (login)
+
+```typescript
+const attempts = new Map<string, { count: number; resetAt: number }>()
+
+export default define.TenantMiddleware({
+  name: 'login-rate-limiter',
+  handler: async (c, next) => {
+    if (!c.req.path.endsWith('/login') || c.req.method !== 'POST') {
+      return next()
+    }
+
+    const ip = c.req.header('x-forwarded-for') || 'unknown'
+    const now = Date.now()
+    const entry = attempts.get(ip)
+
+    if (entry && entry.resetAt > now && entry.count >= 5) {
+      return c.json({ message: 'Too many attempts', code: 'RATE_LIMITED' }, 429)
+    }
+
+    if (!entry || entry.resetAt <= now) {
+      attempts.set(ip, { count: 1, resetAt: now + 15 * 60 * 1000 })
+    } else {
+      entry.count++
+    }
+
+    await next()
+  }
+})
+```
+
+### IP blocking
+
+```typescript
+export default define.Middleware({
+  name: 'ip-block',
+  handler: async (c, next) => {
+    const ip = c.req.header('CF-Connecting-IP')
+      || c.req.header('X-Forwarded-For')
+      || getConnInfo(c).remote.address
+
+    if (ip && blockedIps.includes(ip)) {
+      return c.json({ message: 'Forbidden' }, 403)
+    }
+    await next()
+  }
+})
+```
+
+## Enable / Disable
+
+Toggle `enabled` without changing any code:
+
+```typescript
+export default define.TenantMiddleware({
+  name: 'experimental-feature',
+  enabled: false,  // ← ignored at boot time
+  handler: async (c, next) => { ... }
+})
+```
+
+## See also
+
+- [Routes](/docs/reference/routes) — custom route handlers
+- [Hooks](/docs/reference/hooks) — collection lifecycle hooks
+- [Access Control](/docs/reference/access-control) — per-action authorization

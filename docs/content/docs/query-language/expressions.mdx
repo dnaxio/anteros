@@ -1,0 +1,266 @@
+---
+title: Expressions
+description: Build dynamic expressions for queries and transformations.
+icon: FunctionSquare
+---
+
+Expressions are used inside pipeline stages like `$project`, `$addFields` (or `params` of `rest.find()`) and in `$expr` queries to compute values dynamically. They can reference document fields with `$fieldName` and combine operators.
+
+---
+
+## Arithmetic Expressions
+
+| Operator | Description |
+|----------|-------------|
+| `$add` | Sum of values |
+| `$subtract` | Difference |
+| `$multiply` | Product |
+| `$divide` | Quotient |
+| `$mod` | Remainder |
+| `$abs` / `$ceil` / `$floor` / `$round` | Rounding |
+| `$sqrt` / `$pow` | Square root / Power |
+
+```typescript
+import { useRest } from '@anteros/core';
+
+const rest = new useRest({ tenant_id: 'v1' });
+
+// Projeter le total TTC et la remise
+const orders = await rest.find('orders', {
+  $project: {
+    total: 1,
+    totalWithTax: { $multiply: ['$total', 1.2] },
+    discount:     { $subtract: ['$total', '$paid'] }
+  }
+});
+```
+
+```typescript
+// Via aggregate —  plus lisible pour des pipelines longs
+const enriched = await rest.aggregate('orders', [
+  { $match: { status: 'paid' } },
+  {
+    $project: {
+      amount: 1,
+      fee:     { $round: [{ $multiply: ['$amount', 0.029] }, 2] },
+      net:     { $subtract: ['$amount', { $round: [{ $multiply: ['$amount', 0.029] }, 2] }] }
+    }
+  }
+]);
+```
+
+---
+
+## String Expressions
+
+| Operator | Description |
+|----------|-------------|
+| `$concat` | Concatenates strings |
+| `$toUpper` / `$toLower` | Uppercase / lowercase |
+| `$substrCP` | Substring (code points) |
+| `$trim` | Remove leading/trailing whitespace |
+| `$strLenCP` | String length |
+| `$replaceOne` / `$replaceAll` | Search & replace |
+| `$split` | Split string into an array |
+
+```typescript
+// Construire le nom complet et normaliser l'email
+const users = await rest.find('users', {
+  $project: {
+    fullName:  { $concat: ['$firstName', ' ', '$lastName'] },
+    emailNorm: { $toLower: '$email' },
+    initials:  { $toUpper: { $substrCP: ['$firstName', 0, 1] } }
+  }
+});
+```
+
+---
+
+## Comparison Expressions
+
+| Operator | Description |
+|----------|-------------|
+| `$cmp` | Compare two values → -1, 0, or 1 |
+| `$eq` / `$ne` | Equal / not equal |
+| `$gt` / `$gte` | Greater than (or equal) |
+| `$lt` / `$lte` | Less than (or equal) |
+
+```typescript
+// Ajouter un booléen "budget dépassé"
+const projects = await rest.find('projects', {
+  $project: {
+    name: 1,
+    overBudget: { $gt: ['$spent', '$budget'] },
+    remaining:  { $subtract: ['$budget', '$spent'] }
+  }
+});
+```
+
+---
+
+## Conditional Expressions
+
+| Operator | Description |
+|----------|-------------|
+| `$cond` | if-then-else |
+| `$ifNull` | Returns first non-null value |
+| `$switch` | Multi-branch switch |
+
+```typescript
+// Label lisible + fallback pour l'affichage
+const profiles = await rest.find('users', {
+  $project: {
+    name: 1,
+    statusLabel: {
+      $switch: {
+        branches: [
+          { case: { $eq: ['$status', 'active'] },  then: 'Actif' },
+          { case: { $eq: ['$status', 'pending'] }, then: 'En attente' },
+          { case: { $eq: ['$status', 'banned'] },  then: 'Banni' }
+        ],
+        default: 'Inconnu'
+      }
+    },
+    displayName: { $ifNull: ['$nickname', '$username'] }
+  }
+});
+```
+
+```typescript
+// Booléen calculé avec $cond
+const results = await rest.find('candidates', {
+  $project: {
+    name: 1,
+    passed: {
+      $cond: { if: { $gte: ['$score', 80] }, then: true, else: false }
+    }
+  }
+});
+```
+
+---
+
+## Date Expressions
+
+| Operator | Description |
+|----------|-------------|
+| `$year` / `$month` / `$dayOfMonth` | Extract parts |
+| `$hour` / `$minute` / `$second` | Time parts |
+| `$dayOfWeek` / `$week` / `$isoWeek` | Day of week, week number |
+| `$dateAdd` / `$dateSubtract` | Add/subtract time |
+| `$dateDiff` | Difference between two dates |
+| `$dateTrunc` | Truncate to a unit |
+| `$dateToString` | Format date to string |
+
+```typescript
+// Extraire année/mois, calculer l'ancienneté, formater
+const users = await rest.find('users', {
+  $project: {
+    name: 1,
+    signupYear:  { $year: '$createdAt' },
+    signupMonth: { $month: '$createdAt' },
+    daysAgo: {
+      $dateDiff: {
+        startDate: '$createdAt',
+        endDate: '$$NOW',
+        unit: 'day'
+      }
+    },
+    dateFormatted: {
+      $dateToString: { format: '%Y-%m-%d', date: '$createdAt' }
+    }
+  }
+});
+```
+
+```typescript
+// Utilisateurs créés il y a plus de 90 jours
+const inactive = await rest.find('users', {
+  $match: {
+    $expr: {
+      $gte: [
+        { $dateDiff: { startDate: '$createdAt', endDate: '$$NOW', unit: 'day' } },
+        90
+      ]
+    }
+  }
+});
+```
+
+---
+
+## Array Expressions
+
+| Operator | Description |
+|----------|-------------|
+| `$size` | Number of elements |
+| `$filter` | Subset matching a condition |
+| `$map` | Transform each element |
+| `$reduce` | Aggregate array to single value |
+| `$slice` | First/last N elements |
+| `$first` / `$last` | First or last element |
+| `$arrayElemAt` | Element at given index |
+| `$concatArrays` | Merge multiple arrays |
+| `$reverseArray` | Reverse order |
+| `$sortArray` | Sort array |
+| `$in` | Check if value is in array |
+| `$range` | Generate numeric array |
+
+```typescript
+// Compter, tronquer et cumuler sur les tableaux
+const orders = await rest.find('orders', {
+  $project: {
+    itemCount:   { $size: '$items' },
+    recentItems: { $slice: ['$items', 3] },
+    tagsSorted:  { $sortArray: { input: '$tags', sortBy: 1 } },
+    totalRevenue: {
+      $reduce: {
+        input: '$items',
+        initialValue: 0,
+        in: { $add: ['$$value', { $multiply: ['$$this.price', '$$this.qty'] }] }
+      }
+    }
+  }
+});
+```
+
+```typescript
+// Filtrer uniquement les items en stock
+const withStock = await rest.find('orders', {
+  $project: {
+    availableItems: {
+      $filter: {
+        input: '$items',
+        as: 'item',
+        cond: { $gt: ['$$item.stock', 0] }
+      }
+    }
+  }
+});
+```
+
+---
+
+## Type Conversion Expressions
+
+| Operator | Description |
+|----------|-------------|
+| `$toString` | To string |
+| `$toInt` | To integer |
+| `$toLong` | To 64-bit integer |
+| `$toDouble` | To double |
+| `$toDecimal` | To decimal |
+| `$toBool` | To boolean |
+| `$toDate` | To date |
+| `$toObjectId` | To ObjectId |
+| `$convert` | Convert with error handling |
+| `$type` | Return BSON type name |
+
+```typescript
+// Convertir un champ string en date
+const orders = await rest.find('orders', {
+  $addFields: {
+    parsedDate: { $toDate: '$dateString' }
+  }
+});
+```

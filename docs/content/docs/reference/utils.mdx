@@ -1,0 +1,194 @@
+---
+title: Utils
+description: Utility functions available in anteros Framework.
+icon: Wrench
+---
+
+The `utils` object provides helper functions accessible in custom actions, hooks, and scripts.
+
+## Available Utils
+
+| Utility            | Description                                            |
+| ------------------ | ------------------------------------------------------ |
+| `utils.omit`       | Remove keys from an object (supports deep & regex)     |
+| `utils.pick`       | Pick specific keys from an object (supports dot paths) |
+| `utils.cleanDeep`  | Remove empty/null/undefined values recursively         |
+| `utils.clone`      | Clone data using structured clone                      |
+| `utils.deepCopy`   | Deep copy with support for Date, RegExp, Map, Set      |
+| `utils.deepEquals` | Deep equality check between two values                 |
+| `utils.password`   | Hash and verify passwords                              |
+| `utils.$`          | Execute shell commands                                 |
+
+## omit
+
+Remove keys from objects or arrays of objects. Supports string keys and regex patterns for deep removal.
+
+```typescript
+const user = { name: "John", password: "secret", email: "john@test.com" };
+
+// Remove specific keys
+utils.omit(user, ["password"]);
+// → { name: 'John', email: 'john@test.com' }
+
+// Remove with regex (removes all keys starting with '_')
+utils.omit(user, [/^_/]);
+
+// Works on arrays
+const users = [
+  { name: "A", password: "1" },
+  { name: "B", password: "2" },
+];
+utils.omit(users, ["password"]);
+// → [{ name: 'A' }, { name: 'B' }]
+
+// Reorder fields in result
+utils.omit(user, ["password"], ["email", "name"]);
+// → { email: 'john@test.com', name: 'John' }
+```
+
+## pick
+
+Pick specific keys from objects. Supports nested dot-path notation.
+
+```typescript
+const user = {
+  name: "John",
+  email: "john@test.com",
+  profile: { age: 30, city: "Paris" },
+};
+
+// Pick top-level keys
+utils.pick(user, ["name", "email"]);
+// → { name: 'John', email: 'john@test.com' }
+
+// Pick nested paths
+utils.pick(user, ["name", "profile.city"]);
+// → { name: 'John', profile: { city: 'Paris' } }
+
+// Works on arrays
+const users = [
+  { name: "A", age: 20 },
+  { name: "B", age: 25 },
+];
+utils.pick(users, ["name"]);
+// → [{ name: 'A' }, { name: 'B' }]
+```
+
+## cleanDeep
+
+Recursively remove `null`, `undefined`, empty strings, empty arrays, and empty objects.
+
+```typescript
+const data = {
+  name: "John",
+  bio: "",
+  tags: [],
+  meta: null,
+  profile: { city: "Paris", extra: undefined },
+};
+
+utils.cleanDeep(data);
+// → { name: 'John', profile: { city: 'Paris' } }
+```
+
+## clone
+
+Clone data safely using structured clone. Falls back to JSON serialization.
+
+```typescript
+const original = { name: "John", items: [1, 2, 3] };
+const copy = utils.clone(original);
+
+copy.items.push(4);
+// original.items is still [1, 2, 3]
+```
+
+## deepCopy
+
+Deep copy with full support for `Date`, `RegExp`, `Map`, `Set`, and nested objects.
+
+```typescript
+const original = {
+  date: new Date(),
+  pattern: /test/gi,
+  tags: new Set(["a", "b"]),
+  meta: new Map([["key", "value"]]),
+};
+
+const copy = utils.deepCopy(original);
+// All special types are preserved as new instances
+```
+
+## deepEquals
+
+Check deep equality between two values.
+
+```typescript
+utils.deepEquals({ a: 1, b: [2, 3] }, { a: 1, b: [2, 3] });
+// → true
+
+utils.deepEquals({ a: 1 }, { a: 2 });
+// → false
+```
+
+## password
+
+Hash and verify passwords securely.
+
+```typescript
+// Hash a password
+const hash = utils.password.hashSync("my-password");
+
+// Verify a password
+const isValid = utils.password.verifySync(hash, "my-password");
+// → true
+```
+
+## $ (Shell)
+
+Execute shell commands.
+
+```typescript
+const result = await utils.$`echo Hello`;
+console.log(result.text());
+// → "Hello\n"
+```
+
+## Usage in Actions
+
+```typescript
+import { define } from "@anteros/core";
+
+export default define.Collection({
+  slug: "users",
+  fields: [
+    { name: "name", type: "string" },
+    { name: "email", type: "string" },
+    { name: "password", type: "password" },
+  ],
+  actions: {
+    getPublicProfile: async ({ rest, data, utils }) => {
+      const user = await rest.findOne("users", data.userId);
+      return utils.omit(user, ["password"]);
+    },
+
+    exportClean: async ({ rest, utils }) => {
+      const users = await rest.find("users");
+      return utils.cleanDeep(utils.omit(users, ["password", /^_/]));
+    },
+  },
+});
+```
+
+## Usage in Hooks
+
+```typescript
+hooks: {
+  afterOperation: async ({ action, meta, utils }) => {
+    if (action === 'find') {
+      const cleaned = utils.pick(meta.result, ['name', 'email']);
+      console.log('Found users:', cleaned);
+    }
+  },
+}
+```

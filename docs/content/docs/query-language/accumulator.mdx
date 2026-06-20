@@ -1,0 +1,244 @@
+---
+title: Accumulator
+description: Aggregation accumulators for computed results.
+icon: Sigma
+---
+
+Accumulators are used inside `$group`, `$bucket`, `$bucketAuto`, and `$setWindowFields` stages to compute summaries over groups of documents.
+
+---
+
+## Basic Accumulators
+
+### `$sum`
+
+Sums numeric values. Pass `1` to count documents.
+
+```typescript
+import { useRest } from '@anteros/core';
+
+const rest = new useRest({ tenant_id: 'v1' });
+
+// Chiffre d'affaires par catégorie + nombre de commandes
+const byCategory = await rest.aggregate('orders', [
+  {
+    $group: {
+      _id: '$category',
+      totalRevenue: { $sum: '$amount' },
+      orderCount:   { $sum: 1 }
+    }
+  },
+  { $sort: { totalRevenue: -1 } }
+]);
+```
+
+### `$avg`
+
+Computes the average of numeric values.
+
+```typescript
+// Salaire moyen par département
+const avgSalaryByDept = await rest.aggregate('employees', [
+  {
+    $group: {
+      _id: '$department',
+      avgSalary: { $avg: '$salary' },
+      empCount:  { $sum: 1 }
+    }
+  }
+]);
+```
+
+### `$min` / `$max`
+
+Returns the minimum or maximum value in the group.
+
+```typescript
+// Prix le plus bas et le plus haut par produit
+const priceRange = await rest.aggregate('offers', [
+  {
+    $group: {
+      _id: '$productId',
+      lowestPrice:  { $min: '$price' },
+      highestPrice: { $max: '$price' }
+    }
+  }
+]);
+```
+
+---
+
+## Array Accumulators
+
+### `$push`
+
+Collects every value into an array (with duplicates).
+
+```typescript
+// Tous les membres par équipe
+const teams = await rest.aggregate('users', [
+  {
+    $group: {
+      _id: '$team',
+      members: { $push: '$name' }
+    }
+  }
+]);
+```
+
+### `$addToSet`
+
+Collects unique values only (no duplicates).
+
+```typescript
+// Tags uniques par catégorie
+const uniqueTags = await rest.aggregate('articles', [
+  {
+    $group: {
+      _id: '$category',
+      uniqueTags: { $addToSet: '$tag' }
+    }
+  }
+]);
+```
+
+### `$first` / `$last`
+
+Returns the first or last value in a group. **Always put a `$sort` before `$group`** to control which value is taken.
+
+```typescript
+// Utilisateur le plus récent et le plus ancien par pays
+const extremes = await rest.aggregate('users', [
+  { $sort: { createdAt: -1 } },
+  {
+    $group: {
+      _id: '$country',
+      newestUser: { $first: '$name' },
+      oldestUser: { $last: '$name' }
+    }
+  }
+]);
+```
+
+---
+
+## Statistical Accumulators
+
+| Operator | Description |
+|----------|-------------|
+| `$count` | Number of documents (alias for `{ $sum: 1 }`) |
+| `$stdDevPop` | Population standard deviation |
+| `$stdDevSamp` | Sample standard deviation |
+| `$mergeObjects` | Merges multiple sub-documents into one |
+
+```typescript
+// Écart-type des scores + fusion de métadonnées
+const stats = await rest.aggregate('exams', [
+  {
+    $group: {
+      _id: null,
+      count:      { $count: {} },
+      scoreStdDev: { $stdDevPop: '$score' },
+      combinedMeta: { $mergeObjects: '$metadata' }
+    }
+  }
+]);
+```
+
+---
+
+## Counting with `rest.countDocuments`
+
+Pour un simple comptage avec un filtre, utilisez `countDocuments` directement :
+
+```typescript
+// Nombre d'utilisateurs actifs
+const activeCount = await rest.countDocuments('users', { status: 'active' });
+```
+
+---
+
+## Custom Accumulator
+
+`$accumulator` lets you write custom JavaScript reduce logic:
+
+```typescript
+// Moyenne personnalisée par produit
+const customAvg = await rest.aggregate('reviews', [
+  {
+    $group: {
+      _id: '$productId',
+      customAvgRating: {
+        $accumulator: {
+          init: function () {
+            return { sum: 0, count: 0 };
+          },
+          accumulate: function (state, value) {
+            state.sum += value;
+            state.count++;
+            return state;
+          },
+          accumulateArgs: ['$rating'],
+          merge: function (s1, s2) {
+            return { sum: s1.sum + s2.sum, count: s1.count + s2.count };
+          },
+          finalize: function (state) {
+            return state.sum / state.count;
+          },
+          lang: 'js'
+        }
+      }
+    }
+  }
+]);
+```
+
+---
+
+## Window Accumulators
+
+Window accumulators are used inside `$setWindowFields`. They compute values over a sliding window — ideal for running totals, moving averages, and rankings.
+
+```typescript
+// Running total des ventes par produit + moyenne mobile 7 jours + classement
+const windowed = await rest.aggregate('sales', [
+  {
+    $setWindowFields: {
+      partitionBy: '$productId',
+      sortBy: { date: 1 },
+      output: {
+        runningTotal: {
+          $sum: '$quantity',
+          window: { documents: ['unbounded', 'current'] }
+        },
+        movingAvg7d: {
+          $avg: '$quantity',
+          window: { range: [-6, 0], unit: 'day' }
+        },
+        rankByQty: {
+          $rank: {},
+          window: { documents: ['unbounded', 'current'] }
+        }
+      }
+    }
+  }
+]);
+```
+
+### All window operators
+
+| Operator | Description |
+|----------|-------------|
+| `$sum` | Running total |
+| `$avg` | Moving average |
+| `$min` / `$max` | Min/max in the window |
+| `$first` / `$last` | First/last value in the window |
+| `$push` / `$addToSet` | Array / unique array in window |
+| `$count` | Count in window |
+| `$stdDevPop` / `$stdDevSamp` | Standard deviation |
+| `$derivative` | Rate of change (difference / time) |
+| `$integral` | Approximate integral |
+| `$covariancePop` / `$covarianceSamp` | Covariance |
+| `$expMovingAvg` | Exponential moving average |
+| `$shift` | Value from a different document |
+| `$rank` / `$denseRank` / `$documentNumber` | Ranking functions |

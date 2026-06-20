@@ -1,0 +1,291 @@
+---
+title: WebSockets
+description: Real-time WebSocket handlers in anteros Framework.
+icon: PlugZap
+---
+
+
+WebSocket handlers let you build real-time features like chat, notifications, and live collaboration. They run on the same Socket.IO server as the framework and have access to the database via `rest`.
+
+## How It Works
+
+anteros discovers all files matching `**/*.ws.ts` inside the `sockets/` directory of each tenant. Each file exports a handler created with `define.WebSocket()`. Handlers are loaded at boot time — after services.
+
+`exec` is called **once per connected client** and receives the `socket` instance, a shared `io` instance, and a tenant-scoped `rest` instance.
+
+## Directory Structure
+
+Place your socket files inside `{tenant.dir}/sockets/`:
+
+```
+v1/
+├── collections/
+├── services/
+└── sockets/
+    ├── chat.ws.ts
+    ├── push.ws.ts
+    └── realtime/
+        └── notifications.ws.ts
+```
+
+<Callout type="info">
+Files are discovered recursively — you can organize sockets in subdirectories. Only files ending with `.ws.ts` are loaded.
+</Callout>
+
+## Define a WebSocket Handler
+
+Use `define.WebSocket()` to create a handler:
+
+```typescript
+import { define } from '@anteros/core'
+
+export default define.WebSocket({
+  enabled: true,
+  exec: ({ io, rest, socket }) => {
+
+    console.log('New user connected', socket.id)
+
+    socket.on('join', async (room: string) => {
+      socket.join(room)
+      socket.emit('joined', { room })
+    })
+
+    socket.on('disconnect', () => {
+      console.log('User disconnected', socket.id)
+    })
+
+  }
+})
+```
+
+The file **must** use `export default` and end with `.ws.ts`.
+
+## Handler Options
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `enabled` | `boolean` | No | Whether the handler is active (default: `true`) |
+| `exec` | `function` | **Yes** | Handler called per connection receiving `{ io, rest, socket }` |
+
+## Handler Context
+
+`exec` is called for each client connection with three properties:
+
+### `socket` — The Connected Client
+
+The [Socket.IO Socket](https://socket.io/docs/v4/server-api/#socket) instance for the current client. Use it to listen for events, join rooms, and emit back:
+
+```typescript
+exec: ({ socket }) => {
+  socket.on('chat:join', (roomId) => {
+    socket.join(roomId)
+  })
+
+  socket.emit('welcome', { message: 'Hello!' })
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `socket.on(event, fn)` | Listen for events from this client |
+| `socket.emit(event, data)` | Send an event to this client |
+| `socket.join(room)` | Join a room |
+| `socket.leave(room)` | Leave a room |
+| `socket.to(room).emit(...)` | Broadcast to a room (excluding self) |
+| `socket.id` | Unique connection ID |
+| `socket.handshake` | Request metadata (headers, query, auth) |
+| `socket.rooms` | Set of rooms this socket belongs to |
+| `socket.disconnect()` | Force-disconnect the client |
+
+### `io` — Socket.IO Server
+
+The shared [Socket.IO](https://socket.io/) server instance. Use it for broadcasting to all clients or across rooms:
+
+```typescript
+exec: ({ io, socket }) => {
+  socket.on('message', (data) => {
+    io.to(data.roomId).emit('message', {
+      text: data.text,
+      socketId: socket.id,
+    })
+  })
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `io.emit('event', data)` | Broadcast to all connected clients |
+| `io.to(room).emit(...)` | Send to a room |
+| `io.sockets.adapter.rooms` | List active rooms |
+| `io.engine.clientsCount` | Count connected clients |
+
+### `rest` — Database Access
+
+A `useRest` instance automatically scoped to the handler's tenant:
+
+```typescript
+exec: ({ rest, socket }) => {
+  socket.on('room:join', async (roomId: string) => {
+    const room = await rest.findOne('rooms', roomId)
+    if (!room) {
+      socket.emit('error', { message: 'Room not found' })
+      return
+    }
+    socket.join(roomId)
+    socket.emit('joined', { roomId, name: room.name })
+  })
+}
+```
+
+## Examples
+
+### Chat Room
+
+```typescript
+import { define } from '@anteros/core'
+
+export default define.WebSocket({
+  enabled: true,
+  exec: ({ io, rest, socket }) => {
+
+    socket.on('chat:join', async (roomId: string) => {
+      const room = await rest.findOne('rooms', roomId, {
+        $include: ['messages']
+      })
+      if (!room) return socket.emit('error', { message: 'Room not found' })
+
+      socket.join(roomId)
+      socket.emit('chat:history', room.messages)
+    })
+
+    socket.on('chat:message', async (data: { roomId: string, text: string }) => {
+      const msg = await rest.insertOne('messages', {
+        roomId: data.roomId,
+        text: data.text,
+        socketId: socket.id,
+      })
+      io.to(data.roomId).emit('chat:message', msg)
+    })
+
+  }
+})
+```
+
+### Live Dashboard — Broadcast DB changes
+
+```typescript
+import { define } from '@anteros/core'
+
+export default define.WebSocket({
+  enabled: true,
+  exec: ({ io, rest, socket }) => {
+
+    socket.emit('dashboard:stats', {
+      users: await rest.countDocuments('users'),
+      orders: await rest.countDocuments('orders'),
+      revenue: await rest.aggregate('orders', [
+        { $match: { status: 'paid' } },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ])
+    })
+
+  }
+})
+```
+
+### Typing Indicator
+
+```typescript
+import { define } from '@anteros/core'
+
+export default define.WebSocket({
+  enabled: true,
+  exec: ({ socket }) => {
+    const typing = new Map<string, Set<string>>()
+
+    socket.on('typing:start', (roomId: string) => {
+      if (!typing.has(roomId)) typing.set(roomId, new Set())
+      typing.get(roomId)!.add(socket.id)
+      socket.to(roomId).emit('typing:update', { userId: socket.id, typing: true })
+    })
+
+    socket.on('typing:stop', (roomId: string) => {
+      typing.get(roomId)?.delete(socket.id)
+      socket.to(roomId).emit('typing:update', { userId: socket.id, typing: false })
+    })
+
+    socket.on('disconnect', () => {
+      for (const [roomId, users] of typing) {
+        if (users.delete(socket.id)) {
+          socket.to(roomId).emit('typing:update', { userId: socket.id, typing: false })
+        }
+      }
+    })
+
+  }
+})
+```
+
+## Multi-Tenant
+
+WebSocket handlers are scoped per tenant. Each tenant's `sockets/` directory is scanned independently, and the `rest` instance passed to `exec` is automatically connected to that tenant's database:
+
+```
+v1/
+└── sockets/
+    └── chat.ws.ts    → rest connects to app_v1
+
+v2/
+└── sockets/
+    └── chat.ws.ts    → rest connects to app_v2
+```
+
+The `io` instance is shared across all tenants — use rooms or namespaces to separate tenant traffic.
+
+## Client-Side Usage
+
+Connect from the frontend using the [Socket.IO client](https://socket.io/docs/v4/client-api/):
+
+```typescript
+import { io } from 'socket.io-client'
+
+const socket = io('http://localhost:4000')
+
+socket.on('connect', () => {
+  console.log('Connected', socket.id)
+  socket.emit('chat:join', 'room-123')
+})
+
+socket.on('chat:message', (msg) => {
+  console.log('New message:', msg)
+})
+
+socket.on('disconnect', () => {
+  console.log('Disconnected')
+})
+```
+
+## Enable / Disable
+
+Toggle `enabled` to control whether a handler is loaded:
+
+```typescript
+export default define.WebSocket({
+  enabled: false, // Handler is ignored at boot
+  exec: ({ socket }) => { ... }
+})
+```
+
+When `enabled` is `false`, the handler is simply not executed — no error, no side effect.
+
+## Structure Summary
+
+| Property | Description |
+|----------|-------------|
+| `enabled` | `boolean` — whether the handler is active (default: `true`) |
+| `exec` | `({ io, rest, socket }) => void` — called per connection |
+| `ctx.socket` | Socket.IO `Socket` — the connected client |
+| `ctx.io` | Socket.IO `Server` — shared across all handlers |
+| `ctx.rest` | `useRest` — database client auto-scoped to the tenant |
+| File pattern | `**/*.ws.ts` inside `{tenant.dir}/sockets/` |
+| Timing | Loaded at boot, after services |

@@ -1,0 +1,169 @@
+---
+title: Custom Actions
+description: Creating custom API actions in anteros Framework.
+icon: Zap
+---
+
+
+Custom actions let you define business logic beyond standard CRUD operations.
+
+## Define Custom Actions
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Collection({
+  slug: 'orders',
+  fields: [
+    { name: 'status', type: 'enum', enumOptions: { items: ['pending', 'processing', 'completed'] } },
+    { name: 'total', type: 'number' },
+  ],
+  actions: {
+    // Custom action
+    processOrder: async ({ rest, data }) => {
+      const order = await rest.findOne('orders', data.orderId);
+      
+      await rest.updateOne('orders', data.orderId, {
+        $set: { status: 'processing' }
+      });
+      
+      return { success: true, order };
+    },
+    
+    // Another custom action
+    cancelOrder: async ({ rest, data }) => {
+      await rest.updateOne('orders', data.orderId, {
+        $set: { status: 'cancelled' }
+      });
+      
+      return { success: true };
+    },
+  },
+});
+```
+
+## Call Custom Actions
+
+```http
+POST /api/:tenant_id/orders/processOrder
+Content-Type: application/json
+
+{
+  "data": {
+    "orderId": "64f1a2b3c4d5e6f7a8b9c0d1"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "order": { ... }
+}
+```
+
+## Action Context
+
+The action receives this context:
+
+```typescript
+{
+  rest: useRest;    // Rest instance for database operations
+  data: any;      // Request body data
+  error: function; // Error helper
+}
+```
+
+## Using Rest in Actions
+
+Access the full REST API within custom actions:
+
+```typescript
+actions: {
+  // Get user orders
+  getUserOrders: async ({ rest, data }) => {
+    const orders = await rest.find('orders', {
+      $match: { userId: data.userId },
+      $sort: { createdAt: -1 }
+    });
+    
+    return orders;
+  },
+  
+  // Bulk update
+  archiveOldOrders: async ({ rest, data }) => {
+    const oldOrders = await rest.find('orders', {
+      $match: { 
+        createdAt: { $lt: new Date(data.cutoffDate) },
+        status: 'completed'
+      }
+    });
+    
+    const ids = oldOrders.map(o => o._id);
+    const result = await rest.updateMany('orders', ids, {
+      $set: { archived: true }
+    });
+    
+    return { updated: result.modifiedCount };
+  },
+  
+  // Call another collection
+  duplicateToArchive: async ({ rest, data }) => {
+    const order = await rest.findOne('orders', data.orderId);
+    
+    await rest.insertOne('orders_archive', {
+      ...order,
+      originalId: order._id,
+      archivedAt: new Date(),
+    });
+    
+    return { success: true };
+  },
+}
+```
+
+## Error Handling
+
+Throw custom errors:
+
+```typescript
+actions: {
+  processOrder: async ({ rest, data, error }) => {
+    const order = await rest.findOne('orders', data.orderId);
+    
+    if (!order) {
+      throw error('Order not found', {
+        code: 'ORDER_NOT_FOUND',
+        status: 404,
+      });
+    }
+    
+    if (order.status === 'cancelled') {
+      throw error('Cannot process cancelled order', {
+        code: 'ORDER_CANCELLED',
+        status: 400,
+      });
+    }
+    
+    // Process...
+  },
+}
+```
+
+## Validation
+
+Combine with field validation:
+
+```typescript
+actions: {
+  // Validation is handled by the field schema
+  createWithPayment: async ({ rest, data }) => {
+    // data has been validated against field schema
+    const order = await rest.insertOne('orders', data);
+    
+    // Process payment...
+    return { success: true, order };
+  },
+}
+```

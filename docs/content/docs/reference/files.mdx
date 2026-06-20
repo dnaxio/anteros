@@ -1,0 +1,351 @@
+---
+title: Upload & Files
+description: File management — upload, storage, transformations and serving.
+icon: Upload
+---
+
+## File Collections
+
+Files are managed through dedicated **file collections**, defined in `files/**/*.file.ts` for each tenant.
+
+Unlike classic collections (documents), file collections are designed exclusively for file storage, validation and serving.
+
+### Definition
+
+```typescript
+// files/photos.file.ts
+import { define } from '@anteros/core'
+
+export default define.FileCollection({
+  slug: 'photos',
+  fields: [
+    {
+      name: 'description',
+      type: 'string',
+      description: 'Photo description',
+    },
+    {
+      name: 'author',
+      type: 'relationship',
+      relation: { to: 'users' },
+    },
+    {
+      name: 'alt',
+      type: 'string',
+      description: 'Image alt text',
+    },
+  ],
+  upload: {
+    allowedMimeTypes: ['image/jpeg', 'image/png', 'image/webp'],
+    maxSize: 5 * 1024 * 1024, // 5 MB
+    transformations: {
+      width: 1200,
+      format: 'webp',
+      quality: 80
+    }
+  },
+  storage: {
+    driver: 'disk',
+    path: 'uploads/photos'
+  },
+  trackMetaData: true,
+  api: {
+    access: {
+      '*': (ctx) => !!ctx.token.value,                                // auth required
+      read: true,                                                     // public read (overrides `*`)
+      delete: (ctx) => ctx.token.decoded?.role === 'admin'            // admin only
+    }
+  }
+})
+```
+
+## Endpoints
+
+| Method | Route | Description |
+|---------|-------|-------------|
+| `POST` | `/upload/:tenant_id/:slug` | Upload a file |
+| `GET` | `/files/:tenant_id/:slug/:file` | Serve / download a file |
+| `DELETE` | `/files/:tenant_id/:slug/:file` | Delete a file |
+
+### Upload
+
+```bash
+# Simple upload
+curl -X POST /upload/v1/photos \
+  -F "file=@photo.jpg"
+
+# With custom fields (defined in fields)
+curl -X POST /upload/v1/photos \
+  -F "file=@photo.jpg" \
+  -F "description=Profile photo" \
+  -F "alt=My avatar" \
+  -F "author=64f1a2b3..."
+```
+
+Response:
+```json
+{
+  "_id": "a1b2c3d4-...",
+  "_file": {
+    "filename": "a1b2c3d4-....jpg",
+    "name": "photo.jpg",
+    "mimetype": "image/jpeg",
+    "size": 2048576,
+    "url": "/files/v1/photos/a1b2c3d4-....jpg"
+  },
+  "description": "Profile photo",
+  "alt": "My avatar"
+}
+```
+
+The form field must be named `file` or `upload`. All other fields are stored in the document alongside `_file`.
+
+### Serve a file
+
+```bash
+# Original version
+curl /files/v1/photos/a1b2c3d4-....jpg
+
+# With transformations (images only)
+curl "/files/v1/photos/a1b2c3d4-....jpg?w=200&h=200&format=webp&q=80"
+```
+
+### Delete a file
+
+```bash
+curl -X DELETE /files/v1/photos/a1b2c3d4-....jpg
+```
+
+## Image Transformations
+
+Transformations are applied **on the fly** via query parameters on the `GET /files/...` endpoint. No external dependency — uses `Bun.Image` (native).
+
+| Parameter | Alias | Type | Description |
+|-----------|-------|------|-------------|
+| `width` | `w` | `number` | Max width in pixels |
+| `height` | `h` | `number` | Max height in pixels |
+| `format` | — | `webp` \| `jpeg` \| `png` \| `avif` | Output format |
+| `quality` | `q` | `number` (1–100) | Quality (default: 80) |
+
+```bash
+# 200×200 thumbnail in WebP quality 60
+curl "/files/v1/photos/abc.jpg?w=200&h=200&format=webp&q=60"
+
+# Width-only resize (height auto)
+curl "/files/v1/photos/abc.jpg?w=300"
+```
+
+Transformations preserve the original aspect ratio (`fit: inside`) and never upscale the image (`withoutEnlargement: true`).
+
+## Access Control
+
+Each file operation can be protected individually via `api.access`:
+
+| Rule | Operation | Description |
+|-------|-----------|-------------|
+| `*` | All | Default rule when no specific rule is set |
+| `upload` | `POST /upload/:tenant_id/:slug` | Upload a file |
+| `read` | `GET /files/:tenant_id/:slug/:file` | View / download |
+| `delete` | `DELETE /files/:tenant_id/:slug/:file` | Delete |
+
+### Priority
+
+1. **Specific rule** (`upload`, `read`, `delete`) — takes precedence
+2. **Wildcard `*`** — applied when no specific rule is set
+3. **No rule** — **access denied** (secure by default)
+
+Each rule accepts a `boolean` or a function:
+
+```typescript
+api: {
+  access: {
+    '*': (ctx) => !!ctx.token.value,                                 // auth required by default
+    upload: true,                                                    // public upload (overrides `*`)
+    delete: (ctx) => ctx.token.decoded?.role === 'admin'             // admin only
+    // 'read' inherits from '*' → auth required
+  }
+}
+```
+
+<Callout type="warn">
+If **no rule** is defined (neither `*` nor a specific rule), access is **denied** (`401 ACCESS_DENIED`). To explicitly allow access, define at least `'*': true`.
+</Callout>
+
+<Callout type="info">
+- **`true`** — allow without requiring a token (public access)
+- **`false`** — deny immediately (no token needed)
+- **`function`** — requires a valid token, evaluated at runtime
+
+When a **function** is used, the token is mandatory. No token → `401 AUTH_REQUIRED`. Expired token → `401 TOKEN_EXPIRED`. Denied → `401 ACCESS_DENIED`.
+</Callout>
+
+### Handler Context
+
+Access functions receive a `ctx` object:
+
+```typescript
+type FileAccessHandler = (ctx: {
+    rest: useRest;       // Rest instance scoped to the tenant
+    error: fn.error;     // helper to throw structured errors
+    jwt: { sign, verify }; // JWT utilities
+    token: {
+        value: string | null;                       // raw JWT string
+        decoded: Record<string, unknown> | null;    // decoded claims
+        provided: boolean;                          // token present in the request?
+        expired: boolean;                           // token expired?
+    };
+}) => boolean | Promise<boolean>;
+```
+
+```typescript
+// Handler examples
+api: {
+  access: {
+    // Public — anyone can access
+    read: true,
+
+    // Blocked — no one can access
+    delete: false,
+
+    // Auth required
+    upload: (ctx) => !!ctx.token.value,
+
+    // Specific role
+    '*': (ctx) => ctx.token.decoded?.role === 'admin',
+
+    // Database check
+    delete: async (ctx) => {
+      const user = await ctx.rest.findOne('users', ctx.token.decoded?.sub);
+      return user?.role === 'admin';
+    },
+  }
+}
+```
+
+## Storage
+
+### Disk (default)
+
+```typescript
+storage: {
+  driver: 'disk',
+  path: 'uploads/photos'   // relative to storage/
+}
+```
+
+Files are stored at `storage/{tenant_id}/{collection}/{file_id}.ext`.
+
+### S3
+
+```typescript
+storage: {
+  driver: 's3',
+  bucket: 'my-bucket',
+  region: 'eu-west-1',
+  path: 'uploads/photos'
+}
+```
+
+S3 credentials are read from environment variables:
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `AWS_REGION` (default: `us-east-1`)
+- `AWS_BUCKET`
+- `S3_ENDPOINT` (optional, for S3-compatible backends like MinIO)
+
+## Replication
+
+Uploaded files can be automatically replicated to multiple destinations (S3, SSH, SFTP) in parallel, without blocking the response.
+
+```typescript
+replicate: [
+  {
+    driver: 's3',
+    bucket: 'backup-photos',
+    region: 'eu-west-1',
+    path: 'replicas/photos'
+  },
+  {
+    driver: 'ssh',
+    host: 'backup.example.com',
+    username: 'deploy',
+    path: '/backups/photos',
+    privateKey: '/home/deploy/.ssh/id_ed25519'   // optional
+  },
+  {
+    driver: 'sftp',
+    host: 'nas.local',
+    port: 2222,
+    username: 'backup',
+    path: '/mnt/storage/photos'
+  }
+]
+```
+
+| Option | Type | Default | Description |
+|--------|------|--------|-------------|
+| `driver` | `'s3'` \| `'ssh'` \| `'sftp'` | — | Replication type |
+| `host` | `string` | `'localhost'` | Destination host (ssh/sftp) |
+| `port` | `number` | `22` | SSH/SFTP port |
+| `username` | `string` | `$USER` | Remote username |
+| `path` | `string` | — | Destination path |
+| `bucket` | `string` | — | S3 bucket (required if driver: 's3') |
+| `region` | `string` | `us-east-1` | S3 region |
+| `endpoint` | `string` | — | Custom S3 endpoint |
+| `privateKey` | `string` | — | Path to SSH private key |
+
+<Callout type="info">
+SSH/SFTP authentication uses **SSH keys** by default. If `privateKey` is not provided, the default user key is used (`~/.ssh/id_rsa`, `~/.ssh/id_ed25519`). Password authentication is not supported.
+</Callout>
+
+## Configuration Options
+
+| Option | Type | Default | Description |
+|--------|------|--------|-------------|
+| `slug` | `string` | — | Unique file collection identifier |
+| `upload.allowedMimeTypes` | `string[]` | `*` | Allowed MIME types |
+| `upload.maxSize` | `number` | `10MB` | Max file size in bytes |
+| `storage.driver` | `'disk'` \| `'s3'` | `'disk'` | Storage backend |
+| `storage.path` | `string` | — | Relative path within storage |
+| `storage.bucket` | `string` | — | S3 bucket (required if driver: 's3') |
+| `storage.region` | `string` | — | S3 region |
+| `upload.transformations.width` | `number` | — | Default max width |
+| `upload.transformations.height` | `number` | — | Default max height |
+| `upload.transformations.format` | `string` | — | Default output format |
+| `upload.transformations.quality` | `number` | `80` | Default quality |
+| `api.access` | `FileApiAccess` | — | Access control (`*`, `upload`, `read`, `delete`) |
+| `api.privateFields` | `(string \| RegExp)[]` | — | Private document fields |
+| `api.readOnlyFields` | `(string \| RegExp)[]` | — | Read-only fields |
+| `trackMetaData` | `boolean` | `true` | Store metadata in database + audit |
+| `replicate` | `ReplicateTarget[]` | — | Replication to S3, SSH or SFTP |
+
+## Audit & Tracking
+
+When `trackMetaData: true` is enabled, each upload records a document in the MongoDB collection and in the audit log (`_activities_`) with `collectionType: "file"`:
+
+```json
+{
+  "operation": {
+    "action": "insertOne",
+    "collection": "photos",
+    "collectionType": "file",
+    "status": "success",
+    "input": {
+      "data": {
+        "_file": {
+          "filename": "a1b2c3d4-....jpg",
+          "name": "photo.jpg",
+          "mimetype": "image/jpeg",
+          "size": 2048576
+        },
+        "description": "Profile photo"
+      }
+    }
+  }
+}
+```
+
+## See Also
+
+- [Audit](/docs/reference/audit) — complete audit system documentation
+- [Collections](/docs/reference/collections) — define a document collection

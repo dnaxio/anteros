@@ -1,0 +1,169 @@
+---
+title: Authentication
+description: How to configure authentication in anteros Framework.
+icon: ShieldCheck
+---
+
+
+anteros Framework provides built-in JWT authentication with customizable login/logout handlers.
+
+## Enable Authentication
+
+Add `api.auth` to your collection definition:
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Collection({
+  slug: 'users',
+  fields: [
+    { name: 'email', type: 'email', required: true },
+    { name: 'password', type: 'password', required: true },
+  ],
+  api: {
+    auth: {
+      enabled: true,
+      onLogin: async ({ rest, payload, jwt }) => {
+        // Find user by email
+        const users = await rest.find('users', {
+          $match: { email: payload.email }
+        });
+        
+        const user = users[0];
+        if (!user) {
+          throw new Error('Invalid credentials');
+        }
+        
+        // Verify password
+        const isValid = await Bun.password.verify(payload.password, user.password);
+        if (!isValid) {
+          throw new Error('Invalid credentials');
+        }
+        
+        // Generate JWT token
+        const token = await jwt.sign({
+          sub: user._id,
+          email: user.email,
+        });
+        
+        return {
+          token,
+          data: { user },
+        };
+      },
+      onLogout: async ({ jwt, req }) => {
+        // Optional: cleanup logic
+      },
+    },
+  },
+});
+```
+
+## Login Action
+
+```http
+POST /api/:tenant_id/users/login
+Content-Type: application/json
+
+{
+  "payload": {
+    "email": "user@example.com",
+    "password": "secret"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "token": "<jwt_token>",
+  "data": { "user": { ... } }
+}
+```
+
+Store `token` and send it on later API calls:
+
+```http
+Authorization: Bearer <jwt_token>
+```
+
+Invalid or expired tokens are rejected with **401** before your collection logic runs. [Access control](/docs/reference/access-control) receives **`token.value`** (raw string) and **`token.decoded`** (verified claims) for each request.
+
+## Logout Action
+
+```http
+POST /api/:tenant_id/users/logout
+Content-Type: application/json
+
+{}
+```
+
+**Response:**
+```json
+{
+  "message": "Logout successful",
+  "ok": true
+}
+```
+
+## Cookie Options
+
+The login handler receives a `cookies` object to manage cookies:
+
+```typescript
+onLogin: async ({ rest, req }) => {
+  const token = await jwt.sign({ sub: userId });
+  
+  // Set cookie
+  req.cookies.set('auth_token', token, {
+    httpOnly: true,
+    secure: true,
+    maxAge: 60 * 60 * 24 * 7, // 7 days
+    path: '/',
+  });
+  
+  return { token, data: { user } };
+}
+```
+
+### Cookie Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `httpOnly` | `boolean` | `true` | Prevent XSS access |
+| `secure` | `boolean` | `false` | HTTPS only |
+| `maxAge` | `number` | - | Expiration in seconds |
+| `path` | `string` | `'/'` | Cookie path |
+| `domain` | `string` | - | Cookie domain |
+| `sameSite` | `'lax' \| 'strict' \| 'none'` | `'lax'` | Same-site policy |
+
+## JWT utilities
+
+The auth context provides `jwt.sign` and `jwt.verify`:
+
+```typescript
+onLogin: async ({ jwt }) => {
+  const token = await jwt.sign({ sub: userId, role: 'admin' });
+
+  const { value, error } = await jwt.verify(token);
+  if (error) {
+    // handle invalid token
+  }
+  // value = decoded payload (claims)
+}
+```
+
+For HTTP requests, prefer the **`Authorization: Bearer`** flow above: the server verifies the JWT and exposes **`token.value`** (string) and **`token.decoded`** (claims) to **`api.access`** handlers.
+
+## Error Handling
+
+Throw errors with appropriate messages:
+
+```typescript
+onLogin: async ({ error }) => {
+  throw error('Invalid email or password', {
+    code: 'INVALID_CREDENTIALS',
+    status: 401,
+  });
+}
+```

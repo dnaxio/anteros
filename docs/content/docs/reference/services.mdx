@@ -1,0 +1,448 @@
+---
+title: Services
+description: Tenant-scoped business logic exposed through a dedicated services API in anteros Framework.
+icon: Cog
+---
+
+
+Services let you group related business logic — outside of any specific collection — and expose it through a dedicated tenant-scoped HTTP endpoint. They are the right place for cross-collection workflows, third-party integrations, billing logic, reporting, or anything that doesn't naturally belong to a single collection.
+
+## How It Works
+
+anteros discovers all files matching `**/*.service.ts` inside the `services/` directory of each tenant. Each file exports a service created with `define.Service()`. Services are loaded at boot time — after collections are synced — and registered under a dedicated route prefix:
+
+```
+POST /services/:tenant_id/:service/:action
+```
+
+The `:service` segment matches the service `name` and `:action` matches a key in its `actions` map.
+
+## Directory Structure
+
+Place your service files inside `{tenant.dir}/services/`:
+
+```
+v1/
+├── collections/
+│   └── users.model.ts
+├── routes/
+│   └── health.route.ts
+└── services/
+    ├── factures.service.ts
+    ├── billing.service.ts
+    └── reports/
+        └── monthly.service.ts
+```
+
+<Callout type="info">
+Files are discovered recursively — you can organize services in subdirectories. Only files ending with `.service.ts` are loaded.
+</Callout>
+
+## Define a Service
+
+Use `define.Service()` to create a service:
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Service({
+  name: 'factures',
+  enabled: true,
+  actions: {
+    generate: async ({ rest, data }) => {
+      const invoice = await rest.insertOne('invoices', {
+        client: data.clientId,
+        total: data.total,
+        status: 'draft',
+      });
+      return { ok: true, invoice };
+    },
+  },
+});
+```
+
+The file **must** use `export default` and end with `.service.ts`.
+
+## Service Options
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `name` | `string` | **Yes** | Unique service identifier — used in the URL as `:service` |
+| `enabled` | `boolean` | **Yes** | Whether this service is active |
+| `api` | `object` | No | API configuration (access control) |
+| `api.access` | `object` | No | Access control rules (see below) |
+| `actions` | `Record<string, Function>` | **Yes** | Map of action name → handler function |
+
+<Callout type="warn">
+The `name` must be unique **per tenant**. Two services with the same `name` in the same tenant will collide.
+</Callout>
+
+## Enable / Disable
+
+Toggle `enabled` to control whether a service responds to requests:
+
+```typescript
+export default define.Service({
+  name: 'reports',
+  enabled: false, // Service is loaded but rejects all calls
+  actions: {
+    daily: async ({ rest }) => {
+      // ...
+    },
+  },
+});
+```
+
+When `enabled` is `false`, calls return:
+
+```json
+{
+  "message": "Service `reports` is not enabled",
+  "code": "SERVICE_NOT_ENABLED"
+}
+```
+
+## Access Control
+
+Services support the same `api.access` rules as collections. Use wildcard `*` for a default policy and specific action keys for fine-grained control.
+
+When no `api.access` is defined, all authenticated users can call any action.
+
+```typescript
+export default define.Service({
+  name: 'admin',
+  enabled: true,
+  api: {
+    access: {
+      '*': false,                 // deny all by default
+      'stats': ({ token }) => {   // only admins can call stats
+        return token.decoded?.role === 'admin';
+      },
+      'health': true,             // health is public (to any authenticated user)
+    }
+  },
+  actions: {
+    stats: async ({ rest }) => { ... },
+    health: async () => ({ ok: true }),
+    secret: async () => { ... },  // blocked by '*' = false
+  }
+});
+```
+
+| Rule | Behavior |
+|------|----------|
+| No `api.access` | All authenticated users can call any action |
+| `'*': false` | Deny all, allow only explicitly allowed actions |
+| `'*': true` | Allow all, deny only explicitly denied actions |
+| `action: true` | Allow this specific action |
+| `action: false` | Deny this specific action |
+| `action: (ctx) => boolean` | Custom function, receives `{ rest, error, jwt, token }` |
+
+<Callout type="info">
+Access functions can be **sync** (`() => boolean`) or **async** (`() => Promise<boolean>`). The `token` parameter contains `{ value, decoded, provided, expired }`.
+</Callout>
+
+## Action Context
+
+Each action receives a context object:
+
+```typescript
+{
+  data: any;       // Request body `data` field
+  rest: useRest;   // Rest instance scoped to the tenant
+  io: Server;      // Socket.IO server instance
+  error: function; // Error helper
+}
+```
+
+### `data` — Request Payload
+
+The value of the `data` property in the request body:
+
+```typescript
+actions: {
+  generate: async ({ data }) => {
+    console.log(data.clientId, data.total);
+  },
+}
+```
+
+### `rest` — Database Access
+
+A `useRest` instance scoped to the owning tenant — no need to pass `tenant_id` again:
+
+```typescript
+actions: {
+  listOverdue: async ({ rest }) => {
+    return await rest.find('invoices', {
+      $match: { status: 'overdue' },
+      $sort: { dueDate: 1 },
+    });
+  },
+}
+```
+
+### `io` — Socket.IO
+
+Emit real-time events from a service action:
+
+```typescript
+actions: {
+  generate: async ({ rest, data, io }) => {
+    const invoice = await rest.insertOne('invoices', data);
+    io.emit('invoice:created', invoice);
+    return invoice;
+  },
+}
+```
+
+### `error` — Custom Errors
+
+Throw structured errors that map to HTTP responses:
+
+```typescript
+actions: {
+  pay: async ({ rest, data, error }) => {
+    const invoice = await rest.findOne('invoices', data.id);
+    if (!invoice) {
+      throw error('Invoice not found', {
+        code: 'INVOICE_NOT_FOUND',
+        status: 404,
+      });
+    }
+    if (invoice.status === 'paid') {
+      throw error('Invoice already paid', {
+        code: 'INVOICE_ALREADY_PAID',
+        status: 400,
+      });
+    }
+    return await rest.updateOne('invoices', data.id, {
+      $set: { status: 'paid' },
+    });
+  },
+}
+```
+
+## Calling a Service
+
+Services are invoked with `POST` requests on the `/services/:tenant_id/:service/:action` endpoint. The payload to the action is read from the `data` field of the JSON body:
+
+```http
+POST /services/v1/factures/generate
+Content-Type: application/json
+
+{
+  "data": {
+    "clientId": "64f1a2b3c4d5e6f7a8b9c0d1",
+    "total": 1250.00
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "invoice": {
+    "_id": "...",
+    "client": "64f1a2b3c4d5e6f7a8b9c0d1",
+    "total": 1250,
+    "status": "draft"
+  }
+}
+```
+
+## Examples
+
+### Multi-Action Service
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Service({
+  name: 'factures',
+  enabled: true,
+  actions: {
+    generate: async ({ rest, data }) => {
+      return await rest.insertOne('invoices', {
+        client: data.clientId,
+        total: data.total,
+        status: 'draft',
+      });
+    },
+
+    send: async ({ rest, data, error }) => {
+      const invoice = await rest.findOne('invoices', data.id);
+      if (!invoice) {
+        throw error('Invoice not found', {
+          code: 'INVOICE_NOT_FOUND',
+          status: 404,
+        });
+      }
+      // ... send email
+      return await rest.updateOne('invoices', data.id, {
+        $set: { status: 'sent', sentAt: new Date() },
+      });
+    },
+
+    cancel: async ({ rest, data }) => {
+      return await rest.updateOne('invoices', data.id, {
+        $set: { status: 'cancelled' },
+      });
+    },
+  },
+});
+```
+
+### Cross-Collection Workflow
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Service({
+  name: 'orders',
+  enabled: true,
+  actions: {
+    checkout: async ({ rest, data, error }) => {
+      const cart = await rest.findOne('carts', data.cartId);
+      if (!cart || !cart.items?.length) {
+        throw error('Cart is empty', {
+          code: 'CART_EMPTY',
+          status: 400,
+        });
+      }
+
+      const total = cart.items.reduce(
+        (sum: number, item: any) => sum + item.price * item.qty,
+        0,
+      );
+
+      const order = await rest.insertOne('orders', {
+        userId: cart.userId,
+        items: cart.items,
+        total,
+        status: 'pending',
+      });
+
+      await rest.deleteOne('carts', data.cartId);
+
+      return { order };
+    },
+  },
+});
+```
+
+### Real-Time Notification
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Service({
+  name: 'notifications',
+  enabled: true,
+  actions: {
+    broadcast: async ({ rest, data, io }) => {
+      const notif = await rest.insertOne('notifications', {
+        message: data.message,
+        level: data.level || 'info',
+      });
+      io.emit('notification', notif);
+      return notif;
+    },
+  },
+});
+```
+
+## Multi-Tenant
+
+Services are scoped per tenant. Each tenant's `services/` directory is scanned independently and the `rest` instance passed to actions is automatically connected to that tenant's database:
+
+```typescript
+app.boot({
+  tenants: [
+    { id: 'v1', dir: 'v1', database: { uri: 'mongodb://localhost:27017/app_v1' } },
+    { id: 'v2', dir: 'v2', database: { uri: 'mongodb://localhost:27017/app_v2' } },
+  ],
+});
+```
+
+```
+v1/
+└── services/
+    └── factures.service.ts    → POST /services/v1/factures/:action
+
+v2/
+└── services/
+    └── factures.service.ts    → POST /services/v2/factures/:action
+```
+
+A service registered in `v1` is **not** reachable through `/services/v2/...` even if the file content is identical.
+
+## Activity Logging
+
+Every service action call is automatically logged as an activity. Each call records:
+
+| Field      | Description                                      |
+| ---------- | ------------------------------------------------ |
+| `tenant`   | The tenant ID from the URL                       |
+| `action`   | The action name being executed                   |
+| `service`  | The service name (stored as `collection`)         |
+| `input`    | The `data` payload from the request body         |
+| `result`   | The response returned by the action              |
+| `error`    | Error details if the action failed               |
+| `status`   | `"success"` or `"error"`                         |
+| `duration` | Execution time in milliseconds                   |
+| `token`    | The decoded JWT token used for authentication    |
+
+Activities are stored in the `activities` collection of the tenant's database.
+
+## Error Codes
+
+Calls to the services endpoint can return the following framework errors:
+
+| Code | Status | Cause |
+|------|--------|-------|
+| `TENANT_ID_REQUIRED` | 400 | Missing `:tenant_id` in URL |
+| `SERVICE_REQUIRED` | 400 | Missing `:service` in URL |
+| `SERVICE_NOT_FOUND` | 400 | No service matches `name` for this tenant |
+| `SERVICE_NOT_ENABLED` | 400 | Service exists but `enabled: false` |
+| `SERVICE_NOT_DEFINED` | 400 | Action key not present in the `actions` map |
+| `AUTH_REQUIRED` | 401 | No valid token provided (services require authentication) |
+| `ACCESS_DENIED` | 401 | Access rule returned `false` for this action |
+| `ACCESS_DENIED_TO_PERFORM_THIS_ACTION` | 401 | No access rule configured and wildcard returned `false` |
+| `INVALID_JSON_BODY` | 400 | JSON body could not be parsed |
+
+Custom errors thrown from your action via `error(...)` are returned as-is with their `code`, `status`, and `meta`.
+
+## Services vs Custom Actions vs Routes
+
+| Use case | Pick |
+|----------|------|
+| Logic tied to a single collection (CRUD-adjacent) | [Custom Actions](/docs/reference/custom-actions) |
+| Cross-collection or domain workflow under a tenant | **Services** |
+| Webhook, health check, public page, anything outside the API surface | [Routes](/docs/reference/routes) |
+| Logic that runs once at boot (seed, migrate) | [Scripts](/docs/reference/scripts) |
+
+## Summary
+
+| Property | Description |
+|----------|-------------|
+| `name` | `string` — unique service identifier per tenant |
+| `enabled` | `boolean` — whether the service accepts calls |
+| `actions` | `Record<string, (ctx) => any>` — handlers exposed as `:action` |
+| `ctx.data` | Request body `data` field |
+| `ctx.rest` | `useRest` — database client scoped to the tenant |
+| `ctx.io` | Socket.IO server instance |
+| `ctx.error` | Helper to throw structured errors |
+| File pattern | `**/*.service.ts` inside `{tenant.dir}/services/` |
+| Endpoint | `POST /services/:tenant_id/:service/:action` |
+| Timing | Loaded at boot, after collections are synced |
+
+## See also
+
+- [Custom Actions](/docs/reference/custom-actions) — collection-bound actions
+- [Routes](/docs/reference/routes) — custom HTTP endpoints
+- [Scripts](/docs/reference/scripts) — boot-time scripts
+- [Tenant](/docs/reference/tenants) — `dir` and tenant layout
+- [Error Handling](/docs/reference/error-handling) — `error()` helper

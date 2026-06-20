@@ -1,0 +1,138 @@
+---
+title: Cache
+description: Caching utilities available in anteros Framework.
+icon: DatabaseZap
+---
+
+The `cache` object provides caching utilities using [BentoCache](https://bentocache.dev/docs/introduction), with support for memory, filesystem, and Redis backends.
+
+## Available Drivers
+
+| Driver       | Description                                    |
+| ------------ | ---------------------------------------------- |
+| `useMemoryCache`    | In-memory caching (fastest, no persistence)    |
+| `useFilesystemCache` | File-based caching with configurable directory |
+| `useRedisCache`    | Redis-backed caching for distributed setups    |
+
+## Memory Cache
+
+In-memory cache with L1 layer. Data is lost when the process exits.
+
+```typescript
+import { cache } from "@anteros/core";
+
+const c = cache.useMemoryCache();
+```
+
+## Filesystem Cache
+
+File-based cache with a configurable directory. Uses L1 (memory) + L2 (file) layers.
+
+```typescript
+import { cache } from "@anteros/core";
+
+const c = cache.useFilesystemCache({
+  directory: "./.cache",
+  pruneInterval: "1h",
+});
+```
+
+| Option           | Type     | Default  | Description                                      |
+| ---------------- | -------- | -------- | ------------------------------------------------ |
+| `directory`      | `string` | —        | Directory path for cache files                   |
+| `pruneInterval`  | `string` | `"1h"`   | Interval for pruning expired entries              |
+
+## Redis Cache
+
+Redis-backed cache for distributed setups. Uses L1 (memory) + L2 (Redis) layers.
+
+```typescript
+import { cache } from "@anteros/core";
+
+const c = cache.useRedisCache({
+  connection: {
+    host: "localhost",
+    port: 6379,
+    password: "",
+  },
+  pruneInterval: "1h",
+});
+```
+
+| Option           | Type     | Description                                      |
+| ---------------- | -------- | ------------------------------------------------ |
+| `connection.host`     | `string` | Redis server host                         |
+| `connection.port`     | `number` | Redis server port                         |
+| `connection.password` | `string` | Redis server password                     |
+| `pruneInterval`       | `string` | Interval for pruning expired entries       |
+
+## Usage
+
+All methods accept an options object and support human-readable TTLs (e.g. `"5m"`, `"2.5h"`) or milliseconds.
+
+```typescript
+const c = cache.useMemoryCache();
+
+// Set a value
+await c.set({ key: "products", value: { id: 1 }, ttl: "5m" });
+
+// Set a value that never expires
+await c.setForever({ key: "config", value: { theme: "dark" } });
+
+// Get a value
+const value = await c.get({ key: "products" });
+
+// Get or set via factory (recommended)
+const products = await c.getOrSet({
+  key: "products",
+  factory: async () => {
+    return await rest.find("products");
+  },
+  ttl: "10m",
+  grace: "1m",
+});
+
+// Get or set with no expiration
+const config = await c.getOrSetForever({
+  key: "config",
+  factory: () => loadConfig(),
+});
+
+// Check existence
+const exists = await c.has({ key: "products" });
+const missing = await c.missing({ key: "products" });
+
+// Get and delete
+const item = await c.pull({ key: "products" });
+
+// Delete
+await c.delete({ key: "products" });
+
+// Expire (keep stale for grace period)
+await c.expire({ key: "products" });
+
+// Delete multiple
+await c.deleteMany({ keys: ["products", "users"] });
+
+// Clear all entries
+await c.clear();
+
+// Prune expired entries (useful for file/database drivers)
+await c.prune();
+
+// Disconnect
+await c.disconnect();
+```
+
+## Namespaces
+
+Group keys for bulk invalidation:
+
+```typescript
+const users = c.namespace("users");
+await users.set({ key: "1", value: { name: "John" }, ttl: "5m" });
+await users.set({ key: "2", value: { name: "Jane" } });
+await users.clear(); // clears only this namespace
+```
+
+See the [full BentoCache documentation](https://bentocache.dev/docs/methods) for all features (tagging, grace periods, stampede protection, timeouts, events, telemetry, etc.).

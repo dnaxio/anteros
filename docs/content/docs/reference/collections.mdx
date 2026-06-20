@@ -1,0 +1,140 @@
+---
+title: Collections
+description: How to define and use collections in anteros Framework.
+icon: Database
+---
+
+
+Collections define the data structure for your API. They are defined as TypeScript files in the `collections/` directory.
+
+## Defining a Collection
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Collection({
+  slug: 'users',
+  type: 'document',
+  fields: [
+    { name: 'name', type: 'string', required: true },
+    { name: 'email', type: 'email', required: true, unique: true },
+    { name: 'password', type: 'password', required: true },
+    { name: 'role', type: 'enum', enumOptions: { items: ['admin', 'user', 'guest'] } },
+    { name: 'status', type: 'enum', enumOptions: { items: ['active', 'inactive'] } },
+  ],
+});
+```
+
+Save this as `collections/users.model.ts`.
+
+## Collection Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `slug` | `string` | - | Collection name (required) |
+| `type` | `'document' \| 'file'` | `'document'` | Collection type |
+| `fields` | `Field[]` | - | Field definitions |
+| `api` | `object` | - | API configuration |
+| `actions` | `object` | - | Custom actions |
+| `hooks` | `object` | - | Lifecycle hooks |
+
+## Field Types
+
+The following field types are supported:
+
+| Type | Description |
+|------|-------------|
+| `string` | String value |
+| `number` | Number value |
+| `integer` | Integer value |
+| `boolean` | Boolean value |
+| `email` | Email address |
+| `password` | Hashed password |
+| `uuid` | UUID string |
+| `url` | URL string |
+| `date` | Date value |
+| `datetime-local` | DateTime value |
+| `enum` | Enumeration |
+| `array` | Array of values |
+| `json` | JSON object |
+| `relationship` | Reference to another collection |
+| `random` | Auto-generated value |
+| `ipv4` | IPv4 address |
+| `ipv6` | IPv6 address |
+| `geojson.Point` | GeoJSON Point |
+| `geojson.LineString` | GeoJSON LineString |
+| `geojson.Polygon` | GeoJSON Polygon |
+
+## Field Options
+
+Each field can have these options:
+
+```typescript
+{
+  name: string;        // Field name (required)
+  type: FieldType;    // Field type (required)
+  description?: string;
+  required?: boolean;
+  unique?: boolean;
+  nullable?: boolean;
+  defaultValue?: any;
+  index?: boolean;
+  indexOptions?: {
+    expireAfterSeconds?: number;
+    sparse?: boolean;
+    unique?: boolean;
+  };
+  enumOptions?: {
+    items: string[];     // Allowed values
+    multiple?: boolean;  // Allow multiple selections
+  };
+  relation?: {
+    to: string;         // Target collection
+    hasMany?: boolean;  // One-to-many relationship
+    pipeline?: any[];   // Aggregation pipeline
+  };
+  randomOptions?: {
+    type: 'uuid' | 'string' | 'number';
+    prefix?: string;
+    toNumber?: boolean;
+  };
+}
+```
+
+## Example: Blog Posts
+
+```typescript
+export default define.Collection({
+  slug: 'posts',
+  fields: [
+    { name: 'title', type: 'string', required: true },
+    { name: 'slug', type: 'string', required: true, unique: true },
+    { name: 'content', type: 'string', required: true },
+    { name: 'excerpt', type: 'string' },
+    { name: 'featuredImage', type: 'string' },
+    { name: 'author', type: 'relationship', relation: { to: 'users', hasMany: false } },
+    { name: 'tags', type: 'array' },
+    { name: 'status', type: 'enum', enumOptions: { items: ['draft', 'published', 'archived'] } },
+    { name: 'publishedAt', type: 'datetime-local' },
+    { name: 'views', type: 'number', defaultValue: 0 },
+  ],
+});
+```
+
+## Example: Products with Inventory
+
+```typescript
+export default define.Collection({
+  slug: 'products',
+  fields: [
+    { name: 'name', type: 'string', required: true },
+    { name: 'sku', type: 'string', required: true, unique: true },
+    { name: 'price', type: 'number', required: true },
+    { name: 'description', type: 'string' },
+    { name: 'category', type: 'enum', enumOptions: { items: ['electronics', 'clothing', 'food'] } },
+    { name: 'stock', type: 'number', defaultValue: 0 },
+    { name: 'images', type: 'array' },
+    { name: 'isActive', type: 'boolean', defaultValue: true },
+  ],
+});
+```

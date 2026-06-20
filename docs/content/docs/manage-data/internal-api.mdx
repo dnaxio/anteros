@@ -1,0 +1,754 @@
+---
+title: Internal API
+description: Internal API documentation for anteros Framework.
+icon: Code
+---
+
+
+The `Rest` class provides direct database access within hooks, actions, and custom logic. It's available as `useRest` from `@anteros/core@0.0.1`.
+
+## Initialize Rest
+
+```typescript
+import { useRest } from '@anteros/core';
+
+const rest = new useRest({
+  tenant_id: 'v1',
+  useHook: true,
+});
+```
+
+## Constructor Options
+
+```typescript
+new useRest({
+  tenant_id?: string;
+  database?: { uri: string; options?: MongoClientOptions };
+  session?: ClientSession;
+  useHook?: boolean;
+  useCustomApi?: boolean;
+})
+```
+
+---
+
+## Query Methods
+
+### find
+
+Retrieve multiple documents with pipeline support.
+
+```typescript
+const users = await rest.find('users', {
+  $match: { status: 'active' },
+  $limit: 20,
+  $skip: 0,
+  $sort: { createdAt: -1 },
+  $project: { name: 1, email: 1 },
+});
+
+// With $include (validated against collection schema)
+const usersWithProfile = await rest.find('users', {
+  $include: ['profile']
+});
+
+// With $lookup — raw passthrough, no validation (Internal API only)
+const usersWithTeam = await rest.find('users', {
+  $lookup: [
+    { from: 'teams', localField: 'teamId', foreignField: '_id', as: 'team' }
+  ]
+});
+
+// With $graphLookup — recursive graph traversal, no validation (Internal API only)
+const usersWithHierarchy = await rest.find('users', {
+  $graphLookup: [
+    {
+      from: 'users',
+      connectFromField: 'managerId',
+      connectToField: '_id',
+      startWith: '\$managerId',
+      as: 'managers'
+    }
+  ]
+});
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `params` | `object` | Pipeline parameters |
+| `options` | `object` | Additional options |
+
+**Returns:** `Document[]`
+
+---
+
+### findOne
+
+Retrieve a single document by ID.
+
+```typescript
+const user = await rest.findOne('users', '64f1a2b3c4d5e6f7a8b9c0d1');
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `_id` | `string` | Document ID |
+| `params` | `object` | Optional pipeline params |
+
+**Returns:** `Document | null`
+
+---
+
+### aggregate
+
+Run an aggregation pipeline.
+
+```typescript
+const result = await rest.aggregate('orders', [
+  { $match: { status: 'completed' } },
+  { $group: { _id: '$category', total: { $sum: '$amount' } } },
+]);
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `pipeline` | `array` | Aggregation pipeline |
+
+**Returns:** `Document[]`
+
+---
+
+### countDocuments
+
+Count documents in a collection.
+
+```typescript
+const count = await rest.countDocuments('users', { status: 'active' });
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `query` | `object` | Filter query |
+
+**Returns:** `number`
+
+---
+
+### findOneAndUpdate
+
+Find and update a single document.
+
+```typescript
+const updated = await rest.findOneAndUpdate(
+  'users',
+  { email: 'john@example.com' },
+  { $set: { name: 'John Doe' } },
+  { upsert: true }
+);
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `filter` | `object` | Filter document |
+| `update` | `object` | Update operators |
+| `options` | `object` | Options (upsert, etc.) |
+
+**Returns:** `Document | null`
+
+---
+
+---
+
+## Insert Methods
+
+### insertOne
+
+Insert a single document.
+
+```typescript
+const user = await rest.insertOne('users', {
+  name: 'John',
+  email: 'john@example.com',
+});
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `data` | `object` | Document data |
+
+**Returns:** `T & { _id: string }`
+
+---
+
+### insertMany
+
+Insert multiple documents.
+
+```typescript
+const users = await rest.insertMany('users', [
+  { name: 'Alice' },
+  { name: 'Bob' },
+]);
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `data` | `array` | Array of documents |
+
+**Returns:** `(T & { _id: string })[]`
+
+---
+
+## Update Methods
+
+### updateOne
+
+Update a single document by ID.
+
+```typescript
+const result = await rest.updateOne(
+  'users',
+  '64f1a2b3c4d5e6f7a8b9c0d1',
+  { $set: { name: 'Jane Doe' } }
+);
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `_id` | `string` | Document ID |
+| `update` | `object` | Update operators |
+
+**Returns:** `Document`
+
+---
+
+### updateMany
+
+Update multiple documents by IDs.
+
+```typescript
+const result = await rest.updateMany(
+  'users',
+  ['64f1...', '64f2...'],
+  { $set: { status: 'inactive' } }
+);
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `_ids` | `string[]` | Document IDs |
+| `update` | `object` | Update operators |
+
+**Returns:** `UpdateResult`
+
+---
+
+## Delete Methods
+
+### deleteOne
+
+Delete a single document by ID.
+
+```typescript
+const result = await rest.deleteOne('users', '64f1a2b3c4d5e6f7a8b9c0d1');
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `_id` | `string` | Document ID |
+
+**Returns:** `Document`
+
+---
+
+### deleteMany
+
+Delete multiple documents by IDs.
+
+```typescript
+const result = await rest.deleteMany('users', ['64f1...', '64f2...']);
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `_ids` | `string[]` | Document IDs |
+
+**Returns:** `DeleteResult`
+
+---
+
+## Bulk Operations
+
+### bulkWrite
+
+Execute multiple operations in one batch.
+
+```typescript
+const result = await rest.bulkWrite('users', [
+  { insertOne: { document: { name: 'Alice' } } },
+  { updateOne: { filter: { _id: '64f1...' }, update: { $set: { name: 'Bob' } } } },
+  { deleteOne: { filter: { _id: '64f2...' } } },
+]);
+```
+
+### bulkUpdate
+
+Execute multiple update operations.
+
+```typescript
+const result = await rest.bulkUpdate('users', [
+  { updateOne: { filter: { _id: '64f1...' }, update: { $set: { name: 'Alice' } } },
+  { updateMany: { filter: { status: 'old' }, update: { $set: { status: 'archived' } } },
+]);
+```
+
+---
+
+## Custom Action & Service Methods
+
+### runAction
+
+Execute a custom action on a collection programmatically (same API as `POST /api/:tenant/:collection/:action`).
+
+```typescript
+const result = await rest.runAction('users', 'getPublicProfile', {
+  userId: '64f1a2b3c4d5e6f7a8b9c0d1',
+});
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collection` | `string` | Collection name |
+| `action` | `string` | Custom action name |
+| `data` | `any` | Data passed to the action |
+
+**Returns:** The return value of the custom action
+
+The action receives the same context as when called via HTTP:
+
+```typescript
+{
+  rest: this,      // Rest instance
+  data: any,       // The data argument
+  error: fn.error, // Error helper
+  jwt: func.jwt,   // JWT utilities
+  token,           // Current token from request context
+}
+```
+
+<Callout type="warn">
+**Avoid infinite loops.** When using `runAction`, never call the same action recursively — directly or indirectly — as this will cause an infinite loop.
+
+```typescript
+// ❌ BAD — calling itself creates an infinite loop
+// File: invoices.model.ts (collection)
+actions: {
+  generateInvoice: async ({ rest, data }) => {
+    return await rest.runAction('invoices', 'generateInvoice', data);
+  },
+}
+```
+
+```typescript
+// ✅ OK — calling a different action
+// File: invoices.model.ts (collection)
+actions: {
+  generateInvoice: async ({ rest, data }) => {
+    return await rest.runAction('invoices', 'sendInvoice', data);
+  },
+}
+```
+
+Always target a different action or extract shared logic into a separate function.
+</Callout>
+
+**Example — defining and calling a custom action:**
+
+```typescript
+// File: invoices.model.ts (collection)
+import { define } from '@anteros/core';
+
+export default define.Collection({
+  slug: 'invoices',
+  fields: [
+    { name: 'total', type: 'number' },
+    { name: 'status', type: 'string' },
+  ],
+  actions: {
+    markAsPaid: async ({ rest, data, error }) => {
+      const invoice = await rest.findOne('invoices', data.id);
+      if (!invoice) throw error('Invoice not found', { status: 404 });
+      return await rest.updateOne('invoices', data.id, {
+        $set: { status: 'paid', paidAt: new Date() },
+      });
+    },
+
+    processPayment: async ({ rest, data }) => {
+      // Reuse markAsPaid action from the same collection
+      return await rest.runAction('invoices', 'markAsPaid', {
+        id: data.invoiceId,
+      });
+    },
+  },
+});
+```
+
+<details>
+<summary>Real-world example: cross-collection workflow</summary>
+
+```typescript
+// File: orders.model.ts (collection)
+actions: {
+  checkout: async ({ rest, data, error }) => {
+    const cart = await rest.findOne('carts', data.cartId);
+    if (!cart || !cart.items?.length) {
+      throw error('Cart is empty', { status: 400 });
+    }
+
+    const order = await rest.insertOne('orders', {
+      userId: cart.userId,
+      items: cart.items,
+      total: cart.items.reduce((s, i) => s + i.price * i.qty, 0),
+      status: 'pending',
+    });
+
+    const payment = await rest.runAction('payments', 'process', {
+      orderId: order._id,
+      method: data.paymentMethod,
+    });
+
+    if (payment.success) {
+      await rest.runAction('orders', 'confirm', { id: order._id });
+    }
+
+    await rest.deleteOne('carts', data.cartId);
+
+    return { order, payment };
+  },
+}
+```
+
+</details>
+
+---
+
+### runService
+
+Execute a service action programmatically.
+
+<Callout type="warn">
+**Avoid infinite loops.** When using `runService`, never call back into the same service action — directly or indirectly — as this will cause an infinite loop.
+
+```typescript
+// ❌ BAD — service calling itself
+// File: billing.service.ts (service)
+actions: {
+  generate: async ({ rest, data }) => {
+    return await rest.runService('billing', 'generate', data);
+  },
+}
+```
+
+```typescript
+// ❌ BAD — circular: collection action → service → same collection action
+// File: invoices.model.ts (collection)
+actions: {
+  process: async ({ rest, data }) => {
+    return await rest.runService('billing', 'charge', data);
+  },
+}
+// If billing.charge (billing.service.ts) calls rest.runAction('invoices', 'process', ...) → loop
+```
+
+```typescript
+// ✅ OK — calling a different service
+// File: orders.model.ts (collection)
+actions: {
+  checkout: async ({ rest, data }) => {
+    return await rest.runService('billing', 'generate', data);
+    // billing.generate does NOT call back into orders model
+  },
+}
+```
+
+Always target a different service or extract shared logic into a separate function.
+</Callout>
+
+**Example — defining a service and calling it from a collection action:**
+
+```typescript
+// File: billing.service.ts (service)
+import { define } from '@anteros/core';
+
+export default define.Service({
+  name: 'billing',
+  enabled: true,
+  actions: {
+    generate: async ({ rest, data }) => {
+      return await rest.insertOne('invoices', {
+        client: data.clientId,
+        total: data.total,
+        status: 'draft',
+      });
+    },
+  },
+});
+```
+
+Usage from a collection action:
+
+```typescript
+// File: orders.model.ts (collection)
+actions: {
+  checkout: async ({ rest, data, error }) => {
+    const cart = await rest.findOne('carts', data.cartId);
+    if (!cart) throw error('Cart not found', { status: 404 });
+
+    // Call the billing service to generate an invoice
+    const invoice = await rest.runService('billing', 'generate', {
+      clientId: cart.userId,
+      total: cart.items.reduce((s, i) => s + i.price * i.qty, 0),
+    });
+
+    // Call the notification service to send confirmation
+    await rest.runService('notifications', 'send', {
+      userId: cart.userId,
+      type: 'order_confirmation',
+      invoiceId: invoice._id,
+    });
+
+    return { invoice };
+  },
+}
+```
+
+<details>
+<summary>Real-world example: cross-service orchestration with error handling</summary>
+
+```typescript
+// File: users.model.ts (collection)
+actions: {
+  onboardUser: async ({ rest, data, error }) => {
+    // Create user
+    const user = await rest.insertOne('users', data);
+
+    try {
+      // Provision resources via external service
+      await rest.runService('provisioning', 'createWorkspace', {
+        userId: user._id,
+        plan: data.plan,
+      });
+
+      // Send welcome email
+      await rest.runService('notifications', 'sendEmail', {
+        to: data.email,
+        template: 'welcome',
+      });
+
+      // Log activity to analytics
+      await rest.runService('analytics', 'track', {
+        event: 'user.onboarded',
+        userId: user._id,
+      });
+    } catch (err) {
+      // Rollback: notify support of the partial failure
+      await rest.runService('support', 'createTicket', {
+        subject: 'Onboarding partial failure',
+        message: `User ${user._id} created but post-setup failed: ${err.message}`,
+      });
+      throw error('Onboarding failed, support has been notified', { status: 500 });
+    }
+
+    return user;
+  },
+}
+```
+
+</details>
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `service` | `string` | Service name |
+| `action` | `string` | Action name |
+| `data` | `any` | Data passed to the action |
+
+**Returns:** The return value of the service action
+
+The action receives the same context as when called via HTTP:
+
+```typescript
+{
+  data: any,       // The data argument
+  error: fn.error, // Error helper
+  io,              // Socket.IO server instance
+  jwt: func.jwt,   // JWT utilities
+  token,           // Current token from request context
+  rest: this,      // Rest instance
+}
+```
+
+---
+
+## Index Operations
+
+### dropIndex
+
+Drop a specific index.
+
+```typescript
+await rest.dropIndex('users', 'email_index');
+```
+
+### dropIndexes
+
+Drop all indexes.
+
+```typescript
+await rest.dropIndexes('users');
+```
+
+### dropCollection
+
+Drop the entire collection.
+
+```typescript
+await rest.dropCollection('users');
+```
+
+---
+
+## Transaction Support
+
+### startTransaction
+
+Start a transaction.
+
+```typescript
+rest.startTransaction();
+```
+
+### commitTransaction
+
+Commit the transaction.
+
+```typescript
+await rest.commitTransaction();
+```
+
+### abortTransaction
+
+Abort the transaction.
+
+```typescript
+await rest.abortTransaction();
+```
+
+### startSession
+
+Start a new session.
+
+```typescript
+const session = rest.startSession();
+```
+
+---
+
+## Change Streams
+
+### watch
+
+Watch for changes in a collection.
+
+```typescript
+const stream = await rest.watch('users', [
+  { $match: { operationType: 'insert' } }
+], { fullDocument: 'updateLookup' });
+```
+
+---
+
+## Distributed Locks
+
+Coordinate tasks across nodes in a cluster. Uses an atomic `findOneAndUpdate` on a `_locks_` collection. Only one node can hold a lock at a time per tenant.
+
+### How it works
+
+- The lock is identified by `{ tenant_id:name }` (composite `_id`)
+- Each lock has an `expiresAt` timestamp (TTL)
+- If `expiresAt` is passed, the lock is **automatically reacquired** — no manual cleanup needed
+- If the lock is still valid, `lock()` **throws** a `409 LOCK_ACQUISITION_FAILED` error
+- The `_locks_` collection is created automatically on first use
+
+```typescript
+try {
+  await rest.lock('backup', 600_000); // 10 min TTL
+  // seul ce nœud exécute le backup ici
+} catch (err) {
+  console.log('Backup already running on another node');
+  return;
+}
+try {
+  // ... backup logic ...
+} finally {
+  await rest.unlock('backup');
+}
+```
+
+### lock
+
+```typescript
+await rest.lock(name: string, ttlMs?: number): Promise<void>
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | `string` | — | Lock identifier (scoped to tenant) |
+| `ttlMs` | `number` | `300000` | Time-to-live in milliseconds (prevents orphan locks) |
+
+**Throws:**
+- `LOCK_ACQUISITION_FAILED` (409) — another node currently holds a valid lock
+
+**Returns:**
+- `void` — lock acquired successfully
+
+### unlock
+
+```typescript
+await rest.unlock(name: string): Promise<void>
+```
+
+Releases the lock immediately. **Always** call in a `finally` block to ensure release even on error.
+
+<Callout type="warn">
+Choose a TTL longer than your task duration. If the TTL expires before the task finishes, another node can steal the lock, causing duplicate execution.
+
+```typescript
+// ❌ backup takes ~2 min, TTL is 30s → lock stolen mid-execution
+await rest.lock('backup', 30_000);
+
+// ✅ backup takes ~2 min, TTL is 10 min → safe
+await rest.lock('backup', 600_000);
+```
+</Callout>
+
+---
+
+## Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `client` | `MongoClient` | MongoDB client |
+| `db` | `Db` | Database instance |
+| `tenant_id` | `string` | Current tenant ID |
+| `session` | `ClientSession` | Current session |

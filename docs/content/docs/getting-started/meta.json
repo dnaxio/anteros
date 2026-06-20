@@ -1,0 +1,6 @@
+{
+  "title": "Getting Started",
+  "icon": "Rocket",
+  "root": false,
+  "pages": ["introduction", "quick-start", "installation", "project-structure"]
+}

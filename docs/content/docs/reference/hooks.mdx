@@ -1,0 +1,137 @@
+---
+title: Hooks
+description: Lifecycle hooks in anteros Framework.
+icon: Anchor
+---
+
+
+Hooks allow you to execute logic before and after database operations.
+
+## Available Hooks
+
+| Hook | Description |
+|------|-------------|
+| `beforeOperation` | Before any operation |
+| `afterOperation` | After any operation |
+
+## Define Hooks
+
+```typescript
+import { define } from '@anteros/core';
+
+export default define.Collection({
+  slug: 'users',
+  fields: [
+    { name: 'name', type: 'string' },
+  ],
+  hooks: {
+    beforeOperation: async ({ action, rest, io, meta }) => {
+      console.log(`Before ${action}:`, meta);
+    },
+    afterOperation: async ({ action, rest, io, meta }) => {
+      console.log(`After ${action}:`, meta.result);
+      io.emit('operation:completed', { action, result: meta.result })
+    },
+  },
+});
+```
+
+## Hook Context
+
+Each hook receives a context object with the following properties:
+
+```typescript
+{
+  rest: useRest;         // Rest instance
+  io: SocketIO;          // Socket.IO server instance
+  action: string;        // Action name
+  meta: {
+    collection: string;
+    data?: any;
+    result?: any;
+    params?: any;
+    filter?: any;
+    update?: any;
+    ids?: string[];
+    id?: string;
+  };
+}
+```
+
+### `io` — Real-time Notifications
+
+The Socket.IO server instance allows you to emit events from hooks:
+
+```typescript
+hooks: {
+  afterOperation: async ({ io, meta }) => {
+    if (meta.action === 'insertOne') {
+      io.emit('document:created', meta.result)
+    }
+  }
+}
+```
+
+## Before Operation
+
+Use `beforeOperation` to:
+
+- Modify data before insertion
+- Validate custom conditions
+- Log operations
+- Add default values
+
+```typescript
+hooks: {
+  beforeOperation: async ({ action, rest, meta, data }) => {
+    if (action === 'insertOne') {
+      // Add createdBy field
+      meta.data.createdBy = 'system';
+    }
+    
+    if (action === 'deleteOne') {
+      // Soft delete instead of hard delete
+      await rest.updateOne(meta.collection, meta.id, {
+        $set: { deletedAt: new Date(), status: 'deleted' }
+      });
+      return false; // Skip original operation
+    }
+  },
+}
+```
+
+## After Operation
+
+Use `afterOperation` to:
+
+- Trigger notifications
+- Log results
+- Cleanup
+
+```typescript
+hooks: {
+  afterOperation: async ({ action, rest, meta }) => {
+    if (action === 'insertOne') {
+      console.log('Created document:', meta.result._id);
+    }
+    
+    if (action === 'updateMany') {
+      console.log(`Updated ${meta.result.modifiedCount} documents`);
+    }
+  },
+}
+```
+
+## Access Hook Meta
+
+| Action | Available Meta |
+|--------|-------------|
+| `find` | `params`, `options` |
+| `findOne` | `params`, `id` |
+| `insertOne` | `data`, `result` |
+| `insertMany` | `data`, `result` |
+| `updateOne` | `update`, `id`, `result` |
+| `updateMany` | `update`, `ids`, `result` |
+| `deleteOne` | `id`, `result` |
+| `deleteMany` | `ids`, `result` |
+| `aggregate` | `pipeline`, `result` |

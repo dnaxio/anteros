@@ -1,0 +1,73 @@
+---
+title: Tenant
+description: Configure tenants — isolated databases and code roots for multi-tenant apps.
+icon: Building2
+---
+
+A **tenant** is an isolated slice of your app: its own MongoDB connection and its own on-disk folder for collections, routes, and scripts.
+
+## Required fields
+
+| Field | Description |
+|-------|-------------|
+| `id` | Unique identifier used in URLs: `POST /api/:tenant_id/:collection/:action`. |
+| `dir` | Path **relative to the project root** (working directory when the server starts). anteros resolves `collections/`, `routes/`, and `scripts/` under this path. **Omitting `dir` is not supported.** |
+| `database.uri` | MongoDB connection string for this tenant. |
+
+## Optional fields
+
+| Field | Description |
+|-------|-------------|
+| `name` | Human-readable label (logging, UI). |
+| `description` | Free-text description. |
+| `routes.prefix` | Base path for custom routes (`**/*.route.ts`). Without a prefix, the `routes/` folder is not loaded. |
+| `database.options` | Extra options passed to the MongoDB client. |
+
+## Example
+
+```typescript
+import { define, app } from '@anteros/core';
+
+await app.boot(
+  define.Server({
+    server: { port: 4000 },
+    tenants: [
+      {
+        id: 'v1',
+        dir: 'v1',
+        routes: { prefix: '/api/v1' },
+        database: {
+          uri: 'mongodb://localhost:27017/myapp',
+          options: { maxPoolSize: 10 },
+        },
+      },
+    ],
+  }),
+);
+```
+
+## Layout under `dir`
+
+Relative to `tenant.dir` (e.g. `v1/`):
+
+| Path | Role |
+|------|------|
+| `collections/**/*.model.ts` | Collection models |
+| `routes/**/*.route.ts` | Custom HTTP routes (needs `routes.prefix`) |
+| `scripts/**/*.run.ts` | Scripts run shortly after boot |
+| `services/**/*.service.ts` | Tenant-scoped services exposed under `/services/:tenant_id/...` |
+
+Several tenants can share the same `dir` or use different folders (e.g. `v1`, `tenants/client-a`).
+
+For a full repo layout (cache, `config/`, `uploads/`, optional `services/`, `tasks/`, etc.), see **[Project structure](/docs/getting-started/project-structure)**.
+
+
+## See also
+
+- [Configuration](/docs/reference/configuration) — server options and tenant table
+- [Project structure](/docs/getting-started/project-structure)
+- [Quick Start](/docs/getting-started/quick-start)
+- [Collections](/docs/reference/collections)
+- [Routes](/docs/reference/routes)
+- [Scripts](/docs/reference/scripts)
+- [Services](/docs/reference/services)

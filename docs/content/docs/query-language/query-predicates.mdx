@@ -1,0 +1,216 @@
+---
+title: Query Predicates
+description: Filter and match documents using query predicates.
+icon: Filter
+---
+
+Query predicates are used in the `$match` pipeline stage (passed to `rest.find()`, `rest.aggregate()`, and other methods) to filter documents before further processing. They use MongoDB's query syntax.
+
+---
+
+## Comparison Operators
+
+| Operator | Description |
+|----------|-------------|
+| `$eq` | Equal to |
+| `$ne` | Not equal to |
+| `$gt` | Strictly greater than |
+| `$gte` | Greater than or equal |
+| `$lt` | Strictly less than |
+| `$lte` | Less than or equal |
+| `$in` | Value is in the given array |
+| `$nin` | Value is NOT in the given array |
+
+```typescript
+import { useRest } from '@anteros/core';
+
+const rest = new useRest({ tenant_id: 'v1' });
+
+// Produits entre 10€ et 100€, publiés, en stock
+const products = await rest.find('products', {
+  $match: {
+    price:  { $gte: 10, $lte: 100 },
+    status: { $in: ['published', 'featured'] },
+    stock:  { $gt: 0 }
+  }
+});
+```
+
+```typescript
+// Utilisateurs sauf admins et modérateurs
+const regularUsers = await rest.find('users', {
+  $match: {
+    role: { $nin: ['admin', 'moderator'] }
+  }
+});
+```
+
+---
+
+## Logical Operators
+
+| Operator | Description |
+|----------|-------------|
+| `$and` | All conditions must match |
+| `$or` | At least one condition must match |
+| `$nor` | None of the conditions must match |
+| `$not` | Inverts the condition that follows |
+
+```typescript
+// Admins OU utilisateurs avec la permission manage_users
+const privileged = await rest.find('users', {
+  $match: {
+    $or: [
+      { role: 'admin' },
+      { permissions: { $in: ['manage_users'] } }
+    ],
+    status: { $ne: 'banned' }
+  }
+});
+```
+
+```typescript
+// Utilisateurs majeurs ET soit premium soit vérifiés
+const eligible = await rest.find('users', {
+  $match: {
+    $and: [
+      { age: { $gte: 18 } },
+      {
+        $or: [
+          { plan: 'premium' },
+          { verified: true }
+        ]
+      }
+    ]
+  }
+});
+```
+
+---
+
+## Element Operators
+
+| Operator | Description |
+|----------|-------------|
+| `$exists` | Field exists (or does not exist) |
+| `$type` | Field matches the given BSON type |
+
+```typescript
+// Utilisateurs qui ont un téléphone renseigné
+const withPhone = await rest.find('users', {
+  $match: { phone: { $exists: true } }
+});
+
+// Documents dont le champ discount est un nombre
+const numericDiscount = await rest.find('products', {
+  $match: { discount: { $type: ['int', 'double', 'decimal'] } }
+});
+```
+
+---
+
+## Array Operators
+
+| Operator | Description |
+|----------|-------------|
+| `$all` | Array field contains ALL specified values |
+| `$elemMatch` | At least one array element matches all conditions |
+| `$size` | Array field has exactly N elements |
+
+```typescript
+// Utilisateurs possédant AU MOINS les permissions read ET write
+const withRw = await rest.find('users', {
+  $match: { permissions: { $all: ['read', 'write'] } }
+});
+
+// Commandes contenant au moins un article à plus de 100€
+const bigOrders = await rest.find('orders', {
+  $match: {
+    items: { $elemMatch: { price: { $gt: 100 } } }
+  }
+});
+
+// Utilisateurs avec exactement 3 rôles
+const threeRoles = await rest.find('users', {
+  $match: { roles: { $size: 3 } }
+});
+```
+
+---
+
+## Evaluation Operators
+
+| Operator | Description |
+|----------|-------------|
+| `$regex` | Pattern matching (regular expression) |
+| `$expr` | Use aggregation expressions inside a query |
+| `$mod` | Modulo operation |
+| `$text` | Full-text search on a text index |
+
+```typescript
+// Tous les emails en @gmail.com (insensible à la casse)
+const gmailUsers = await rest.find('users', {
+  $match: {
+    email: { $regex: /@gmail\.com$/, $options: 'i' }
+  }
+});
+```
+
+```typescript
+// Utilisateurs dont les dépenses ≥ leur limite de crédit
+const overLimit = await rest.find('users', {
+  $match: {
+    $expr: { $gte: ['$spent', '$creditLimit'] }
+  }
+});
+```
+
+```typescript
+// Documents où quantity est un multiple de 4
+const multiples = await rest.find('items', {
+  $match: { quantity: { $mod: [4, 0] } }
+});
+```
+
+---
+
+## Geospatial Operators
+
+| Operator | Description |
+|----------|-------------|
+| `$geoWithin` | Geometry inside a defined region |
+| `$geoIntersects` | Geometry intersects a region |
+| `$near` | Points near a geographic point |
+| `$nearSphere` | Points near a point (spherical geometry) |
+
+```typescript
+// Boutiques dans un rayon de 5 km autour de Paris (2.35, 48.85)
+const nearbyShops = await rest.find('shops', {
+  $match: {
+    location: {
+      $near: {
+        $geometry: { type: 'Point', coordinates: [2.35, 48.85] },
+        $maxDistance: 5000
+      }
+    }
+  }
+});
+```
+
+---
+
+## Bitwise Operators
+
+| Operator | Description |
+|----------|-------------|
+| `$bitsAllSet` | All specified bits are set |
+| `$bitsAllClear` | All specified bits are clear |
+| `$bitsAnySet` | At least one of the specified bits is set |
+| `$bitsAnyClear` | At least one of the specified bits is clear |
+
+```typescript
+// Documents avec le bit 3 (valeur 8) activé dans le champ flags
+const withFlag = await rest.find('configs', {
+  $match: { flags: { $bitsAllSet: 8 } }
+});
+```

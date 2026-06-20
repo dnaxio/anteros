@@ -1,0 +1,124 @@
+---
+title: Quick Start
+description: Create a minimal Anteros project and call the API in a few minutes.
+icon: Play
+---
+
+Follow these steps from an empty folder. You need **Bun** and a running **MongoDB** instance.
+
+The application **entry file must live at the repository root**: **`index.ts`** (same directory as `package.json`), e.g. `./index.ts`. Do not put the boot script inside the tenant folder — by convention this guide uses **`v1/`** as `dir` (collections, routes, scripts live there).
+
+## 1. Create the project
+
+```bash
+mkdir my-anteros-app && cd my-anteros-app
+bun init -y
+bun add @anteros/core@0.0.1
+```
+
+Ensure `package.json` uses ESM if needed (`"type": "module"`).
+
+## 2. Layout
+
+Create the tenant code root and a first collection:
+
+```bash
+mkdir -p v1/collections
+```
+
+```
+my-anteros-app/
+├── package.json
+├── index.ts
+└── v1/
+    └── collections/
+        └── items.model.ts
+```
+
+## 3. Define a collection
+
+`v1/collections/items.model.ts`:
+
+```typescript
+import { define } from "@anteros/core";
+
+export default define.Collection({
+  slug: "items",
+  api: {
+    access: { "*": true },
+  },
+  fields: [{ name: "name", type: "string", required: true }],
+});
+```
+
+`access: { '*': true }` allows all built-in actions for this walkthrough. Tighten rules later with [Access control](/docs/reference/access-control).
+
+## 4. Boot the server
+
+Create **`index.ts` at the project root** (not inside the tenant folder `v1/`):
+
+```typescript
+import { app } from "@anteros/core";
+
+await app.boot({
+  server: { port: 4000 },
+  tenants: [
+    {
+      id: "v1",
+      dir: "v1",
+      database: { uri: "mongodb://localhost:27017/quickstart" },
+    },
+  ],
+});
+```
+
+Add scripts in `package.json`:
+
+```json
+{
+  "scripts": {
+    "start": "bun run index.ts",
+    "dev": "bun --watch index.ts"
+  }
+}
+```
+
+Start MongoDB, then:
+
+```bash
+bun run start
+```
+
+For local development with automatic restarts when files change:
+
+```bash
+bun run dev
+```
+
+The generic API is **`POST /api/:tenant_id/:collection/:action`**. Here `tenant_id` is **`v1`** (same value as `tenants[].id`) and the collection slug is `items`.
+
+## 5. Call the API
+
+Insert a document:
+
+```bash
+curl -s -X POST http://localhost:4000/api/v1/items/insertOne \
+  -H 'Content-Type: application/json' \
+  -d '{"data":{"name":"Hello"}}'
+```
+
+List documents:
+
+```bash
+curl -s -X POST http://localhost:4000/api/v1/items/find \
+  -H 'Content-Type: application/json' \
+  -d '{"params":{}}'
+```
+
+## Next
+
+- [Project structure](/docs/getting-started/project-structure) — full repo layout (`config/`, `v1/` subfolders, uploads)
+- [Tenant](/docs/reference/tenants) — `dir`, optional `routes.prefix`, multiple tenants
+- [Installation](/docs/getting-started/installation) — requirements and install options
+- [Configuration](/docs/reference/configuration) — server, JWT, CORS, IP rules
+- [Collections](/docs/reference/collections) — fields, validation, hooks

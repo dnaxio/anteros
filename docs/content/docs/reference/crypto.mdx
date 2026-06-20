@@ -1,0 +1,99 @@
+---
+title: Crypto
+description: Encryption utilities for anteros Framework.
+icon: Key
+---
+
+anteros Framework provides built-in encryption utilities to protect sensitive data, available through the `crypto` export.
+
+## Overview
+
+The crypto module exposes two high-level APIs:
+
+| Utility | Algorithm | Use case |
+|---------|-----------|----------|
+| `useSymCrypt` | AES-256-GCM | Fast encryption with a shared secret |
+| `useAsymCrypt` | RSA-OAEP + AES-256-GCM | Secure key exchange, multi-party encryption |
+
+Both utilities are fully async and rely on the standard Web Crypto API under the hood.
+
+## Symmetric encryption
+
+Use `useSymCrypt` when you have a single secret known by both the encryptor and decryptor.
+
+```typescript
+import { crypto } from '@anteros/core';
+
+const cipher = crypto.useSymCrypt({ secret: process.env.APP_SECRET! });
+
+// Encrypt
+const encrypted = await cipher.encrypt({ apiKey: 'sk-xxx' });
+
+// Decrypt
+const data = await cipher.decrypt(encrypted, true); // true = parse JSON
+```
+
+### API
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `encrypt(data: string \| object)` | `Promise<string>` | Encrypts and returns a base64 ciphertext |
+| `decrypt<T>(cipher: string, parseJson?: boolean)` | `Promise<T>` | Decrypts base64 ciphertext back to plaintext or JSON |
+
+The symmetric implementation derives a 256-bit key from your secret using SHA-256, then encrypts with AES-GCM (random 12-byte IV, 16-byte auth tag).
+
+## Asymmetric encryption
+
+Use `useAsymCrypt` when you need to encrypt with a public key and decrypt with a private key, or when parties do not share a common secret.
+
+```typescript
+import { crypto } from '@anteros/core';
+
+const cipher = crypto.useAsymCrypt();
+
+// Encrypt
+const encrypted = await cipher.encrypt({ password: 'hunter2' });
+
+// Export keys for storage
+const privateJwk = await cipher.exportPrivateKey();
+const publicJwk  = await cipher.exportPublicKey();
+```
+
+### Reuse an existing key pair
+
+```typescript
+const cipher = crypto.useAsymCrypt({ privateKey: storedJwk });
+const data   = await cipher.decrypt(encrypted, true);
+```
+
+### Encrypt with an external public key
+
+```typescript
+const cipher   = crypto.useAsymCrypt();
+const publicKey = await cipher.importPublicKey(externalPublicJwk);
+const encrypted = await cipher.encrypt('sensitive data', publicKey);
+```
+
+### API
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `encrypt(data, publicKey?)` | `Promise<string>` | Encrypts using RSA-OAEP + AES-256-GCM envelope |
+| `decrypt<T>(cipher, parseJson?)` | `Promise<T>` | Decrypts with the private key |
+| `exportPublicKey()` | `Promise<JsonWebKey>` | Returns the public key in JWK format |
+| `exportPrivateKey()` | `Promise<JsonWebKey>` | Returns the private key in JWK format |
+| `importPublicKey(jwk)` | `Promise<CryptoKey>` | Imports a JWK public key for encryption |
+
+The asymmetric implementation generates a 2048-bit RSA-OAEP key pair and uses envelope encryption: data is encrypted with a random AES-256-GCM key, and that key is then encrypted with RSA.
+
+## Error handling
+
+Both utilities throw descriptive errors on failure (tampered data, wrong key, malformed ciphertext, etc.).
+
+```typescript
+try {
+  const data = await cipher.decrypt(possiblyTampered);
+} catch (err) {
+  // "Decryption failed: invalid ciphertext or tampered data"
+}
+```
