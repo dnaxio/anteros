@@ -28,20 +28,17 @@ export type Collection = {
                 payload: any;
                 error: typeof fn.error;
                 jwt: typeof jwt;
-                req: {
-                    cookies: {
-                        set: (name: string, value: string, options?: {
-                            httpOnly?: boolean;
-                            secure?: boolean;
-                            maxAge?: number;
-                            path?: string;
-                            domain?: string;
-                            sameSite?: 'lax' | 'strict' | 'none';
-                        }) => any;
-                        get: (name: string) => string | undefined;
-                        delete: (name: string) => void;
-                    }
-
+                cookies: {
+                    set: (name: string, value: string, options?: {
+                        httpOnly?: boolean;
+                        secure?: boolean;
+                        maxAge?: number;
+                        path?: string;
+                        domain?: string;
+                        sameSite?: 'lax' | 'strict' | 'none';
+                    }) => any;
+                    get: (name: string) => string | undefined;
+                    delete: (name: string) => void;
                 }
             }) => Promise<{
                 token: string;
@@ -52,10 +49,8 @@ export type Collection = {
                 payload: any;
                 error: typeof fn.error;
                 jwt: typeof jwt;
-                req: {
-                    cookies: {
-                        delete: (name: string) => void;
-                    }
+                cookies: {
+                    delete: (name: string) => void;
                 }
             }) => Promise<void>;
         };
