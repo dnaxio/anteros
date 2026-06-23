@@ -106,23 +106,42 @@ Content-Type: application/json
 }
 ```
 
-## Cookie Options
+## Cookies
 
-The login handler receives a `cookies` object to manage cookies:
+The `onLogin` and `onLogout` handlers receive a `cookies` object:
 
 ```typescript
-onLogin: async ({ cookies, jwt }) => {
-  const token = await jwt.sign({ sub: userId });
+cookies.set(name: string, value: string, options?: CookieOptions): void
+cookies.get(name: string): string | undefined
+cookies.delete(name: string): void
+```
 
-  // Set cookie
+### Set a cookie
+
+```typescript
+onLogin: async ({ cookies, jwt, rest, payload }) => {
+  // ... authenticate user ...
+  const token = await jwt.sign({ sub: user._id });
+
   cookies.set('auth_token', token, {
     httpOnly: true,
     secure: true,
+    domain: '.example.com',
     maxAge: 60 * 60 * 24 * 7, // 7 days
     path: '/',
   });
 
   return { token, data: { user } };
+}
+```
+
+### Read and delete a cookie
+
+```typescript
+onLogout: async ({ cookies }) => {
+  const token = cookies.get('auth_token');
+  console.log('Clearing token:', token?.slice(0, 10) + '...');
+  cookies.delete('auth_token');
 }
 ```
 
@@ -132,9 +151,9 @@ onLogin: async ({ cookies, jwt }) => {
 |--------|------|---------|-------------|
 | `httpOnly` | `boolean` | `true` | Prevent XSS access |
 | `secure` | `boolean` | `false` | HTTPS only |
-| `maxAge` | `number` | - | Expiration in seconds |
+| `maxAge` | `number` | — | Expiration in seconds |
 | `path` | `string` | `'/'` | Cookie path |
-| `domain` | `string` | - | Cookie domain |
+| `domain` | `string` | — | Cookie domain (use `.example.com` for subdomains) |
 | `sameSite` | `'lax' \| 'strict' \| 'none'` | `'lax'` | Same-site policy |
 
 ## JWT utilities
