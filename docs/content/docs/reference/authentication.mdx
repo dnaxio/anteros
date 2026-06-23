@@ -51,7 +51,7 @@ export default define.Collection({
           data: { user },
         };
       },
-      onLogout: async ({ jwt, req }) => {
+      onLogout: async ({ cookies }) => {
         // Optional: cleanup logic
       },
     },
@@ -111,17 +111,17 @@ Content-Type: application/json
 The login handler receives a `cookies` object to manage cookies:
 
 ```typescript
-onLogin: async ({ rest, req }) => {
+onLogin: async ({ cookies, jwt }) => {
   const token = await jwt.sign({ sub: userId });
-  
+
   // Set cookie
-  req.cookies.set('auth_token', token, {
+  cookies.set('auth_token', token, {
     httpOnly: true,
     secure: true,
     maxAge: 60 * 60 * 24 * 7, // 7 days
     path: '/',
   });
-  
+
   return { token, data: { user } };
 }
 ```

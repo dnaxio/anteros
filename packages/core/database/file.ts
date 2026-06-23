@@ -10,13 +10,11 @@ async function syncFileCollections() {
         const fileCollections: FileCollection[] = []
         for (let tenant of cfg.tenants ?? []) {
             const TENANT_PATH = path.join(process.cwd(), tenant.dir)
-            const FILES_PATH = path.join(TENANT_PATH, 'files')
-            let exist = await fs.exists(FILES_PATH)
-            if (!exist) continue;
-            const isDirectory = await (await fs.stat(FILES_PATH)).isDirectory()
 
-            if (isDirectory) {
-                // Charger les fichiers *.file.ts
+            // Scan files/ directory
+            const FILES_PATH = path.join(TENANT_PATH, 'files')
+            const filesExist = await fs.exists(FILES_PATH).catch(() => false)
+            if (filesExist && (await fs.stat(FILES_PATH)).isDirectory()) {
                 const globFiles = new Glob(path.join(FILES_PATH, '**/*.file.ts'))
                 for await (let file of globFiles.scan('.')) {
                     let fileModule = await import(file)
@@ -28,9 +26,25 @@ async function syncFileCollections() {
                     }
                 }
 
-                // Charger aussi les fichiers *.model.ts avec _isFileCollection_
+                // Also scan *.model.ts in files/ with _isFileCollection_
                 const globModels = new Glob(path.join(FILES_PATH, '**/*.model.ts'))
                 for await (let file of globModels.scan('.')) {
+                    let fileModule = await import(file)
+                    if (fileModule?.default?._isFileCollection_) {
+                        fileCollections.push({
+                            ...fileModule?.default,
+                            _tenant_: tenant.id
+                        })
+                    }
+                }
+            }
+
+            // Also scan collections/ directory for *.file.ts
+            const COLLECTIONS_PATH = path.join(TENANT_PATH, 'collections')
+            const collectionsExist = await fs.exists(COLLECTIONS_PATH).catch(() => false)
+            if (collectionsExist && (await fs.stat(COLLECTIONS_PATH)).isDirectory()) {
+                const globFiles = new Glob(path.join(COLLECTIONS_PATH, '**/*.file.ts'))
+                for await (let file of globFiles.scan('.')) {
                     let fileModule = await import(file)
                     if (fileModule?.default?._isFileCollection_) {
                         fileCollections.push({

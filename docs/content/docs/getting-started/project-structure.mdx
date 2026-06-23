@@ -36,8 +36,8 @@ Below is a **recommended** repository layout. This guide uses **`v1/`** as the t
 
 | Path | Pattern | Notes |
 |------|---------|--------|
-| `collections/` | `**/*.model.ts` | Defines collections and API rules |
-| `files/` | `**/*.file.ts` | Defines file collections (upload, storage) |
+| `collections/` | `**/*.model.ts` or `**/*.file.ts` | Defines collections and file collections |
+| `files/` | `**/*.file.ts` | Defines file collections (alternative to `collections/`) |
 | `routes/` | `**/*.route.ts` | Registered only if the tenant has `routes.prefix` |
 | `scripts/` | `**/*.run.ts` | Runs shortly after the server is ready |
 | `services/` | `**/*.service.ts` | Exposed under `POST /services/:tenant_id/:service/:action` |

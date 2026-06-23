@@ -250,12 +250,10 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
                         payload: body?.payload,
                         error: fn.error,
                         jwt: func.jwt,
-                        req: {
-                            cookies: {
-                                delete: (name: string) => {
-                                    cookie.deleteCookie(c, name)
-                                },
-                            }
+                        cookies: {
+                            delete: (name: string) => {
+                                cookie.deleteCookie(c, name)
+                            },
                         }
                     })
 
@@ -296,26 +294,24 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
                             payload: body?.payload,
                             error: fn.error,
                             jwt: func.jwt,
-                            req: {
-                                cookies: {
-                                    set: (name: string, value: string, options?: {
-                                        httpOnly?: boolean;
-                                        secure?: boolean;
-                                        maxAge?: number;
-                                        path?: string;
-                                        domain?: string;
-                                        sameSite?: 'lax' | 'strict' | 'none';
-                                    }) => {
-                                        cookie.setCookie(c, name, value, options)
-                                    },
-                                    get: (name: string) => {
-                                        return cookie.getCookie(c, name)
-                                    },
-                                    delete: (name: string) => {
-                                        cookie.deleteCookie(c, name)
-                                    },
+                            cookies: {
+                                set: (name: string, value: string, options?: {
+                                    httpOnly?: boolean;
+                                    secure?: boolean;
+                                    maxAge?: number;
+                                    path?: string;
+                                    domain?: string;
+                                    sameSite?: 'lax' | 'strict' | 'none';
+                                }) => {
+                                    cookie.setCookie(c, name, value, options)
+                                },
+                                get: (name: string) => {
+                                    return cookie.getCookie(c, name)
+                                },
+                                delete: (name: string) => {
+                                    cookie.deleteCookie(c, name)
+                                },
 
-                                }
                             }
 
                         })

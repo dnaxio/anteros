@@ -6,14 +6,14 @@ icon: Upload
 
 ## File Collections
 
-Files are managed through dedicated **file collections**, defined in `files/**/*.file.ts` for each tenant.
+Files are managed through dedicated **file collections**, defined in `**/*.file.ts` inside either `files/` or `collections/` for each tenant.
 
 Unlike classic collections (documents), file collections are designed exclusively for file storage, validation and serving.
 
 ### Definition
 
 ```typescript
-// files/photos.file.ts
+// files/photos.file.ts  — or collections/photos.file.ts
 import { define } from '@anteros/core'
 
 export default define.FileCollection({
@@ -48,7 +48,6 @@ export default define.FileCollection({
     driver: 'disk',
     path: 'uploads/photos'
   },
-  trackMetaData: true,
   api: {
     access: {
       '*': (ctx) => !!ctx.token.value,                                // auth required
@@ -85,13 +84,13 @@ curl -X POST /upload/v1/photos \
 Response:
 ```json
 {
-  "_id": "a1b2c3d4-...",
+  "_id": "507f1f77bcf86cd799439011",
   "_file": {
-    "filename": "a1b2c3d4-....jpg",
+    "filename": "507f1f77bcf86cd799439011.jpg",
     "name": "photo.jpg",
     "mimetype": "image/jpeg",
     "size": 2048576,
-    "url": "/files/v1/photos/a1b2c3d4-....jpg"
+    "url": "/files/v1/photos/507f1f77bcf86cd799439011.jpg"
   },
   "description": "Profile photo",
   "alt": "My avatar"
@@ -104,10 +103,10 @@ The form field must be named `file` or `upload`. All other fields are stored in 
 
 ```bash
 # Original version
-curl /files/v1/photos/a1b2c3d4-....jpg
+curl /files/v1/photos/507f1f77bcf86cd799439011.jpg
 
 # With transformations (images only)
-curl "/files/v1/photos/a1b2c3d4-....jpg?w=200&h=200&format=webp&q=80"
+curl "/files/v1/photos/507f1f77bcf86cd799439011.jpg?w=200&h=200&format=webp&q=80"
 ```
 
 ### Delete a file
@@ -116,7 +115,7 @@ Pass the document `_id` returned by the upload response:
 
 ```bash
 # Use the _id from the upload response
-curl -X DELETE /files/v1/photos/a1b2c3d4-...
+curl -X DELETE /files/v1/photos/507f1f77bcf86cd799439011
 ```
 
 > Unlike `GET`, the `DELETE` endpoint uses the document `_id` directly — not the full `_id.ext` filename. The server looks up the stored filename from MongoDB, deletes the physical file from storage, then removes the document.
@@ -134,10 +133,10 @@ Transformations are applied **on the fly** via query parameters on the `GET /fil
 
 ```bash
 # 200×200 thumbnail in WebP quality 60
-curl "/files/v1/photos/abc.jpg?w=200&h=200&format=webp&q=60"
+curl "/files/v1/photos/507f1f77bcf86cd799439011.jpg?w=200&h=200&format=webp&q=60"
 
 # Width-only resize (height auto)
-curl "/files/v1/photos/abc.jpg?w=300"
+curl "/files/v1/photos/507f1f77bcf86cd799439011.jpg?w=300"
 ```
 
 Transformations preserve the original aspect ratio (`fit: inside`) and never upscale the image (`withoutEnlargement: true`).
@@ -321,12 +320,11 @@ SSH/SFTP authentication uses **SSH keys** by default. If `privateKey` is not pro
 | `api.access` | `FileApiAccess` | — | Access control (`*`, `upload`, `read`, `delete`) |
 | `api.privateFields` | `(string \| RegExp)[]` | — | Private document fields |
 | `api.readOnlyFields` | `(string \| RegExp)[]` | — | Read-only fields |
-| `trackMetaData` | `boolean` | `true` | Store metadata in database + audit |
 | `replicate` | `ReplicateTarget[]` | — | Replication to S3, SSH or SFTP |
 
 ## Audit & Tracking
 
-When `trackMetaData: true` is enabled, each upload records a document in the MongoDB collection and in the audit log (`_activities_`) with `collectionType: "file"`:
+Each upload records a document in the MongoDB collection and in the audit log (`_activities_`) with `collectionType: "file"`:
 
 ```json
 {
@@ -338,7 +336,7 @@ When `trackMetaData: true` is enabled, each upload records a document in the Mon
     "input": {
       "data": {
         "_file": {
-          "filename": "a1b2c3d4-....jpg",
+          "filename": "507f1f77bcf86cd799439011.jpg",
           "name": "photo.jpg",
           "mimetype": "image/jpeg",
           "size": 2048576

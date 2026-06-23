@@ -6,7 +6,7 @@ import type { FileCollection } from "../types/file";
 import path from "path";
 import fs from "fs/promises";
 import { createReadStream, existsSync, mkdirSync } from "fs";
-import crypto from "crypto";
+import { ObjectId } from "mongodb";
 
 // ─── Storage Interface ──────────────────────────────────────────────────────
 
@@ -257,38 +257,50 @@ export async function handleUpload(options: UploadOptions): Promise<FileResult> 
     });
   }
 
-  const id = crypto.randomUUID();
-  const storage = getStorageForCollection(collection, tenant_id);
-  const subpath = col.storage?.path || undefined;
-  const { path: filepath, size } = await storage.save(tenant_id, collection, file, { id, mimetype, subpath });
-
-  const ext = path.extname(file.name);
-  const filename = `${id}${ext}`;
-
-  // Enregistrer les métadonnées en base si trackMetaData est activé
-  if (col.trackMetaData !== false) {
-    try {
-      const rest = new useRest({ tenant_id, internal: false, useHook: false, useCustomApi: false });
-      await rest.insertOne(collection, {
-        _id: id,
-        _file: {
-          filename,
-          name: file.name,
-          mimetype,
-          size,
-          url: `/files/${tenant_id}/${collection}/${filename}`,
-        },
-        ...(data || {}),
-      });
-    } catch (err) {
-      await storage.delete(tenant_id, collection, id, filename).catch(() => {});
-      throw new AppError('Failed to save file metadata', {
-        code: 'FILE_METADATA_ERROR', status: 500,
-      });
-    }
+  // Insert metadata first to get the MongoDB auto-generated ObjectId
+  let _id: string;
+  try {
+    const rest = new useRest({ tenant_id, internal: false, useHook: false, useCustomApi: false });
+    const result = await rest.db.collection(collection).insertOne({
+      _file: {
+        filename: '',
+        name: file.name,
+        mimetype,
+        size: 0,
+        url: '',
+      },
+      ...(data || {}),
+    });
+    _id = String(result.insertedId);
+  } catch (err) {
+    throw new AppError('Failed to save file metadata', {
+      code: 'FILE_METADATA_ERROR', status: 500,
+    });
   }
 
-  // Réplication vers les destinations configurées
+  // Save the physical file to storage
+  const ext = path.extname(file.name);
+  const filename = `${_id}${ext}`;
+  const storage = getStorageForCollection(collection, tenant_id);
+  const subpath = col.storage?.path || undefined;
+  const { path: filepath, size } = await storage.save(tenant_id, collection, file, { id: _id, mimetype, subpath });
+
+  // Update MongoDB with actual file info
+  const url = `/files/${tenant_id}/${collection}/${filename}`;
+  try {
+    const rest = new useRest({ tenant_id, internal: true, useHook: false, useCustomApi: false });
+    await rest.db.collection(collection).updateOne(
+      { _id: new ObjectId(_id) },
+      { $set: { '_file.filename': filename, '_file.size': size, '_file.url': url } },
+    );
+  } catch (err) {
+    await storage.delete(tenant_id, collection, _id, filename, subpath).catch(() => {});
+    throw new AppError('Failed to update file metadata', {
+      code: 'FILE_METADATA_ERROR', status: 500,
+    });
+  }
+
+  // Replicate to configured destinations
   if (col.replicate?.length) {
     replicateFile(filepath, filename, col.replicate).catch(err => {
       console.error('Replication failed:', err?.message || err);
@@ -296,13 +308,13 @@ export async function handleUpload(options: UploadOptions): Promise<FileResult> 
   }
 
   return {
-    _id: id,
+    _id,
     _file: {
       filename,
       name: file.name,
       mimetype,
       size,
-      url: `/files/${tenant_id}/${collection}/${filename}`,
+      url,
     },
     ...(data || {}),
   };
@@ -355,23 +367,24 @@ export async function handleDelete(
 ): Promise<void> {
   const storage = getStorageForCollection(collection, tenant_id);
   const col = getFileCollection(collection, tenant_id);
+  const subpath = col?.storage?.path || undefined;
 
-  // Look up the document to get the stored filename
+  // Look up the document in MongoDB to get the stored filename
   let filename: string | undefined;
-  if (col?.trackMetaData !== false) {
-    try {
-      const rest = new useRest({ tenant_id, internal: true, useHook: false, useCustomApi: false });
-      const doc = await rest.findOne<any>(collection, fileId);
-      filename = doc?._file?.filename;
-    } catch {}
-  }
+  try {
+    const rest = new useRest({ tenant_id, internal: true, useHook: false, useCustomApi: false });
+    const doc = await rest.db.collection(collection).findOne(
+      { _id: ObjectId.isValid(fileId) ? new ObjectId(fileId) : fileId },
+      { projection: { '_file.filename': 1 } },
+    );
+    filename = doc?._file?.filename;
+  } catch {}
 
   // Delete the physical file from storage
-  const subpath = col?.storage?.path || undefined;
   if (filename) {
     await storage.delete(tenant_id, collection, fileId, filename, subpath);
   } else {
-    // Fallback: try common extensions
+    // Fallback: try common extensions using the fileId as base name
     for (const ext of ['.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif', '.svg', '.pdf', '.mp4', '.webm', '.mp3', '.wav', '.json', '.csv', '.zip', '']) {
       try {
         await storage.delete(tenant_id, collection, fileId, fileId + ext, subpath);
@@ -380,14 +393,14 @@ export async function handleDelete(
     }
   }
 
-  // Delete the metadata document from MongoDB
-  if (col?.trackMetaData !== false) {
-    try {
-      const rest = new useRest({ tenant_id, internal: true, useHook: false, useCustomApi: false });
-      await rest.deleteOne(collection, fileId);
-    } catch (err: any) {
-      console.error('Failed to delete file metadata:', err?.message || err);
-    }
+  // Delete the document from MongoDB
+  try {
+    const rest = new useRest({ tenant_id, internal: true, useHook: false, useCustomApi: false });
+    await rest.db.collection(collection).deleteOne({
+      _id: ObjectId.isValid(fileId) ? new ObjectId(fileId) : fileId,
+    });
+  } catch (err: any) {
+    console.error('Failed to delete file metadata:', err?.message || err);
   }
 }
 
