@@ -17,6 +17,8 @@ import { exec } from "./commands/exec.ts"
 import { env } from "./commands/env.ts"
 import { proxy } from "./commands/proxy.ts"
 import { history } from "./commands/history.ts"
+import { alerts } from "./commands/alerts.ts"
+import { metrics } from "./commands/metrics.ts"
 
 const COMMANDS: Record<string, { run: Command; summary: string; usage?: string }> = {
   init: {
@@ -77,6 +79,16 @@ const COMMANDS: Record<string, { run: Command; summary: string; usage?: string }
     run: history,
     summary: "Show the deployment history",
     usage: "ros history [pod] [--env <name>]",
+  },
+  alerts: {
+    run: alerts,
+    summary: "Install / manage the alerts cron on remote servers",
+    usage: "ros alerts <install|uninstall|show|status|test> [env]",
+  },
+  metrics: {
+    run: metrics,
+    summary: "Install / manage the metrics scraper on remote servers",
+    usage: "ros metrics <install|uninstall|show|status|test> [env]",
   },
 }
 

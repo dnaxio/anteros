@@ -26,11 +26,142 @@ ssh:
   timeout: 60
 
 # ===========================================================================
+# Server-side settings
+#   - install_dir:  where `ros` puts pod files on each server
+#   - history_dir:  where `ros` stores per-pod deploy history (for rollback)
+#   - alerts:       cron-based monitoring installed by `ros alerts install`
+#                   (container + host metrics thresholds)
+#   - audit:        webhook called after each deploy / rollback
+#   - metrics:      cron-based scraper installed by `ros metrics install`
+# ===========================================================================
+settings:
+  install_dir: /opt/anteros
+  history_dir: /var/lib/ros/history
+
+  # --- Metrics scraper (host CPU / memory / disk / containers / system) ----
+  metrics:
+    schedule: "* * * * *"
+
+    # Simple URL form:
+    # endpoint: https://metrics.example.com/v1/import
+
+    # Full form (with custom headers + optional HMAC):
+    endpoint:
+      url: https://metrics.example.com/v1/import
+      headers:
+        Authorization: "Bearer ${PUSH_TOKEN}"
+      # secret: ${METRICS_SECRET}
+
+    # Static labels added to every metric
+    labels:
+      env: production
+      cluster: dnx
+
+    # System info sub-sections (one line per tick).
+    # Omit for all, set to `[]` to disable. Default: all.
+    # Available: os, cpu, mem, hostname, uptime, docker
+    system:
+      - os
+      - cpu
+      - mem
+      - hostname
+      - uptime
+      - docker
+
+    # Per-source toggles (all default to true)
+    # include_host: true
+    # include_disk: true
+    # include_containers: true
+    # include_system: true
+
+    # Note: the host's total CPU is the baseline used to convert CPU%
+    # into millicores. Override per server with ROS_CPU_TOTAL_MILLICORES
+    # (default: 8000 = 8 cores).
+
+  # --- Audit webhook (deploy / rollback events) ---------------------------
+  audit:
+    url: https://hooks.slack.com/services/REPLACE/ME/xxx
+    # events: [deploy.failed, rollback.completed]
+    # url:
+    #   url: https://api.example.com/events
+    #   headers:
+    #     Authorization: "Bearer ${AUDIT_TOKEN}"
+    #     X-Tenant: prod
+
+  # --- Alerts (cron-based monitoring: containers + host) ------------------
+  alerts:
+    schedule: "*/5 * * * *"
+
+    email: ops@example.com
+
+    webhook:
+      url: https://hooks.slack.com/services/REPLACE/ME/yyy
+      headers:
+        Authorization: "Bearer ${ALERT_TOKEN}"
+        X-Source: ros
+      secret: ${ALERT_SECRET}
+
+    # Filters. If empty, a sensible default set is installed.
+    # Types:   health | cpu | mem | disk | stopped | oom
+    # source:  host or container (required for cpu/mem/disk)
+    filters:
+      # ── Container filters ───────────────────────────────────────
+      - name: "Container unhealthy"
+        type: health
+        container: "*"
+        duration: 1m
+
+      - name: "API high CPU"
+        type: cpu
+        container: dnx-api
+        threshold: 85
+        duration: 5m
+
+      - name: "API high memory"
+        type: mem
+        container: dnx-api
+        threshold: 90
+        duration: 5m
+
+      - name: "API OOM killed"
+        type: oom
+        container: dnx-api
+        duration: 0s
+
+      - name: "Container stopped"
+        type: stopped
+        container: "*"
+        duration: 30s
+
+      # ── Host filters (metrics-based) ────────────────────────────
+      - name: "Host high CPU"
+        type: cpu
+        source: host
+        threshold: 90
+        duration: 5m
+
+      - name: "Host high memory"
+        type: mem
+        source: host
+        threshold: 95
+        duration: 5m
+
+      - name: "Root disk full"
+        type: disk
+        source: host
+        mount: "/"
+        threshold: 85
+        duration: 10m
+
+      # - name: "Any mount full"
+      #   type: disk
+      #   source: host
+      #   # mount: not set → checks ALL mount points
+      #   threshold: 90
+      #   duration: 5m
+
+# ===========================================================================
 # Environments
-#   - servers: list of SSH targets
-#       Format: "user@host" | "user@host:port" | "${ENV_VAR}" | "${ENV_VAR:-default}"
-#       Use { name: "...", host: "..." } only if you need a logical name
-#       (e.g. canary / drain / per-server overrides).
 # ===========================================================================
 environments:
   staging:
@@ -42,38 +173,23 @@ environments:
       - ${PROD_HOST:-root@192.168.30.11}
       - ${PROD_HOST_2:-root@192.168.30.12}
       - ${PROD_HOST_3:-root@192.168.30.13}
-      # Named server (canary / drain / override), only when you need it:
-      # - name: canary-1
-      #   host: ${CANARY_HOST:-root@192.168.30.99}
-      #   tags: [canary]
 
 # ===========================================================================
 # Pods
-#   type:       web | api | database | cache | worker | cron | other
-#   driver:     docker | flox
-#   instances:  number of running instances (scaling)
-#   containers: list of containers/tasks within the pod
 # ===========================================================================
 pods:
   dnx-doc:
     type: web
     driver: flox
     instances: 1
-    # Pod-level resources (can be overridden per container)
     resources:
       cpu: 500m
       memory: 512Mi
-    # `local` steps run on the machine where `ros` is invoked.
-    # `remote` steps run on each target server via SSH.
     build:
       local:
         steps:
           - name: Generate static site
             run: bun generate
-    # Artifact: what to ship to each remote server.
-    #   source:  local file or directory (rsync if dir, scp if file)
-    #   repo:    clone a git repo on the remote (no local transfer)
-    # `include` overrides `.gitignore`; `exclude` adds to it; `force` mirrors.
     artifact:
       source: ./docs
       destination: /opt/anteros/docs/
@@ -93,7 +209,6 @@ pods:
     type: api
     driver: docker
     instances: 3
-    # Pod-level defaults; container can override
     resources:
       cpu: "1"
       memory: 1Gi
@@ -107,7 +222,6 @@ pods:
         restart: unless-stopped
         ports:
           - "3001:3001"
-        # Per-container override (overrides the pod-level resources)
         resources:
           cpu: "2"
           memory: 2Gi
@@ -121,10 +235,6 @@ pods:
           destination: /opt/anteros/api/
           include:
             - .output
-      # Optional sidecar (log shipper, metrics, etc.)
-      # - name: log-shipper
-      #   image: fluent/fluent-bit
-      #   restart: always
 
   dnx-web:
     type: web

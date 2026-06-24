@@ -5,19 +5,14 @@ export type ServiceType = "web" | "api" | "database" | "cache" | "worker" | "cro
 export type Strategy = "rolling" | "recreate" | "blue-green" | "canary"
 export type RestartPolicy = "always" | "unless-stopped" | "on-failure" | "no"
 
-/**
- * Container resources, expressed directly as Docker flags.
- *
- * - `cpu`    : whole or fractional cores (`"0.5"`, `"1"`, `"2"`).
- *              Maps to `docker run --cpus=<value>`.
- * - `memory` : size with unit (`"256Mi"`, `"1Gi"`, `"512M"`).
- *              Maps to `docker run --memory=<value> --memory-swap=-1`
- *              (unlimited swap so the memory limit is the only cap).
- *
- * Why this format? `ros` is Docker-first, and these are the only two
- * hard resource limits Docker supports. No scheduler, no `requests`:
- * if you need fine-grained scheduling, move to Kubernetes / Nomad.
- */
+export interface WebhookTarget {
+  url: string
+  headers?: Record<string, string>
+  secret?: string
+}
+
+export type MetricsTarget = WebhookTarget
+
 export interface Resources {
   cpu?: string
   memory?: string
@@ -38,17 +33,11 @@ export interface GlobalOptions {
 }
 
 export interface ServerTarget {
-  /** raw target string, e.g. "root@192.168.30.11" or "root@host:2222" */
   raw: string
-  /** parsed user (default: "root") */
   user: string
-  /** parsed host */
   host: string
-  /** parsed port (default: 22) */
   port: number
-  /** optional logical name */
   name?: string
-  /** optional tags, e.g. ["canary", "eu-west"] */
   tags?: string[]
 }
 
@@ -60,15 +49,10 @@ export interface EnvironmentConfig {
 }
 
 export interface CaddyRoute {
-  /** Public domain (and optional port) to match. e.g. "api.example.com" or "api.example.com:8080". */
   domain: string
-  /** Upstream target host (usually 127.0.0.1). */
   target: string
-  /** Public listen port (default: 80). Use 443 for HTTPS, or omit to let Caddy auto-bind. */
   port?: number
-  /** Upstream port to forward to. */
   upstream_port: number
-  /** Whether Caddy should manage TLS for this domain. */
   tls?: "auto" | true | false
 }
 
@@ -81,7 +65,6 @@ export interface ContainerConfig {
   env_from?: Array<{ secret: string }>
   healthcheck?: string
   restart?: RestartPolicy
-  /** Per-container resource limits. */
   resources?: Resources
   artifact?: ArtifactConfig
   volumes?: string[]
@@ -89,63 +72,55 @@ export interface ContainerConfig {
 }
 
 /**
- * An artifact describes WHAT to ship to the remote server and WHERE to put it.
- *
- * Exactly one source must be defined:
- *
- * - `source:`  → a local path (file or directory). Directories are
- *                transferred with `rsync`, single files with `scp`.
- *                Use `./` to ship the project root, or any subpath
- *                like `./apps/api` or `./README.md`.
- * - `repo:`    → a remote git repository. Cloned on the remote server
- *                (no local transfer). Use for shared libraries,
- *                vendored dependencies, or large repos.
- *
- * Filtering (only for `source:` directories):
- * - `include`  → force include these globs (overrides .gitignore and `exclude`)
- * - `exclude`  → skip these globs in addition to .gitignore
- * - `force`    → `--delete` to mirror the local source on the remote
+ * Alert filter type.
+ * - `health`, `stopped`, `oom` — container only (source is always "container")
+ * - `cpu`, `mem`, `disk` — source must be "host" or "container"
  */
+export type AlertFilterType =
+  | "health"
+  | "cpu"
+  | "mem"
+  | "disk"
+  | "stopped"
+  | "oom"
+
+/** A single alert filter. Evaluated on every cron tick. */
+export interface AlertFilter {
+  name: string
+  type: AlertFilterType
+  /** "host" or "container". Required for cpu/mem/disk. Defaults to "container" for health/stopped/oom. */
+  source?: "host" | "container"
+  /** Threshold in %. Fires when usage > threshold. */
+  threshold?: number
+  /** Minimum duration condition must hold before firing. E.g. "5m". */
+  duration?: string
+  /** Container name glob (source=container). */
+  container?: string
+  /** Mount point for disk (e.g. "/", "/var"). All mounts if omitted. */
+  mount?: string
+  enabled?: boolean
+}
+
 export interface ArtifactConfig {
-  /** Local path to a file or directory (relative to the deploy.yaml). */
   source?: string
-  /** Git repository to clone on the remote server. */
   repo?: {
     url: string
-    ref?: string          // branch / tag / commit (default: HEAD)
-    depth?: number        // --depth for clone
+    ref?: string
+    depth?: number
   }
-  /** Destination directory or file path on the remote server. */
   destination: string
   include?: string[]
   exclude?: string[]
   force?: boolean
 }
 
-/**
- * A pod is a deployable unit: a typed workload (web, api, db, …) running on a
- * single driver (docker or flox), with one or more containers. The outer
- * `pods:` key in `deploy.yaml` is a map of pod name to PodConfig.
- */
 export interface PodConfig {
   type: ServiceType
   driver: Driver
   instances: number
-  /**
-   * Default resources applied to every container of this pod. Can be
-   * overridden per-container via `containers[].resources`.
-   */
   resources?: Resources
   build?: {
-    /**
-     * Steps run on the machine where the `ros` CLI is invoked.
-     * Use for code generation, asset bundling, image build, etc.
-     */
     local?: { steps?: BuildStep[] }
-    /**
-     * Steps run on each remote server (via SSH) BEFORE sync/deploy.
-     * Use for apt install, pre-flight checks, etc.
-     */
     remote?: { steps?: BuildStep[] }
   }
   artifact?: ArtifactConfig
@@ -175,8 +150,27 @@ export interface DeployConfig {
   settings?: {
     install_dir?: string
     auto_tls?: boolean
-    /** Directory on the remote server where `ros` stores deployment history. */
     history_dir?: string
+    audit?: {
+      url: string | WebhookTarget
+      events?: string[]
+    }
+    alerts?: {
+      schedule?: string
+      email?: string
+      webhook?: string | WebhookTarget
+      filters?: AlertFilter[]
+    }
+    metrics?: {
+      schedule?: string
+      endpoint: string | MetricsTarget
+      include_host?: boolean
+      include_disk?: boolean
+      include_containers?: boolean
+      include_system?: boolean
+      system?: ("os" | "cpu" | "mem" | "hostname" | "uptime" | "docker")[]
+      labels?: Record<string, string>
+    }
   }
   environments: Record<string, EnvironmentConfig>
   pods: Record<string, PodConfig>

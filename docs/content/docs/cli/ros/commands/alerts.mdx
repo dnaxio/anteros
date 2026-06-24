@@ -1,0 +1,204 @@
+---
+title: ros alerts
+description: Install a cron-based monitoring script for containers and host resources.
+icon: Bell
+---
+
+```bash
+ros alerts <subcommand> [env] [--server <target>] [--force]
+```
+
+Installs a self-contained bash script and cron entry on each target server.
+The script monitors **Docker containers** (health, CPU, mem, disk, stopped,
+OOM) and **host resources** (CPU, mem, disk) and sends alerts via email
+and/or webhook.
+
+## Configuration
+
+```yaml
+settings:
+  alerts:
+    schedule: "*/5 * * * *"
+
+    email: ops@example.com
+
+    webhook:
+      url: https://hooks.slack.com/services/...
+      headers:
+        Authorization: "Bearer ${ALERT_TOKEN}"
+      secret: ${ALERT_SECRET}
+
+    # Types:   health | cpu | mem | disk | stopped | oom
+    # source:  host or container (required for cpu/mem/disk)
+    filters:
+      # === Container ===
+      - name: "Container unhealthy"
+        type: health
+        container: "*"
+        duration: 1m
+
+      - name: "API high CPU"
+        type: cpu
+        source: container
+        container: dnx-api
+        threshold: 85
+        duration: 5m
+
+      - name: "API high memory"
+        type: mem
+        source: container
+        container: dnx-api
+        threshold: 90
+        duration: 5m
+
+      - name: "API OOM killed"
+        type: oom
+        container: dnx-api
+
+      # === Host ===
+      - name: "Host high CPU"
+        type: cpu
+        source: host
+        threshold: 90
+        duration: 5m
+
+      - name: "Host high memory"
+        type: mem
+        source: host
+        threshold: 95
+        duration: 5m
+
+      - name: "Root disk > 85%"
+        type: disk
+        source: host
+        mount: "/"
+        threshold: 85
+        duration: 10m
+
+      - name: "Any mount > 90%"
+        type: disk
+        source: host
+        # mount: not set → checks ALL mounts
+        threshold: 90
+        duration: 5m
+```
+
+## Filter types
+
+### Container (`source: container`)
+
+| Type | Source | Paramètres | Description |
+|------|--------|------------|-------------|
+| `health` | `docker ps` | `container`, `duration` | Status unhealthy |
+| `stopped` | `docker ps -a` | `container`, `duration` | Exited ou dead |
+| `cpu` | `docker stats` | `source`, `container`, `threshold`, `duration` | CPU% > seuil |
+| `mem` | `docker stats` | `source`, `container`, `threshold`, `duration` | Memory% > seuil |
+| `oom` | `docker ps -a` | `container` | OOMKilled=true |
+
+### Host (`source: host`)
+
+| Type | Source | Paramètres | Description |
+|------|--------|------------|-------------|
+| `cpu` | `/proc/stat` | `source`, `threshold`, `duration` | Host CPU% > seuil |
+| `mem` | `/proc/meminfo` | `source`, `threshold`, `duration` | Host memory% > seuil |
+| `disk` | `df` | `source`, `mount`?, `threshold`, `duration` | Disk% > seuil |
+
+`disk` sans `mount` → vérifie **tous** les mount points, une alerte par mount au-dessus du seuil.
+
+## Examples
+
+```bash
+ros alerts show
+ros alerts install --env production
+ros alerts install --server canary-1
+ros alerts status
+ros alerts test
+ros alerts uninstall
+```
+
+## Webhook payload
+
+Payload unique quelle que soit la source. `source` et `metric` suivent le
+même schéma que `ros metrics`.
+
+### Host CPU
+
+```json
+{
+  "source": "host",
+  "metric": "cpu",
+  "threshold": "90",
+  "value": "94",
+  "container": "",
+  "mount": "",
+  "subject": "Host CPU: 94%",
+  "body": "Host srv-1 CPU at 94% (threshold 90%)",
+  "host": "srv-1",
+  "timestamp": "2024-06-24T08:32:11Z"
+}
+```
+
+### Container memory
+
+```json
+{
+  "source": "container",
+  "metric": "mem",
+  "threshold": "90",
+  "value": "92",
+  "container": "dnx-api",
+  "mount": "",
+  "subject": "Memory: dnx-api",
+  "body": "Container dnx-api at 92.4% on srv-1",
+  "host": "srv-1",
+  "timestamp": "2024-06-24T08:32:11Z"
+}
+```
+
+### Disk
+
+```json
+{
+  "source": "host",
+  "metric": "disk",
+  "threshold": "85",
+  "value": "91",
+  "container": "",
+  "mount": "/var",
+  "subject": "Disk /var: 91%",
+  "body": "Mount /var at 91% on srv-1 (threshold 85%)",
+  "host": "srv-1",
+  "timestamp": "2024-06-24T08:32:11Z"
+}
+```
+
+### Non-métrique (health, stopped, oom)
+
+```json
+{
+  "source": "container",
+  "metric": "unhealthy",
+  "threshold": "",
+  "value": "",
+  "container": "dnx-api",
+  "mount": "",
+  "subject": "Unhealthy: dnx-api",
+  "body": "Container dnx-api is unhealthy on srv-1: unhealthy",
+  "host": "srv-1",
+  "timestamp": "2024-06-24T08:32:11Z"
+}
+```
+
+Si `webhook.secret` est défini, le payload est signé HMAC-SHA256 dans
+`X-Ros-Signature`.
+
+## Requirements
+
+- `docker` (filtres container)
+- `sendmail` (option `email`)
+- `openssl` (option `webhook.secret`)
+
+## See also
+
+- [Configuration → `settings.alerts`](/docs/cli/ros/configuration#alerts)
+- [`ros metrics`](/docs/cli/ros/commands/metrics)

@@ -8,6 +8,7 @@ import type { Command } from "../types.ts"
 import { loadConfig, resolveServers, expandEnv } from "../config.ts"
 import { sshExec } from "../ssh.ts"
 import { DEFAULT_HISTORY_DIR, readHistory, previousTag, currentTag } from "../history.ts"
+import { sendWebhook, makeRollbackEvent, normalizeWebhook } from "../webhook.ts"
 import { header, info, success, warn, error, log, confirm } from "../ui.ts"
 
 export const rollback: Command = async ({ args, opts }) => {
@@ -91,6 +92,7 @@ export const rollback: Command = async ({ args, opts }) => {
     return
   }
 
+  const startTime = Date.now()
   const ok = await confirm("Proceed with rollback?", opts.force)
   if (!ok) {
     warn("Aborted.")
@@ -127,5 +129,25 @@ export const rollback: Command = async ({ args, opts }) => {
     } catch (e) {
       warn("  ✖ " + (e as Error).message)
     }
+  }
+
+  // Webhook notification (best-effort, non-blocking)
+  const duration = Math.round((Date.now() - startTime) / 1000)
+  const event = makeRollbackEvent(
+    pod,
+    envName,
+    currentTagVal,
+    targetTag,
+    servers.map((s) => s.raw),
+    duration,
+  )
+  const wh = await sendWebhook(
+    normalizeWebhook(cfg.settings?.audit?.url, cfg.settings?.audit?.events),
+    event,
+  )
+  if (!wh.ok && wh.error) {
+    warn("webhook failed: " + wh.error)
+  } else if (wh.ok && !wh.skipped) {
+    info("webhook ✓ (status " + wh.status + ")")
   }
 }

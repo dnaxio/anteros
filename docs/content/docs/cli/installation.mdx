@@ -1,0 +1,34 @@
+---
+title: Installation
+description: Install the Anteros CLI (`ant` + `ros`).
+icon: Download
+---
+
+```bash
+bun i @anteros/cli@latest -g
+```
+
+This installs both binaries on your `$PATH`:
+
+| Binary | Scope              |
+|--------|--------------------|
+| `ant`  | Framework (dev)    |
+| `ros`  | Deployment (CI-CD) |
+
+## Verify
+
+```bash
+ant --version
+ros --version
+```
+
+## Requirements
+
+- **Bun** ≥ 1.1
+- **SSH** access to remote servers (for `ros`)
+- **Docker** ≥ 24 (on remote servers, for container pods)
+
+## Next
+
+- [ant — Framework CLI](/docs/cli/ant)
+- [ros — Deployment CLI](/docs/cli/ros)

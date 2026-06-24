@@ -7,6 +7,7 @@ import { runLocalBuild, runRemoteBuild, describeBuild } from "../build.ts"
 import { pushArtifact, describeArtifact } from "../artifact.ts"
 import { mergeResources, resourcesToDockerFlags, describeResources } from "../resources.ts"
 import { appendHistory, DEFAULT_HISTORY_DIR, makeEntry } from "../history.ts"
+import { sendWebhook, makeDeployEvent, makeDeployFailedEvent, normalizeWebhook } from "../webhook.ts"
 import {
   header,
   success,
@@ -112,6 +113,7 @@ export const deploy: Command = async ({ args, opts }) => {
   // ---------------------------------------------------------------------
   // Execute
   // ---------------------------------------------------------------------
+  const deployStart = Date.now()
   for (const pod of pods) {
     const c0 = pod.containers[0]!
     const image = expandEnv(buildImageRef(pod))
@@ -194,6 +196,29 @@ export const deploy: Command = async ({ args, opts }) => {
         }
       }),
     )
+
+    // 3) Webhook notification (best-effort, non-blocking)
+    const duration = Math.round((Date.now() - deployStart) / 1000)
+    const c0Tag = c0.tag ?? "latest"
+    const servers = resolveServers(env, opts.server).map((s) => s.raw)
+    const event = makeDeployEvent(
+      podName,
+      envName,
+      c0Tag,
+      servers,
+      duration,
+    )
+    const wh = await sendWebhook(
+      normalizeWebhook(cfg.settings?.audit?.url, cfg.settings?.audit?.events),
+      event,
+    )
+    if (!wh.ok && wh.error) {
+      warn("  webhook failed: " + wh.error)
+    } else if (wh.skipped) {
+      // silent: not configured or filtered
+    } else if (wh.ok) {
+      info("  webhook ✓ (status " + wh.status + ")")
+    }
   }
 }
 

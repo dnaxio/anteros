@@ -1,0 +1,267 @@
+---
+title: ros metrics
+description: Install a cron-based metrics scraper that collects host CPU, memory, disk, per-container metrics, and system info.
+icon: ChartLine
+---
+
+```bash
+ros metrics <subcommand> [env] [--server <target>] [--force]
+```
+
+Installs a self-contained bash script and cron entry on each target server.
+The script scrapes **host** metrics (CPU, memory, disk), **per-container**
+metrics, and a **system info** line (OS, hardware), then POSTs them as
+JSON (NDJSON) to a configured endpoint.
+
+## Subcommands
+
+| Subcommand  | Description                                          |
+|-------------|------------------------------------------------------|
+| `install`   | Generate and install the metrics script + cron       |
+| `uninstall` | Remove the metrics script and cron                   |
+| `show`      | Print the generated script without installing        |
+| `status`    | Show the install state on each server                |
+| `test`      | Send a test sample to the configured endpoint        |
+
+## Configuration
+
+```yaml
+settings:
+  metrics:
+    schedule: "* * * * *"
+
+    # Simple URL
+    endpoint: https://metrics.example.com/v1/import
+
+    # Or full form (headers + optional HMAC)
+    # endpoint:
+    #   url: https://metrics.example.com/v1/import
+    #   headers:
+    #     Authorization: "Bearer ${PUSH_TOKEN}"
+    #   secret: ${METRICS_SECRET}
+
+    labels:
+      env: production
+      cluster: dnx
+
+    # System info sub-sections. Omit for all, [] to disable.
+    # Available: os, cpu, mem, hostname, uptime, docker
+    system:
+      - os
+      - cpu
+      - mem
+      - hostname
+      - uptime
+      - docker
+
+    # Per-source toggles (all default to true)
+    # include_host: true
+    # include_disk: true
+    # include_containers: true
+    # include_system: true
+```
+
+## Examples
+
+```bash
+ros metrics show                          # preview the script
+ros metrics install --env production     # install everywhere
+ros metrics install --server canary-1   # single server
+ros metrics install --force              # re-install
+ros metrics status                       # check state
+ros metrics test                         # send test payload
+```
+
+## Output format
+
+One JSON object per line (NDJSON). Every line has a uniform structure:
+`source` says **where**, `metric` says **what**, `total`/`usage`/`pct` say
+**how much**.
+
+### System info (1 per tick, with all sub-sections)
+
+```json
+{"source":"host","metric":"system","host":"srv-1","ts":"2024-06-24T08:32:00Z","os":"debian","os_version":"12 (bookworm)","kernel":"6.1.0-21-amd64","arch":"x86_64","cpu_cores":8,"cpu_model":"Intel(R) Xeon(R) CPU E3-1240 v6 @ 3.70GHz","mem_total_bytes":8589934592,"hostname":"srv-1","uptime_seconds":864235,"docker_version":"24.0.7","container_runtime":"docker","env":"production","cluster":"dnx"}
+```
+
+### Host memory
+
+```json
+{"source":"host","metric":"mem","host":"srv-1","ts":"2024-06-24T08:32:00Z","total":8589934592,"usage":4294967296,"pct":50.00}
+```
+
+### Host CPU
+
+```json
+{"source":"host","metric":"cpu","host":"srv-1","ts":"2024-06-24T08:32:00Z","total":8000,"usage":1880,"pct":23.50}
+```
+
+`total` defaults to 8000 (8 cores). Override per server with
+`ROS_CPU_TOTAL_MILLICORES=16000` for a 16-core machine.
+
+### Host disk (one per mount point)
+
+```json
+{"source":"host","metric":"disk","host":"srv-1","ts":"2024-06-24T08:32:00Z","mount":"/","total":52428800000,"usage":26214400000,"pct":50.00}
+{"source":"host","metric":"disk","host":"srv-1","ts":"2024-06-24T08:32:00Z","mount":"/var","total":107374182400,"usage":53687091200,"pct":50.00}
+```
+
+### Container memory
+
+```json
+{"source":"container","metric":"mem","host":"srv-1","ts":"2024-06-24T08:32:00Z","container":"dnx-api","total":1073741824,"usage":134217728,"pct":12.50}
+```
+
+### Container CPU
+
+```json
+{"source":"container","metric":"cpu","host":"srv-1","ts":"2024-06-24T08:32:00Z","container":"dnx-api","total":1000,"usage":37,"pct":3.70}
+```
+
+For containers, `total` = the configured limit (`--cpus`, `--memory`). If no
+limit is set, the host's total is used and `pct` = container's share of host
+capacity.
+
+## Field reference
+
+| Field | Lines | Type | Unit | Description |
+|-------|-------|------|------|-------------|
+| `source` | all | string | — | `host` or `container` |
+| `metric` | all | string | — | `mem`, `cpu`, `disk`, `system` |
+| `host` | all | string | — | Server hostname |
+| `ts` | all | string | ISO 8601 | Scrape timestamp (UTC) |
+| `total` | mem/cpu/disk | number | bytes / millicores | Capacity |
+| `usage` | mem/cpu/disk | number | bytes / millicores | Current usage |
+| `pct` | mem/cpu/disk | number | 0–100 | `usage / total * 100`, 2 decimals |
+| `mount` | disk | string | — | Mount point |
+| `container` | container | string | — | Docker container name |
+| `os` | system | string | — | `/etc/os-release` ID |
+| `os_version` | system | string | — | `VERSION_ID (CODENAME)` |
+| `kernel` | system | string | — | `uname -r` |
+| `arch` | system | string | — | `uname -m` |
+| `cpu_cores` | system | number | — | `nproc` |
+| `cpu_model` | system | string | — | `/proc/cpuinfo` model name |
+| `mem_total_bytes` | system | number | bytes | `MemTotal` from `/proc/meminfo` |
+| `hostname` | system | string | — | `hostname` |
+| `uptime_seconds` | system | number | seconds | `/proc/uptime` |
+| `docker_version` | system | string | — | `docker --version` |
+| `container_runtime` | system | string | — | always `docker` |
+
+### Units
+
+| Metric | `total`/`usage` unit | 1 unit = |
+|--------|---------------------|-----------|
+| `mem` | bytes | — |
+| `cpu` | millicores | 1/1000 core |
+| `disk` | bytes | — |
+| `pct` | percent | 0.00 – 100.00 |
+
+### Labels
+
+`labels:` are merged **only into the system line** (not repeated on every
+metric line), since `host` and `ts` already identify the source.
+
+## HTTP request
+
+```http
+POST /v1/import HTTP/1.1
+Content-Type: application/x-ndjson
+Authorization: Bearer <token>
+X-Ros-Signature: sha256=<hex>     # if endpoint.secret is set
+
+{"source":"host","metric":"system","host":"srv-1","ts":"...","os":"debian",...}
+{"source":"host","metric":"mem","host":"srv-1","ts":"...","total":8589934592,"usage":4294967296,"pct":50.00}
+{"source":"host","metric":"cpu","host":"srv-1","ts":"...","total":8000,"usage":1880,"pct":23.50}
+{"source":"host","metric":"disk","host":"srv-1","ts":"...","mount":"/","total":...,"usage":...,"pct":50.00}
+{"source":"container","metric":"mem","host":"srv-1","ts":"...","container":"dnx-api","total":...,"usage":...,"pct":12.50}
+{"source":"container","metric":"cpu","host":"srv-1","ts":"...","container":"dnx-api","total":...,"usage":...,"pct":3.70}
+```
+
+## Receiver example (Bun + SQLite)
+
+```ts
+app.post("/v1/import", async (req) => {
+  const lines = (await req.text()).split("\n").filter(Boolean)
+  for (const line of lines) {
+    const m = JSON.parse(line)
+    if (m.metric === "system") {
+      await db.run(
+        `INSERT INTO system_info (ts, host, os, os_version, kernel, arch,
+         cpu_cores, cpu_model, mem_total_bytes, hostname, uptime_seconds,
+         docker_version, container_runtime, labels)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [m.ts, m.host, m.os, m.os_version, m.kernel, m.arch,
+         m.cpu_cores, m.cpu_model, m.mem_total_bytes, m.hostname,
+         m.uptime_seconds, m.docker_version, m.container_runtime,
+         m.env]
+      )
+      continue
+    }
+    await db.run(
+      `INSERT INTO metrics (ts, source, metric, host, container, mount,
+       total, usage, pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [m.ts, m.source, m.metric, m.host, m.container ?? null,
+       m.mount ?? null, m.total ?? null, m.usage ?? null, m.pct ?? null]
+    )
+  }
+  return new Response(null, { status: 200 })
+})
+```
+
+## Receiver example (Python + InfluxDB)
+
+```python
+@app.post("/v1/import")
+async def import_metrics(request: Request):
+    body = (await request.body()).decode()
+    for line in body.splitlines():
+        if not line:
+            continue
+        m = json.loads(line)
+        if m["source"] == "host" and m["metric"] == "system":
+            # system line → single measurement with tags
+            await influx.write(
+                measurement="system",
+                tags={"host": m["host"], "env": m.get("env", "")},
+                fields={k: v for k, v in m.items()
+                        if k not in ("source", "metric", "host", "ts", "env")},
+                time=m["ts"],
+            )
+            continue
+        measurement = f"{m['source']}_{m['metric']}"
+        await influx.write(
+            measurement=measurement,
+            tags={
+                "host": m["host"],
+                "container": m.get("container", ""),
+                "mount": m.get("mount", ""),
+            },
+            fields={"total": m.get("total", 0),
+                    "usage": m.get("usage", 0),
+                    "pct":   m.get("pct", 0)},
+            time=m["ts"],
+        )
+```
+
+## Volume
+
+| Source               | Lines / tick | Lines / day | KB / tick | MB / day |
+|----------------------|-------------|-------------|-----------|----------|
+| System               | 1           | 1 440       | 0.6       | 0.9      |
+| Host mem + cpu       | 2           | 2 880       | 0.4       | 0.6      |
+| Host disk (5 mounts) | 5           | 7 200       | 1.0       | 1.5      |
+| Containers × 5       | 10          | 14 400      | 2.0       | 2.8      |
+| **Total / host**     | **18**      | **25 920**  | **4.0**   | **5.8**  |
+
+For a typical 10-server cluster: **~58 MB/day** (~1.7 GB/mois).
+
+## Requirements on the server
+
+- `docker` (only if `include_containers: true`)
+- `curl`, `awk`, `df`, `uname`, `nproc` (on every Linux)
+- `openssl` (only if `endpoint.secret` is set)
+
+## See also
+
+- [Configuration → `settings.metrics`](/docs/cli/ros/configuration#metrics)
+- [`ros alerts`](/docs/cli/ros/commands/alerts)

@@ -18,6 +18,8 @@
     "commands/exec",
     "commands/env",
     "commands/config",
-    "commands/proxy"
+    "commands/proxy",
+    "commands/alerts",
+    "commands/metrics"
   ]
 }
