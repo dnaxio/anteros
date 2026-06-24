@@ -1,0 +1,36 @@
+---
+title: Anteros CLI
+description: Two binaries — `ant` for the framework, `ros` for deployment.
+icon: Terminal
+---
+
+The Anteros CLI is shipped as a single npm package, `@anteros/cli`, that exposes two binaries:
+
+| Binary | Scope                | Purpose                                                  |
+|--------|----------------------|----------------------------------------------------------|
+| `ant`  | Framework            | Project scaffolding, dev workflow, code generation       |
+| `ros`  | Deployment / CI-CD   | Multi-server deployment over SSH                         |
+
+Both share the same package, configuration format, and plugin system.
+
+## Installation
+
+```bash
+bun i @anteros/cli@latest -g
+```
+
+This installs both `ant` and `ros` on your `$PATH`.
+
+## Choosing the right binary
+
+- **Writing code?** → use [`ant`](/docs/cli/ant)
+- **Shipping / operating code?** → use [`ros`](/docs/cli/ros)
+
+<Cards>
+  <Card title="ant — Framework CLI" href="/docs/cli/ant">
+    Scaffolding, dev server, code generation, build, test, lint.
+  </Card>
+  <Card title="ros — Deployment CLI" href="/docs/cli/ros">
+    Init, deploy, status, setup, logs, rollback, config validation.
+  </Card>
+</Cards>

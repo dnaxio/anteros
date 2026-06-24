@@ -1,0 +1,41 @@
+---
+title: ant
+description: Framework CLI for project lifecycle, dev, build, and code generation.
+icon: Code
+---
+
+`ant` is the developer-facing CLI. It manages everything around the application code: scaffolding, dev workflow, code generation, build, test, and lint.
+
+## Commands
+
+```bash
+ant init         # scaffold a new Anteros project
+ant dev          # run the local dev server
+ant build        # produce a production build
+ant generate     # generate code (routes, pods, models, …)
+ant test         # run the test suite
+ant lint         # run linters / formatters
+ant doctor       # diagnose the local environment
+```
+
+Run `ant --help` for the full list of commands and options in your installed version.
+
+## Configuration
+
+`ant` reads its configuration from `anteros.config.ts` (or `.json`, `.yaml`) at the project root. The configuration is fully type-safe and exposes hooks for the build, dev server, and code generators.
+
+```ts title="anteros.config.ts"
+import { defineConfig } from "@anteros/cli"
+
+export default defineConfig({
+  runtime: "bun",
+  server: { port: 4000 },
+  // … more options
+})
+```
+
+See the [Anteros Framework documentation](/docs) for the full configuration reference.
+
+## Related
+
+- [`ros` — Deployment CLI](/docs/cli/ros)

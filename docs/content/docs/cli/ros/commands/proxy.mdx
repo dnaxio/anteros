@@ -1,0 +1,68 @@
+---
+title: ros proxy
+description: Manage the Caddy reverse proxy via the Admin API.
+icon: Network
+---
+
+```bash
+ros proxy <subcommand> [env] [--env <name>] [--server <target>] [--dry-run] [--force]
+```
+
+Manage the Caddy reverse proxy on the target servers. `ros` talks to Caddy's
+Admin API at `http://localhost:2019` over SSH and provisions a dedicated
+Caddy server named `anteros`, so it never touches any user-managed routes
+or the main Caddyfile.
+
+## Subcommands
+
+| Subcommand       | Description                                       |
+|------------------|---------------------------------------------------|
+| `apply [env]`    | Push the routes from `deploy.yaml` to Caddy      |
+| `show`           | Print the JSON config that would be applied      |
+| `remove [env]`   | Remove the `anteros` server from Caddy           |
+
+## Examples
+
+```bash
+# Show the JSON that would be applied
+ros proxy show
+
+# Apply routes from deploy.yaml to all servers in `production`
+ros proxy apply --env production
+
+# Apply to a single server
+ros proxy apply --env production --server canary-1
+
+# Dry run
+ros proxy apply --env production --dry-run
+
+# Remove the `anteros` server from Caddy
+ros proxy remove --env production
+```
+
+## How it works
+
+1. `ros` builds a Caddy server config named `anteros` from
+   `proxy.routes` in `deploy.yaml`.
+2. It does a `GET /config/apps/http/servers/` on the remote Caddy to
+   read any existing servers.
+3. It merges: **keeps all user-managed servers**, replaces only `anteros`.
+4. It `POST`s the merged set back to the Caddy Admin API.
+5. Caddy applies the new config **atomically** — no restart, no reload.
+
+## Prerequisites
+
+- Caddy must be running on the target server (typically via `systemd`).
+- The Admin API must be enabled (default in modern Caddy, on
+  `localhost:2019`).
+- If you've customized the admin address, set `CADDY_ADMIN` in the
+  environment where `ros` runs:
+
+  ```bash
+  export CADDY_ADMIN=http://localhost:2019
+  ```
+
+## See also
+
+- [Configuration → `proxy`](/docs/cli/ros/configuration#proxy)
+- [`ros setup`](/docs/cli/ros/commands/setup) — installs Caddy on the target servers

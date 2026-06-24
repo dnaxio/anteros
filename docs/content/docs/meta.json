@@ -4,6 +4,8 @@
   "pages": [
     "index",
     "getting-started",
+    "---CLI---",
+    "cli",
     "reference",
     "query-language",
     "manage-data",

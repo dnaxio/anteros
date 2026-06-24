@@ -1,0 +1,61 @@
+---
+title: ros rollback
+description: Roll back to the previous version of a pod.
+icon: Undo
+---
+
+```bash
+ros rollback <pod> [--to <tag>] [--env <name>] [--server <target>] [--force]
+```
+
+Re-deploys a pod using a different image tag. The most common use is to
+revert to the previous tag after a bad deploy.
+
+## How it finds the previous tag
+
+Without `--to`, `ros rollback` reads the deployment history recorded by
+`ros deploy`:
+
+```
+/var/lib/ros/history/<env>/<pod>.json
+```
+
+It picks the second-to-last entry as the rollback target. To see the full
+history, run `ros history <pod>`.
+
+## Examples
+
+```bash
+# Roll back `api` to the previous version
+ros rollback api
+
+# Roll back to a specific tag
+ros rollback api --to v1.0.1
+
+# Roll back on a single canary server
+ros rollback api --env production --server canary-1
+
+# Dry run
+ros rollback api --to v1.0.1 --dry-run
+```
+
+<Callout title="Pin your tags in production" type="warn">
+Avoid relying on `:latest` or floating tags in production. A rollback only
+works if the previous tag is still resolvable on the registry.
+</Callout>
+
+## Options
+
+| Flag                | Description                                          |
+|---------------------|------------------------------------------------------|
+| `--to <tag>`        | Target tag (default: previous version)               |
+| `--env <name>`      | Target environment                                   |
+| `--server <target>` | Restrict to a specific server                        |
+| `--force`           | Bypass downgrade confirmation                        |
+| `--dry-run`         | Show the plan; do not execute                        |
+
+## See also
+
+- [`ros deploy`](/docs/cli/ros/commands/deploy) — deploy a new version
+- [`ros status`](/docs/cli/ros/commands/status) — verify the rolled-back state
+- [`ros history`](/docs/cli/ros/commands/history) — view the deployment history

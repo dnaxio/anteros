@@ -104,9 +104,12 @@ When `enabled` is `false`, calls return:
 
 ## Access Control
 
-Services support the same `api.access` rules as collections. Use wildcard `*` for a default policy and specific action keys for fine-grained control.
+Services support the same `api.access` rules as collections and files — **deny by default** (secure).
 
-When no `api.access` is defined, all authenticated users can call any action.
+- **`true`** — public, no token required
+- **`false`** — denied immediately
+- **`function`** — requires a valid token, evaluated at runtime
+- **No `api.access`** — access denied (401)
 
 ```typescript
 export default define.Service({
@@ -118,7 +121,7 @@ export default define.Service({
       'stats': ({ token }) => {   // only admins can call stats
         return token.decoded?.role === 'admin';
       },
-      'health': true,             // health is public (to any authenticated user)
+      'health': true,             // public, no token needed
     }
   },
   actions: {
@@ -131,12 +134,12 @@ export default define.Service({
 
 | Rule | Behavior |
 |------|----------|
-| No `api.access` | All authenticated users can call any action |
+| No `api.access` | Access denied (401) — define at least `'*': true` or specific rules |
+| `'*': true` | Public by default (boolean `true` = no token needed) |
 | `'*': false` | Deny all, allow only explicitly allowed actions |
-| `'*': true` | Allow all, deny only explicitly denied actions |
-| `action: true` | Allow this specific action |
+| `action: true` | Public — allow this specific action |
 | `action: false` | Deny this specific action |
-| `action: (ctx) => boolean` | Custom function, receives `{ rest, error, jwt, token }` |
+| `action: (ctx) => boolean` | Custom function (**token required**) |
 
 <Callout type="info">
 Access functions can be **sync** (`() => boolean`) or **async** (`() => Promise<boolean>`). The `token` parameter contains `{ value, decoded, provided, expired }`.

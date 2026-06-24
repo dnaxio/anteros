@@ -1,0 +1,57 @@
+---
+title: Installation
+description: Install `ros` and prepare your environment.
+icon: Download
+---
+
+## Requirements
+
+- **Bun** ≥ 1.2 (provides `Bun.YAML.parse` and the runtime used by `ros`)
+- **ssh** and **rsync** on the machine where you run `ros`
+- **docker** (or **flox**) on the target servers — installed automatically by `ros setup`
+
+## Install
+
+```bash
+bun i @anteros/cli@latest -g
+```
+
+This installs both `ant` and `ros`. Run `ros --version` to confirm:
+
+```bash
+$ ros --version
+ros 0.0.1
+```
+
+## First run
+
+`ros init` creates a `deploy.yaml` in the current directory:
+
+```bash
+mkdir my-app && cd my-app
+ros init
+```
+
+The generated `deploy.yaml` is a minimal starting point — edit it to match your
+project layout, environments, and pods.
+
+## Verify SSH access
+
+`ros` uses the system `ssh` binary, so any pre-existing key-based configuration
+in `~/.ssh/config` is honored automatically. Test connectivity before your
+first deploy:
+
+```bash
+ssh root@192.168.30.11 'echo ok'
+```
+
+<Callout title="Prefer passwordless access">
+`ros` runs in `BatchMode=yes` — interactive password prompts are disabled. Make
+sure your SSH key is authorized on every target server.
+</Callout>
+
+## Next
+
+- [Configuration](/docs/cli/ros/configuration) — full `deploy.yaml` schema
+- [`ros init`](/docs/cli/ros/commands/init) — generate a starter config
+- [`ros setup`](/docs/cli/ros/commands/setup) — install server dependencies

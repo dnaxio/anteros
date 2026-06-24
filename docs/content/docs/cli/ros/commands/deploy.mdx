@@ -1,0 +1,81 @@
+---
+title: ros deploy
+description: Deploy pods to a target environment.
+icon: Rocket
+---
+
+```bash
+ros deploy [env] [--pod <name>] [--tag <tag>] [--strategy <s>]
+           [--env <name>] [--server <target>] [--config <path>]
+           [--dry-run] [--force]
+```
+
+Deploys one or more pods to the target environment. Runs the build
+pipeline (local + remote), transfers artifacts, and rolls the new containers
+in place.
+
+## Examples
+
+```bash
+# Deploy everything in `production`
+ros deploy --env production
+
+# Deploy a single pod, overriding the tag
+ros deploy --env production --pod api --tag v1.0.3
+
+# Dry run: show the plan without applying
+ros deploy --env production --dry-run
+
+# Deploy to a single canary server
+ros deploy --env production --server canary-1
+
+# Bypass safety prompts
+ros deploy --env production --force
+```
+
+## What happens
+
+For each pod selected, in order:
+
+1. **Local build steps** — run on the machine where `ros` is invoked
+2. **Per-server**, in parallel:
+   1. **Remote build steps** — run on the server via SSH
+   2. **Artifact transfer** — `rsync` (folder), `scp` (file), or `git clone`
+   3. **`docker pull` + stop + rm + run** of the new container
+
+## Options
+
+| Flag                    | Description                                                   |
+|-------------------------|---------------------------------------------------------------|
+| `--env <name>`          | Target environment (e.g. `test`, `staging`, `production`)     |
+| `--server <target>`     | Restrict to a specific server (repeatable)                    |
+| `--pod <name>`      | Deploy only one pod                                       |
+| `--tag <tag>`           | Override the image tag for this deploy                        |
+| `--strategy <s>`        | Override the deploy strategy                                  |
+| `--dry-run`             | Show the plan; do not execute anything                        |
+| `--force`               | Bypass safety checks (drift, confirmation, downgrade)         |
+| `--config <path>`       | Path to `deploy.yaml` (default: `./deploy.yaml`)              |
+
+## Deploy plan output
+
+`ros deploy --dry-run` prints a table of the plan:
+
+```
+POD        CONTAINER  BUILD    IMAGE                         INST  RES         SERVER              ARTIFACT
+dnx-doc    docs       local:1  (no image)                    1     500m/512Mi  root@192.168.30.11  ./docs -> /opt/anteros/docs/ [force, +1, -1]
+dnx-api    api        —        ghcr.io/myorg/dnx-api:v1.0.2  3     2/2Gi       root@192.168.30.11  ./apps/api -> /opt/anteros/api/ [+1]
+```
+
+Columns:
+- `POD` — outer key from the `pods:` map
+- `CONTAINER` — `containers[0].name` (first container of the pod)
+- `BUILD` — number of local / remote build steps
+- `RES` — merged `resources` (pod + container override), `cpu/memory`
+- `ARTIFACT` — source, destination, and any active filters
+
+## See also
+
+- [`ros status`](/docs/cli/ros/commands/status) — check what's running
+- [`ros rollback`](/docs/cli/ros/commands/rollback) — revert a deploy
+- [`ros history`](/docs/cli/ros/commands/history) — view the deployment history
+- [Configuration → artifacts](/docs/cli/ros/configuration#artifacts)

@@ -1,0 +1,331 @@
+---
+title: Configuration
+description: The `deploy.yaml` schema — environments, pods, artifacts, proxy.
+icon: FileCode
+---
+
+`ros` reads its configuration from a `deploy.yaml` file at the project root.
+The file is organized in four top-level blocks:
+
+| Block          | Purpose                                                |
+|----------------|--------------------------------------------------------|
+| `environments` | SSH targets per environment                            |
+| `pods`     | Apps to deploy (one entry per pod)                 |
+| `proxy`        | Caddy reverse-proxy routes                             |
+| `ssh` / `deploy` / `settings` | Global defaults (optional)              |
+
+## Minimal example
+
+```yaml title="deploy.yaml"
+version: "1"
+name: "my-app"
+
+environments:
+  production:
+    servers:
+      - root@192.168.30.11
+
+pods:
+  api:
+    type: api
+    driver: docker
+    instances: 1
+    containers:
+      - name: api
+        image: ghcr.io/myorg/api
+        tag: v1.0.0
+        ports: ["3001:3001"]
+```
+
+## `environments`
+
+A map of environment name to its configuration. Each environment lists the
+SSH targets it deploys to.
+
+```yaml
+environments:
+  production:
+    servers:
+      - root@192.168.30.11
+      - root@192.168.30.12
+      - name: canary-1                # optional logical name
+        host: root@192.168.30.99      # can also be a string: "root@192.168.30.99"
+        tags: [canary]
+```
+
+Server format: `user@host[:port]`, or a string with `${VAR}` /
+`${VAR:-default}` for secrets resolved at runtime.
+
+## `pods`
+
+A map of pod name to its deployment configuration.
+
+```yaml
+pods:
+  api:
+    type: api                  # web | api | database | cache | worker | cron
+    driver: docker             # docker | flox
+    instances: 3
+
+    # Optional: build steps
+    build:
+      local:                   # runs on the machine invoking `ros`
+        steps:
+          - name: Install deps
+            run: bun install
+          - run: bun run build
+      remote:                  # runs on each target server (SSH)
+        steps:
+          - run: mkdir -p /opt/anteros/api
+
+    # Optional: artifact transferred before deploy
+    artifact:
+      folder: ./apps/api       # or file: ./config.json, or git: { url, ref }
+      destination: /opt/anteros/api/
+      include: [".output"]
+      exclude: ["node_modules"]
+      force: true              # rsync --delete
+
+    # Required: one or more containers
+    containers:
+      - name: api
+        image: ghcr.io/myorg/api
+        tag: v1.0.0
+        ports: ["3001:3001"]
+        env:
+          NODE_ENV: production
+        env_from:
+          - secret: api-secrets
+        healthcheck: /healthz
+        restart: unless-stopped
+```
+
+### Build steps
+
+Steps can be a bare command (`- run: bun generate`) or a named step
+(`- name: …; run: ...`). The `name` is used only for log output. Each step may
+specify `cwd` and additional `env`.
+
+#### Automatic PATH
+
+`ros` automatically extends the `PATH` for local build steps to include
+the common toolchain install locations. This means that tools installed
+by `ros setup` (like `bun`, which installs to `~/.bun/bin`) are available
+to your build steps **immediately**, without needing to re-login or
+manually `source ~/.bashrc`.
+
+The prepended paths (only those that actually exist on the filesystem):
+
+- `$HOME/.bun/bin` — Bun
+- `$HOME/.local/bin` — pip, pipx
+- `$HOME/.cargo/bin` — Rust
+- `$HOME/.flox/bin` — Flox
+- `$HOME/.nvm/versions/node/current/bin` — nvm-managed Node.js
+- `/usr/local/bin`
+- `/opt/homebrew/bin` — macOS Homebrew (Apple Silicon)
+- `/usr/local/cellar/bin` — macOS Homebrew (Intel)
+
+### Resources
+
+Each pod (and optionally each container) can declare CPU and memory **limits**.
+The format maps **1:1 to Docker flags**, so there is no magic and no hidden
+behavior.
+
+```yaml
+pods:
+  api:
+    type: api
+    driver: docker
+    instances: 3
+
+    # Pod-level defaults applied to every container of this pod
+    resources:
+      cpu: "1"
+      memory: 1Gi
+
+    containers:
+      - name: api
+        image: ghcr.io/myorg/api
+        # Per-container override (overrides the pod-level resources)
+        resources:
+          cpu: "2"
+          memory: 2Gi
+```
+
+#### Format
+
+| Field      | Format                                       | Example          |
+|------------|----------------------------------------------|------------------|
+| `cpu`      | Whole or fractional cores (`m` for millicores) | `500m`, `0.5`, `2` |
+| `memory`   | Bytes with `K/M/G/T` (decimal) or `Ki/Mi/Gi` (binary) suffix | `256M`, `1Gi` |
+
+#### How they map to Docker
+
+| YAML                        | Docker flags                                |
+|-----------------------------|---------------------------------------------|
+| `cpu: "1"`                  | `--cpus=1`                                  |
+| `cpu: "500m"`               | `--cpus=0.5`                                |
+| `memory: 512Mi`             | `--memory=512M --memory-swap=-1`            |
+| `memory: 1Gi`               | `--memory=1.0G --memory-swap=-1`            |
+
+`--memory-swap=-1` disables the swap limit so the memory limit is the only
+cap (Docker's default is 2× memory, which is rarely what you want for a hard
+limit).
+
+#### Resolution order
+
+When a pod has both `pod.resources` and `container.resources`, the values are
+**merged**: per-container fields override pod-level fields. The merged result
+is what gets passed to `docker run`. A partial override is allowed — for
+example, a container can override `cpu` only and inherit `memory` from the
+pod.
+
+### Artifacts
+
+An `artifact` describes what to ship to the remote server before a pod starts.
+Exactly one source must be defined.
+
+| Source     | Description                            | Transport                       |
+|------------|----------------------------------------|---------------------------------|
+| `source:`  | Local file or directory (path-agnostic) | `rsync` if directory, `scp` if file |
+| `repo:`    | Remote git repository                  | `git clone` on the remote       |
+
+#### `source:` — local path
+
+Auto-detects whether the path is a file or a directory. Use `./` to ship
+the project root, or any sub-path:
+
+```yaml
+pods:
+  api:
+    artifact:
+      source: ./             # entire project root
+      destination: /opt/anteros/api/
+
+  config:
+    artifact:
+      source: ./config/app.json   # single file → scp
+      destination: /opt/anteros/app.json
+```
+
+For directory sources, the project's `.gitignore` is **read automatically**:
+its patterns are translated to rsync `--exclude` rules. The `exclude:` list
+adds to that, while `include:` forces inclusion even for gitignored paths
+(equivalent to a gitignore `!pattern`).
+
+| gitignore     | rsync --exclude                       |
+|---------------|---------------------------------------|
+| `node_modules`| `node_modules`                        |
+| `/dist`       | `/dist` (anchored to source root)     |
+| `build/`      | `build` + `build/**`                  |
+| `*.log`       | `*.log`                               |
+| `!dist/keep`  | use `include: [dist/keep]` instead    |
+
+#### `repo:` — git repository
+
+Cloned directly on the remote server — no local transfer. Useful for large
+shared libraries or vendored dependencies.
+
+```yaml
+pods:
+  web:
+    artifact:
+      repo:
+        url: https://github.com/org/site
+        ref: main        # branch / tag / commit (default: HEAD)
+        depth: 1         # shallow clone
+      destination: /opt/anteros/site/
+```
+
+On first deploy, the repo is `git clone`d. On subsequent deploys, the existing
+clone is `git fetch`d and reset to `origin/<ref>`.
+
+## `proxy`
+
+Caddy reverse-proxy routes, managed via the Caddy **Admin API** (`localhost:2019`)
+on each target server. `ros` provisions a dedicated Caddy server named
+`anteros` so it never touches any user-managed routes or the main Caddyfile.
+
+```yaml
+proxy:
+  routes:
+    - domain: api.example.com        # public domain (host:port optional)
+      target: 127.0.0.1              # upstream host
+      upstream_port: 3001            # upstream port
+      tls: auto                      # auto | true | false (default: auto)
+
+    - domain: web.example.com
+      target: 127.0.0.1
+      upstream_port: 8080
+      tls: auto
+```
+
+| Field           | Required | Default | Description                                  |
+|-----------------|----------|---------|----------------------------------------------|
+| `domain`        | yes      |         | Public domain, optionally with `:port`       |
+| `target`        | yes      |         | Upstream host (usually `127.0.0.1`)          |
+| `upstream_port` | yes      |         | Port on the upstream host                     |
+| `port`          | no       | `80`    | Public listen port (use `443` for HTTPS)      |
+| `tls`           | no       | `auto`  | Whether Caddy manages TLS for this domain    |
+
+### Applying the config
+
+`ros proxy apply` builds the JSON config and POSTs it to each target server's
+Caddy Admin API:
+
+```bash
+# Apply routes from deploy.yaml to all servers in `production`
+ros proxy apply --env production
+
+# Show the JSON that would be applied
+ros proxy show
+
+# Remove the `anteros` server from Caddy
+ros proxy remove --env production
+```
+
+### How merging works
+
+Before pushing, `ros` does a `GET /config/apps/http/servers/` on the remote
+Caddy to read any **user-managed servers**. It then:
+1. Keeps all existing user servers untouched
+2. Replaces the `anteros` server with the one built from `deploy.yaml`
+3. POSTs the merged set back in one atomic call
+
+This means you can run Caddy with your own `Caddyfile` AND let `ros` manage
+its own routes, with zero collision between the two.
+
+## Global blocks
+
+```yaml
+ssh:
+  port: 22
+  timeout: 60
+  key_path: ~/.ssh/id_rsa       # optional
+
+deploy:
+  tag: v1.0.0
+  strategy: rolling             # rolling | recreate | blue-green | canary
+  max_unavailable: 1
+
+settings:
+  install_dir: /opt/anteros
+  auto_tls: true
+```
+
+## Validation
+
+Validate the file at any time:
+
+```bash
+ros config validate
+```
+
+Use `ros config show` to dump the resolved configuration, or
+`ros config servers <env>` to list a specific environment's targets.
+
+## Next
+
+- [`ros deploy`](/docs/cli/ros/commands/deploy) — run a deploy
+- [`ros status`](/docs/cli/ros/commands/status) — check what's running
+- [Sample `deploy.yaml`](https://github.com/anteros/cli/blob/main/base.deploy.yaml)

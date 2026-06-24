@@ -1,0 +1,11 @@
+{
+  "title": "Anteros CLI",
+  "icon": "Terminal",
+  "root": false,
+  "pages": [
+    "index",
+    "ant",
+    "---Deployment (ros)---",
+    "ros"
+  ]
+}

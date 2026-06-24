@@ -1,0 +1,58 @@
+---
+title: ros setup
+description: Install required dependencies on remote servers.
+icon: Wrench
+---
+
+```bash
+ros setup [env] [dep…] [--env <name>] [--server <target>]
+          [--only <deps>] [--skip <deps>] [--dry-run] [--force]
+```
+
+Installs the system dependencies required to run containers on the target
+servers. `ros setup` is idempotent: already-installed tools are skipped unless
+`--force` is passed.
+
+## Installed dependencies
+
+- `docker` — container runtime
+- `caddy` — reverse proxy (reads `proxy.routes` from `deploy.yaml`)
+- `flox` — declarative environments (when a pod uses `driver: flox`)
+- `git` — required by `artifact.repo` cloning
+- `unzip` — for archive-based operations
+- `bun` — JavaScript runtime (for `build.local.steps`)
+
+## Examples
+
+```bash
+# Install all dependencies on every server in `production`
+ros setup --env production
+
+# Install only docker and git
+ros setup --env production docker git
+
+# Install on a single server
+ros setup root@192.168.30.11
+
+# Install on a list of servers
+ros setup root@192.168.30.11 root@192.168.30.12
+
+# Re-run setup (override the install-if-present check)
+ros setup --env production --force
+```
+
+## Options
+
+| Flag                    | Description                                          |
+|-------------------------|------------------------------------------------------|
+| `--env <name>`          | Target environment                                   |
+| `--server <target>`     | Target one or more servers directly                  |
+| `--only <deps>`         | Install only the listed dependencies                 |
+| `--skip <deps>`         | Skip the listed dependencies                         |
+| `--force`               | Reinstall even if already present                    |
+| `--dry-run`             | Show the plan; do not execute                        |
+
+## See also
+
+- [`ros deploy`](/docs/cli/ros/commands/deploy) — deploy after setup
+- [`ros status`](/docs/cli/ros/commands/status) — verify pods are running

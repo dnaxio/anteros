@@ -1,0 +1,86 @@
+---
+title: ros config
+description: Validate and inspect the `deploy.yaml` configuration.
+icon: FileCheck
+---
+
+```bash
+ros config <subcommand> [args] [--config <path>]
+```
+
+Subcommands:
+
+| Subcommand        | Purpose                                              |
+|-------------------|------------------------------------------------------|
+| `validate`        | Parse and validate `deploy.yaml`                     |
+| `show [env]`      | Dump the resolved configuration                      |
+| `servers <env>`   | List the servers in a given environment              |
+
+## Examples
+
+```bash
+# Validate the configuration
+ros config validate
+
+# Show the resolved project config
+ros config show
+
+# Show a specific environment
+ros config show production
+
+# List the servers of an environment
+ros config servers production
+
+# Use a non-default config file
+ros config validate --config ./prod.deploy.yaml
+```
+
+## `validate`
+
+Parses the YAML, checks required fields, normalizes server entries, and
+verifies the basic schema. Exit code is `0` on success, `1` on failure.
+
+```bash
+$ ros config validate
+✔ ✓ deploy.yaml is valid
+```
+
+## `show`
+
+Dumps the parsed configuration. Without an environment, shows the project
+summary:
+
+```
+Config: deploy.yaml ──────────────────────────────────
+Name          my-app
+Version       1
+Environments  test, staging, production
+Pods      api, web
+Proxy routes  4
+```
+
+With an environment, lists its servers, caddy routes, and per-env pod
+overrides.
+
+## `servers`
+
+Lists the servers of a given environment, useful for verifying that
+`--server` filters will resolve correctly:
+
+```
+Servers for production ─────────────────────────────────
+root@192.168.30.11
+root@192.168.30.12
+root@192.168.30.13
+```
+
+## Options
+
+| Flag                | Description                                          |
+|---------------------|------------------------------------------------------|
+| `--config <path>`   | Path to `deploy.yaml` (default: `./deploy.yaml`)     |
+
+## See also
+
+- [`ros env`](/docs/cli/ros/commands/env) — show resolved variables
+- [Configuration](/docs/cli/ros/configuration) — full schema

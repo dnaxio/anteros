@@ -1,0 +1,69 @@
+---
+title: ros history
+description: Show the deployment history tracked by `ros deploy`.
+icon: Clock
+---
+
+```bash
+ros history [pod] [--env <name>] [--config <path>]
+```
+
+Show the deployment history recorded by `ros deploy` on the target servers.
+Each successful `ros deploy` appends an entry to:
+
+```
+/var/lib/ros/history/<env>/<pod>.json
+```
+
+(or whatever `settings.history_dir` is set to in `deploy.yaml`).
+
+## Examples
+
+```bash
+# Show a summary of all pods in the default environment
+ros history
+
+# Show the full history of a single pod
+ros history api
+
+# For a specific environment
+ros history api --env production
+```
+
+## Output (all pods)
+
+```
+POD       LATEST TAG  LATEST DEPLOY            TOTAL
+api       v1.0.2      2024-06-24T08:32:11Z     3
+web       v1.0.1      2024-06-22T14:01:00Z     2
+db        —           —                        0
+```
+
+## Output (single pod)
+
+```
+History: api (production) ───────────────────────────────
+Path: /var/lib/ros/history/production/api.json
+Source: root@192.168.30.11
+
+#  TAG     IMAGE                              DEPLOYED AT          DEPLOYER
+1  v1.0.0  ghcr.io/myorg/api:v1.0.0           2024-06-15T10:00:00Z ci-bot
+2  v1.0.1  ghcr.io/myorg/api:v1.0.1           2024-06-20T14:01:00Z alice
+3  v1.0.2  ghcr.io/myorg/api:v1.0.2           2024-06-24T08:32:11Z ci-bot
+```
+
+## Configuration
+
+Override the history directory in `deploy.yaml`:
+
+```yaml
+settings:
+  history_dir: /var/lib/ros/history     # default
+  # or for non-root setups:
+  # history_dir: ~/.ros/history
+```
+
+## See also
+
+- [`ros rollback`](/docs/cli/ros/commands/rollback) — uses the history to find the previous tag
+- [`ros deploy`](/docs/cli/ros/commands/deploy) — appends entries to the history

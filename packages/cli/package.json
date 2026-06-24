@@ -1,0 +1,21 @@
+{
+  "name": "@anteros/cli",
+  "version": "0.0.1",
+  "description": "@anteros/cli (ant + ros) — framework and deployment CLI for Anteros applications",
+  "bin": {
+    "ant": "./bin/ant/index.ts",
+    "ros": "./bin/ros/index.ts"
+  },
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "ros": "bun run bin/ros/index.ts",
+    "ant": "bun run bin/ant/index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}

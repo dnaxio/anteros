@@ -83,12 +83,16 @@ async function evaluateAccess(
     label: string,
     c: any,
 ): Promise<void> {
-    if (!access) return; // no access rules = free
+    if (!access) {
+        throw new AppError('Access denied', { status: 401, code: 'ACCESS_DENIED' });
+    }
 
     const hasWildcard = access['*'] !== undefined;
     const hasSpecific = access[operation] !== undefined;
 
-    if (!hasWildcard && !hasSpecific) return; // no matching rule = free
+    if (!hasWildcard && !hasSpecific) {
+        throw new AppError('Access denied', { status: 401, code: 'ACCESS_DENIED' });
+    }
 
     const rule = hasSpecific ? access[operation] : access['*'];
     if (rule === undefined) return;

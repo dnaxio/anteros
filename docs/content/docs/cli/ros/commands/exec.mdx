@@ -1,0 +1,41 @@
+---
+title: ros exec
+description: Run a command on a remote server or inside a container.
+icon: Terminal
+---
+
+```bash
+ros exec <pod|server> <cmd…> [--env <name>] [--server <target>]
+```
+
+If the first argument matches a pod name, the command is run **inside the
+pod's container** on every target server (via `docker exec -i`). If it
+matches a server host or name, the command is run directly on the remote
+shell.
+
+## Examples
+
+```bash
+# Run `sh` inside the `api` container on every server
+ros exec api sh
+
+# Run a one-off command inside the container
+ros exec api ls -la /app
+
+# Run a command on a specific server (no pod match)
+ros exec root@192.168.30.11 uptime
+
+# Run on a named server
+ros exec canary-1 docker ps
+```
+
+## Options
+
+| Flag                | Description                                          |
+|---------------------|------------------------------------------------------|
+| `--env <name>`      | Target environment                                   |
+| `--server <target>` | Restrict to a specific server                        |
+
+## See also
+
+- [`ros logs`](/docs/cli/ros/commands/logs) — tail container output

@@ -1,0 +1,41 @@
+---
+title: ros logs
+description: Tail logs from a pod.
+icon: ScrollText
+---
+
+```bash
+ros logs <pod> [--env <name>] [--server <target>] [--tail N] [--since 10m]
+```
+
+Tails the logs of a running container via `docker logs -f`. By default,
+`ros logs` follows all instances of the pod across the target servers.
+
+## Examples
+
+```bash
+# Tail logs of the `api` pod
+ros logs api
+
+# Tail only the last 200 lines
+ros logs api --tail 200
+
+# Tail logs from the last 10 minutes
+ros logs api --since 10m
+
+# Tail logs on a specific server
+ros logs api --env production --server root@192.168.30.11
+```
+
+## Options
+
+| Flag                | Description                                          |
+|---------------------|------------------------------------------------------|
+| `--env <name>`      | Target environment                                   |
+| `--server <target>` | Restrict to a specific server                        |
+| `--tail <N>`        | Show only the last N lines (default: 100)            |
+| `--since <duration>`| Show logs since a duration (`10m`, `1h`, `2024-06-24T10:00:00Z`) |
+
+## See also
+
+- [`ros status`](/docs/cli/ros/commands/status) — check the container state

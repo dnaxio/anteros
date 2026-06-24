@@ -1,0 +1,44 @@
+---
+title: ros destroy
+description: Remove a pod and its resources.
+icon: Trash
+---
+
+```bash
+ros destroy <pod> [--env <name>] [--server <target>] [--force]
+```
+
+Stops and removes a pod's container on every target server. This is a
+**destructive** operation — it does not preserve any persistent data unless
+the pod uses named volumes (which are kept).
+
+## Examples
+
+```bash
+# Remove the `api` pod from `production`
+ros destroy api --env production
+
+# Remove from a single server
+ros destroy api --env production --server canary-1
+
+# Skip the confirmation prompt
+ros destroy api --env production --force
+```
+
+<Callout title="Destructive" type="error">
+By default, `ros destroy` asks for confirmation. Pass `--force` to skip it.
+This action cannot be undone.
+</Callout>
+
+## Options
+
+| Flag                | Description                                          |
+|---------------------|------------------------------------------------------|
+| `--env <name>`      | Target environment                                   |
+| `--server <target>` | Restrict to a specific server                        |
+| `--force`           | Skip the confirmation prompt                         |
+| `--dry-run`         | Show the plan; do not execute                        |
+
+## See also
+
+- [`ros deploy`](/docs/cli/ros/commands/deploy) — re-deploy a pod later

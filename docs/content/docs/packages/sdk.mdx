@@ -353,13 +353,13 @@ const files = await api.upload('photos', [file1, file2, file3])
 
 ```json
 {
-  "_id": "550e8400-...",
+  "_id": "507f1f77bcf86cd799439011",
   "_file": {
-    "filename": "550e8400-....jpg",
+    "filename": "507f1f77bcf86cd799439011.jpg",
     "name": "photo.jpg",
     "mimetype": "image/jpeg",
     "size": 2048576,
-    "url": "/files/v1/photos/550e8400-....jpg"
+    "url": "/files/v1/photos/507f1f77bcf86cd799439011.jpg"
   },
   "description": "Photo de profil",
   "alt": "Mon avatar"
@@ -371,15 +371,15 @@ const files = await api.upload('photos', [file1, file2, file3])
 Generate the URL to access a file, with optional image transformations.
 
 ```typescript
-const url = api.getFileUrl('photos', 'abc.jpg')
-// /files/v1/photos/abc.jpg
+const url = api.getFileUrl('photos', result._file.filename)
+// /files/v1/photos/507f1f77bcf86cd799439011.jpg
 
-const thumb = api.getFileUrl('photos', 'abc.jpg', {
+const thumb = api.getFileUrl('photos', result._file.filename, {
   width: 200,
   format: 'webp',
   quality: 80
 })
-// /files/v1/photos/abc.jpg?w=200&format=webp&q=80
+// /files/v1/photos/507f1f77bcf86cd799439011.jpg?w=200&format=webp&q=80
 ```
 
 | Parameter | Type | Description |

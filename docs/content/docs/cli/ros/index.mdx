@@ -1,0 +1,60 @@
+---
+title: ros overview
+description: Multi-server deployment over SSH for Anteros applications.
+icon: Rocket
+---
+
+`ros` is the operations-facing CLI. It handles everything related to deploying and operating pods on remote servers: initialization, deployment, status, setup, logs, rollback, and configuration validation.
+
+## Quick reference
+
+```bash
+# Install
+bun i @anteros/cli@latest -g
+
+# Initialize a new project
+ros init
+
+# Validate configuration
+ros config validate
+
+# Deploy to a target environment
+ros deploy --env production
+
+# Check what's running
+ros status
+
+# Install server dependencies (docker, caddy, git, …)
+ros setup --env production
+
+# Tail logs from a pod
+ros logs api
+
+# Roll back to a previous version
+ros rollback api
+```
+
+## Concepts
+
+<Callout title="Environments, pods, and artifacts">
+- An **environment** is a group of SSH targets (e.g. `test`, `staging`, `production`).
+- A **pod** is a deployable unit (web, api, database, …) with a `driver`
+  (`docker` or `flox`) and one or more `containers`.
+- An **artifact** is the payload transferred to each remote server before
+  deployment: a local folder (rsync), a single file (scp), or a git repository
+  (cloned on the remote).
+</Callout>
+
+## What's next?
+
+<Cards>
+  <Card title="Installation" href="/docs/cli/ros/installation">
+    Install `ros` and verify your environment.
+  </Card>
+  <Card title="Configuration" href="/docs/cli/ros/configuration">
+    The full `deploy.yaml` schema: environments, pods, artifacts, proxy.
+  </Card>
+  <Card title="Commands" href="/docs/cli/ros/commands/deploy">
+    Browse all commands and their options.
+  </Card>
+</Cards>

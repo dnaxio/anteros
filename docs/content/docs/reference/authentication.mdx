@@ -150,11 +150,11 @@ onLogout: async ({ cookies }) => {
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `httpOnly` | `boolean` | `true` | Prevent XSS access |
-| `secure` | `boolean` | `false` | HTTPS only |
+| `secure` | `boolean` | `false` | HTTPS only (set to `true` in production) |
 | `maxAge` | `number` | — | Expiration in seconds |
 | `path` | `string` | `'/'` | Cookie path |
 | `domain` | `string` | — | Cookie domain (use `.example.com` for subdomains) |
-| `sameSite` | `'lax' \| 'strict' \| 'none'` | `'lax'` | Same-site policy |
+| `sameSite` | `'lax' \| 'strict' \| 'none'` | `'lax'` | **Use `'strict'` in production** to prevent CSRF |
 
 ## JWT utilities
 

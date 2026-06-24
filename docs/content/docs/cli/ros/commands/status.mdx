@@ -1,0 +1,57 @@
+---
+title: ros status
+description: Show the status of all deployed pods.
+icon: Activity
+---
+
+```bash
+ros status [env] [pod] [--env <name>] [--server <target>] [--json] [--watch]
+```
+
+Inspects each target server over SSH and reports the state of every
+container. The output is a table with one row per (pod, server) pair.
+
+## Examples
+
+```bash
+# Status of the default environment
+ros status
+
+# Status of `production`
+ros status --env production
+
+# Status of a single pod
+ros status api
+
+# Status on a single server
+ros status --env production --server canary-1
+
+# Machine-readable output
+ros status --json
+```
+
+## Output
+
+```
+POD       CONTAINER  SERVER              STATE    IMAGE                       STARTED
+dnx-api   api        root@192.168.30.11  running  ghcr.io/myorg/api:v1.0.2    2024-06-24T08:32:11Z
+dnx-api   api        root@192.168.30.12  running  ghcr.io/myorg/api:v1.0.2    2024-06-24T08:32:14Z
+dnx-web   web        root@192.168.30.11  running  ghcr.io/myorg/web:v1.0.2    2024-06-24T08:32:09Z
+dnx-web   web        root@192.168.30.12  missing  —                           —
+```
+
+State values: `running`, `exited`, `dead`, `missing`, `error`.
+
+## Options
+
+| Flag                | Description                                       |
+|---------------------|---------------------------------------------------|
+| `--env <name>`      | Target environment                                |
+| `--server <target>` | Restrict to a specific server                     |
+| `--json`            | Output as JSON                                    |
+| `--watch`           | Refresh every 2 seconds                           |
+
+## See also
+
+- [`ros deploy`](/docs/cli/ros/commands/deploy) — deploy a new version
+- [`ros logs`](/docs/cli/ros/commands/logs) — tail container logs

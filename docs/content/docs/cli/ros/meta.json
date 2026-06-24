@@ -1,0 +1,23 @@
+{
+  "title": "ros — Deployment",
+  "icon": "Rocket",
+  "root": false,
+  "pages": [
+    "index",
+    "installation",
+    "configuration",
+    "---Commands---",
+    "commands/init",
+    "commands/deploy",
+    "commands/status",
+    "commands/setup",
+    "commands/logs",
+    "commands/rollback",
+    "commands/history",
+    "commands/destroy",
+    "commands/exec",
+    "commands/env",
+    "commands/config",
+    "commands/proxy"
+  ]
+}

@@ -1,0 +1,171 @@
+# @anteros/cli configuration
+# https://github.com/anteros/cli
+
+version: "1"
+name: "dnx"
+
+# ===========================================================================
+# Global deploy settings
+# ===========================================================================
+defaults: &defaults
+  tag: v1.0.2
+  restart: unless-stopped
+  healthcheck_grace_period: 30
+
+deploy:
+  <<: *defaults
+  strategy: rolling        # rolling | recreate | blue-green | canary
+  max_unavailable: 1
+
+# ===========================================================================
+# SSH defaults (overridable per server)
+# ===========================================================================
+ssh:
+  port: 22
+  key_path: ~/.ssh/id_rsa
+  timeout: 60
+
+# ===========================================================================
+# Environments
+#   - servers: list of SSH targets
+#       Format: "user@host" | "user@host:port" | "${ENV_VAR}" | "${ENV_VAR:-default}"
+#       Use { name: "...", host: "..." } only if you need a logical name
+#       (e.g. canary / drain / per-server overrides).
+# ===========================================================================
+environments:
+  staging:
+    servers:
+      - ${STAGING_HOST:-root@192.168.20.11}
+      - ${STAGING_HOST_2:-root@192.168.20.12}
+  production:
+    servers:
+      - ${PROD_HOST:-root@192.168.30.11}
+      - ${PROD_HOST_2:-root@192.168.30.12}
+      - ${PROD_HOST_3:-root@192.168.30.13}
+      # Named server (canary / drain / override), only when you need it:
+      # - name: canary-1
+      #   host: ${CANARY_HOST:-root@192.168.30.99}
+      #   tags: [canary]
+
+# ===========================================================================
+# Pods
+#   type:       web | api | database | cache | worker | cron | other
+#   driver:     docker | flox
+#   instances:  number of running instances (scaling)
+#   containers: list of containers/tasks within the pod
+# ===========================================================================
+pods:
+  dnx-doc:
+    type: web
+    driver: flox
+    instances: 1
+    # Pod-level resources (can be overridden per container)
+    resources:
+      cpu: 500m
+      memory: 512Mi
+    # `local` steps run on the machine where `ros` is invoked.
+    # `remote` steps run on each target server via SSH.
+    build:
+      local:
+        steps:
+          - name: Generate static site
+            run: bun generate
+    # Artifact: what to ship to each remote server.
+    #   source:  local file or directory (rsync if dir, scp if file)
+    #   repo:    clone a git repo on the remote (no local transfer)
+    # `include` overrides `.gitignore`; `exclude` adds to it; `force` mirrors.
+    artifact:
+      source: ./docs
+      destination: /opt/anteros/docs/
+      include:
+        - .output
+      exclude:
+        - node_modules
+      force: true
+    containers:
+      - name: docs
+        ports:
+          - "4000:3000"
+        healthcheck: /
+        restart: always
+
+  dnx-api:
+    type: api
+    driver: docker
+    instances: 3
+    # Pod-level defaults; container can override
+    resources:
+      cpu: "1"
+      memory: 1Gi
+    depends_on:
+      - dnx-db
+    containers:
+      - name: api
+        image: ghcr.io/myorg/dnx-api
+        tag: v1.0.2
+        healthcheck: /healthz
+        restart: unless-stopped
+        ports:
+          - "3001:3001"
+        # Per-container override (overrides the pod-level resources)
+        resources:
+          cpu: "2"
+          memory: 2Gi
+        env:
+          NODE_ENV: production
+          LOG_LEVEL: info
+        env_from:
+          - secret: dnx-api-secrets
+        artifact:
+          source: ./apps/api
+          destination: /opt/anteros/api/
+          include:
+            - .output
+      # Optional sidecar (log shipper, metrics, etc.)
+      # - name: log-shipper
+      #   image: fluent/fluent-bit
+      #   restart: always
+
+  dnx-web:
+    type: web
+    driver: docker
+    instances: 2
+    resources:
+      cpu: 500m
+      memory: 512Mi
+    containers:
+      - name: web
+        image: ghcr.io/myorg/dnx-web
+        tag: v1.0.2
+        healthcheck: /
+        restart: always
+        ports:
+          - "8080:8080"
+        env:
+          NODE_ENV: production
+
+# ===========================================================================
+# Caddy reverse-proxy routes
+# ===========================================================================
+proxy:
+  routes:
+    - domain: dnx.dnax.io
+      port: 80
+      target: 127.0.0.1
+      upstream_port: 4000
+      tls: auto
+
+    - domain: api.example.com
+      target: 127.0.0.1
+      upstream_port: 3001
+      tls: auto
+
+    - domain: web.example.com
+      target: 127.0.0.1
+      upstream_port: 8080
+      tls: auto
+
+    - domain: www.example.com
+      target: 127.0.0.1
+      upstream_port: 8080
+      tls: auto

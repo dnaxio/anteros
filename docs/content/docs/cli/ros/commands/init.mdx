@@ -1,0 +1,72 @@
+---
+title: ros init
+description: Create a `deploy.yaml` in the current project.
+icon: FilePlus
+---
+
+```bash
+ros init [--force]
+```
+
+Generates a minimal `deploy.yaml` at the project root. If the file already
+exists, `ros init` refuses to overwrite unless `--force` is passed.
+
+## Examples
+
+```bash
+# Create a fresh deploy.yaml
+ros init
+
+# Overwrite an existing file
+ros init --force
+```
+
+## Generated file
+
+```yaml title="deploy.yaml"
+version: "1"
+name: "my-app"
+
+deploy:
+  tag: v0.1.0
+  strategy: rolling
+
+ssh:
+  port: 22
+  timeout: 60
+
+environments:
+  test:
+    servers:
+      - root@192.168.10.11
+  staging:
+    servers:
+      - root@192.168.20.11
+  production:
+    servers:
+      - root@192.168.30.11
+
+pods:
+  api:
+    type: api
+    driver: docker
+    instances: 1
+    containers:
+      - name: api
+        image: ghcr.io/myorg/api
+        tag: v0.1.0
+        ports: ["3001:3001"]
+        healthcheck: /healthz
+        restart: unless-stopped
+
+proxy:
+  routes:
+    - domain: api.example.com
+      upstream_port: 3001
+      tls: auto
+```
+
+## Next
+
+- [Configuration](/docs/cli/ros/configuration) — full schema
+- [`ros config validate`](/docs/cli/ros/commands/config)
