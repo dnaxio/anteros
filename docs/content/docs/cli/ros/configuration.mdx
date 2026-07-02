@@ -79,8 +79,11 @@ pods:
         env:
           NODE_ENV: production
         env_from:
-          - secret: api-secrets
-        healthcheck: /healthz
+          - secret: env:DATABASE_URL        # from process.env
+          - secret: 1password:Prod/API_KEY  # from 1Password CLI
+          - secret: vault:kv/db/password    # from Vault CLI
+          - secret: file:api-keys           # from ~/.config/ros/secrets/api-keys
+        healthcheck: http://localhost:3001/healthz
         restart: unless-stopped
 ```
 
@@ -113,6 +116,68 @@ overrides it, `exclude:` adds to it.
 `local` steps run on the machine invoking `ros`. `remote` steps run on
 each target server via SSH. PATH is auto-extended with common toolchain
 locations (`~/.bun/bin`, `~/.local/bin`, etc.).
+
+### Health checks
+
+The `healthcheck` field defines a URL that `ros deploy` polls after
+`docker run` to verify the container is healthy. If the check fails
+(within the configurable timeout), `ros` automatically rolls back to the
+previous version.
+
+```yaml
+containers:
+  - name: api
+    healthcheck: http://localhost:3001/healthz
+```
+
+The health check is polled every 3 seconds. Default timeout is 60 seconds,
+configurable via `--healthcheck-timeout <s>`. Skip entirely with
+`--no-healthcheck`.
+
+### Secrets
+
+The `env_from` field resolves secrets **client-side** before deploy.
+Resolved values are passed as `-e` flags to `docker run` — they are
+never written to disk on the remote server. Explicit `env:` vars always
+take precedence over resolved secrets.
+
+```yaml
+containers:
+  - name: api
+    env:
+      NODE_ENV: production         # explicit — always wins
+    env_from:
+      - secret: env:DATABASE_URL
+      - secret: 1password:Prod/API_KEY
+```
+
+#### Secret backends
+
+| Syntax | Backend | Resolution |
+|--------|---------|------------|
+| `secret: my-key` | file | `~/.config/ros/secrets/my-key` |
+| `secret: env:MY_VAR` | env | `process.env.MY_VAR` |
+| `secret: 1password:Path/To/Item` | 1Password | `op read op://Path/To/Item` |
+| `secret: vault:secret/data/myapp` | Vault | `vault kv get -field=value secret/data/myapp` |
+
+The env var name is derived from the last segment of the key. For example,
+`secret: env:DATABASE_URL` resolves to the env var `DATABASE_URL`, and
+`secret: 1password:Prod/API_KEY` resolves to the env var `API_KEY`.
+
+<Callout type="warn">
+If a secret cannot be resolved, the deploy **fails immediately** with a
+clear error indicating which secret reference failed. No partial deploys.
+</Callout>
+
+#### File secrets
+
+Store secrets as plain-text files in `~/.config/ros/secrets/`:
+
+```bash
+mkdir -p ~/.config/ros/secrets
+echo "postgres://user:pass@db:5432/prod" > ~/.config/ros/secrets/DATABASE_URL
+chmod 600 ~/.config/ros/secrets/*
+```
 
 ## `proxy`
 

@@ -8,6 +8,7 @@ icon: Rocket
 ros deploy [env] [--pod <name>] [--tag <tag>] [--strategy <s>]
            [--env <name>] [--server <target>] [--config <path>]
            [--dry-run] [--force]
+           [--no-healthcheck] [--healthcheck-timeout <seconds>]
 ```
 
 Deploys one or more pods to the target environment. Runs the build
@@ -41,7 +42,9 @@ For each pod selected, in order:
 2. **Per-server**, in parallel:
    1. **Remote build steps** — run on the server via SSH
    2. **Artifact transfer** — `rsync` (folder), `scp` (file), or `git clone`
-   3. **`docker pull` + stop + rm + run** of the new container
+   3. **Secret resolution** — `env_from` secrets are resolved client-side (never sent to disk on the remote)
+   4. **`docker pull` + stop + rm + run** of the new container
+   5. **Health check** — polls `healthcheck` URL until `2xx` or timeout; auto-rollbacks on failure
 
 ## Options
 
@@ -55,6 +58,43 @@ For each pod selected, in order:
 | `--dry-run`             | Show the plan; do not execute anything                        |
 | `--force`               | Bypass safety checks (drift, confirmation, downgrade)         |
 | `--config <path>`       | Path to `deploy.yaml` (default: `./deploy.yaml`)              |
+| `--no-healthcheck`      | Skip post-deploy health check polling                         |
+| `--healthcheck-timeout <s>` | Health check timeout in seconds (default: `60`)           |
+
+## Health checks
+
+After `docker run`, `ros` polls the container's `healthcheck` URL (configured
+per container in `deploy.yaml`) every 3 seconds until it returns a `2xx`
+status code or the timeout is reached.
+
+If the health check **fails**:
+1. `ros` looks up the previous version from the deployment history
+2. It automatically **rolls back** by running the previous image tag
+3. An error is reported with the rollback result
+
+```bash
+# Skip health check entirely
+ros deploy --env production --no-healthcheck
+
+# Increase timeout to 2 minutes
+ros deploy --env production --healthcheck-timeout 120
+```
+
+<Callout>
+Health checks require the `healthcheck` field to be set on the container
+config. If no `healthcheck` is configured, the check is skipped for that
+container.
+</Callout>
+
+## Secrets
+
+Secrets defined in `env_from` are resolved **client-side** before deploy.
+They are passed as `-e` flags to `docker run` and are never written to
+disk on the remote server. Explicit `env:` vars take precedence over
+resolved secrets.
+
+See [Configuration → Secrets](/docs/cli/ros/configuration#secrets) for the
+full syntax and supported backends.
 
 ## Deploy plan output
 

@@ -50,6 +50,13 @@ ssh root@192.168.30.11 'echo ok'
 sure your SSH key is authorized on every target server.
 </Callout>
 
+### SSH connection reuse
+
+`ros` creates persistent SSH sockets in `~/.ssh/ros/` to avoid reconnecting on
+every command (ControlMaster). Socket filenames are hashed to stay under the
+macOS 104-byte `ControlPath` limit. The directory is created automatically on
+first use and sockets expire after 10 minutes of inactivity.
+
 ## Next
 
 - [Configuration](/docs/cli/ros/configuration) — full `deploy.yaml` schema

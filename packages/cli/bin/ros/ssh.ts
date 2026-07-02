@@ -2,9 +2,10 @@
 // - Reuses a single TCP connection per server via SSH ControlMaster.
 // - Provides rsync helpers for `sync` operations.
 
-import { mkdtempSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { mkdirSync, rmSync, existsSync } from "node:fs"
+import { homedir } from "node:os"
 import { join } from "node:path"
+import { createHash } from "node:crypto"
 import type { ServerTarget } from "./types.ts"
 
 export interface SshOptions {
@@ -18,17 +19,18 @@ export interface SshOptions {
 
 // ---------------------------------------------------------------------------
 // ControlMaster: one persistent socket per (host,port,user) per CLI run.
+// Uses ~/.ssh/ros/ with hashed names to stay under macOS 104-byte limit.
 // ---------------------------------------------------------------------------
 
-const CONTROL_DIR = mkdtempSync(join(tmpdir(), "ros-ssh-"))
-const SOCKET_RE = /[^a-zA-Z0-9._-]/g
+const CONTROL_DIR = join(homedir(), ".ssh", "ros")
+if (!existsSync(CONTROL_DIR)) {
+  mkdirSync(CONTROL_DIR, { recursive: true, mode: 0o700 })
+}
 
 function socketPathFor(server: ServerTarget): string {
-  const safe = `${server.user}@${server.host}:${server.port}`.replace(
-    SOCKET_RE,
-    "_",
-  )
-  return join(CONTROL_DIR, `cm-${safe}.sock`)
+  const key = `${server.user}@${server.host}:${server.port}`
+  const hash = createHash("sha256").update(key).digest("hex").slice(0, 12)
+  return join(CONTROL_DIR, `cm-${hash}.sock`)
 }
 
 function buildCommonArgs(

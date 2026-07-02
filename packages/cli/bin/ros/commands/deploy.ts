@@ -1,13 +1,14 @@
 // `ros deploy` — deploy pods to a target environment.
 
-import type { Command, ServerTarget, PodConfig } from "../types.ts"
+import type { Command, ServerTarget, PodConfig, ContainerConfig } from "../types.ts"
 import { loadConfig, resolveServers, expandEnv } from "../config.ts"
-import { sshExec } from "../ssh.ts"
+import { sshExec, ssh } from "../ssh.ts"
 import { runLocalBuild, runRemoteBuild, describeBuild } from "../build.ts"
 import { pushArtifact, describeArtifact } from "../artifact.ts"
 import { mergeResources, resourcesToDockerFlags, describeResources } from "../resources.ts"
 import { appendHistory, DEFAULT_HISTORY_DIR, makeEntry } from "../history.ts"
 import { sendWebhook, makeDeployEvent, makeDeployFailedEvent, normalizeWebhook } from "../webhook.ts"
+import { resolveSecrets, mergeEnvWithSecrets } from "../secrets.ts"
 import {
   header,
   success,
@@ -18,6 +19,93 @@ import {
   confirm,
   table,
 } from "../ui.ts"
+
+// Parse CLI flags for deploy options
+interface DeployFlags {
+  noHealthcheck: boolean
+  healthcheckTimeout: number
+}
+
+function parseDeployFlags(args: string[]): { args: string[]; flags: DeployFlags } {
+  const flags: DeployFlags = {
+    noHealthcheck: false,
+    healthcheckTimeout: 60,
+  }
+  const filtered: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]
+    if (arg === "--no-healthcheck") {
+      flags.noHealthcheck = true
+    } else if (arg === "--healthcheck-timeout" && i + 1 < args.length) {
+      const nextArg = args[++i]
+      if (nextArg) {
+        flags.healthcheckTimeout = parseInt(nextArg, 10) || 60
+      }
+    } else if (arg) {
+      filtered.push(arg)
+    }
+  }
+  return { args: filtered, flags }
+}
+
+/**
+ * Poll a healthcheck URL until it returns 2xx or timeout.
+ * Returns true if healthy, false if timeout.
+ */
+async function waitForHealthy(
+  server: ServerTarget,
+  healthcheckUrl: string,
+  timeoutSec: number,
+  sshTimeout?: number,
+): Promise<boolean> {
+  const start = Date.now()
+  const timeoutMs = timeoutSec * 1000
+  const pollInterval = 3000 // 3 seconds
+
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const result = await ssh(
+        server,
+        `curl -sf -o /dev/null -w '%{http_code}' '${healthcheckUrl}' 2>/dev/null || echo "000"`,
+        { timeout: sshTimeout },
+      )
+      const statusCode = result.stdout.trim()
+      if (statusCode.startsWith("2")) {
+        return true
+      }
+    } catch {
+      // ignore errors, keep polling
+    }
+    await new Promise((r) => setTimeout(r, pollInterval))
+  }
+  return false
+}
+
+/**
+ * Get the previous version from history for rollback.
+ */
+async function getPreviousVersion(
+  server: ServerTarget,
+  envName: string,
+  podName: string,
+  historyDir: string,
+  sshTimeout?: number,
+): Promise<string | null> {
+  try {
+    const result = await ssh(
+      server,
+      `cat ${historyDir}/${envName}/${podName}.json 2>/dev/null || echo "[]"`,
+      { timeout: sshTimeout },
+    )
+    const history = JSON.parse(result.stdout)
+    if (history.length >= 2) {
+      return history[history.length - 2]
+    }
+  } catch {
+    // ignore
+  }
+  return null
+}
 
 function buildImageRef(p: PodConfig): string {
   const c0 = p.containers[0]
@@ -39,8 +127,11 @@ interface PlanRow {
 }
 
 export const deploy: Command = async ({ args, opts }) => {
+  // Parse deploy-specific flags
+  const { args: cleanArgs, flags: deployFlags } = parseDeployFlags(args)
+
   const cfg = await loadConfig(opts.config)
-  const envName = opts.env ?? args[0] ?? "production"
+  const envName = opts.env ?? cleanArgs[0] ?? "production"
   const env = cfg.environments[envName]
   if (!env) {
     error("Unknown environment: " + envName + ". Available: " + Object.keys(cfg.environments).join(", "))
@@ -48,7 +139,7 @@ export const deploy: Command = async ({ args, opts }) => {
   }
 
   const servers = resolveServers(env, opts.server)
-  const podFilter = args.find((a) => a !== envName)
+  const podFilter = cleanArgs.find((a) => a !== envName)
   const pods = podFilter
     ? Object.values(cfg.pods).filter((_, i) => Object.keys(cfg.pods)[i] === podFilter)
     : Object.values(cfg.pods)
@@ -155,10 +246,14 @@ export const deploy: Command = async ({ args, opts }) => {
             { timeout: cfg.ssh?.timeout },
           )
 
-          // 2d) pull + run
+          // 2d) Resolve secrets from env_from (client-side)
+          const secrets = await resolveSecrets(c0.env_from)
+          const mergedEnv = mergeEnvWithSecrets(c0.env, secrets)
+
+          // 2e) pull + run
           const portArgs = (c0.ports ?? []).map((p) => "-p " + p + " ").join("")
-          const envArgs = c0.env
-            ? Object.entries(c0.env)
+          const envArgs = Object.keys(mergedEnv).length > 0
+            ? Object.entries(mergedEnv)
                 .map(([k, v]) => "-e " + k + "=" + JSON.stringify(String(v)))
                 .join(" ")
             : ""
@@ -175,9 +270,52 @@ export const deploy: Command = async ({ args, opts }) => {
               portArgs + envArgs + resourceArgs + " " + image,
             { timeout: cfg.ssh?.timeout },
           )
+
+          // 2f) Health check (unless disabled)
+          if (!deployFlags.noHealthcheck && c0.healthcheck) {
+            const healthUrl = expandEnv(c0.healthcheck)
+            log("  " + server.raw + " → health check: " + healthUrl)
+            const healthy = await waitForHealthy(
+              server,
+              healthUrl,
+              deployFlags.healthcheckTimeout,
+              cfg.ssh?.timeout,
+            )
+            if (!healthy) {
+              error("  " + server.raw + " ✖ health check failed after " + deployFlags.healthcheckTimeout + "s")
+              // Auto-rollback: try to restore previous version
+              const prevVersion = await getPreviousVersion(
+                server,
+                envName,
+                podName,
+                cfg.settings?.history_dir ?? DEFAULT_HISTORY_DIR,
+                cfg.ssh?.timeout,
+              )
+              if (prevVersion) {
+                warn("  " + server.raw + " → rolling back to " + prevVersion)
+                try {
+                  await sshExec(
+                    server,
+                    "docker stop " + c0.name + " 2>/dev/null || true && " +
+                      "docker rm " + c0.name + " 2>/dev/null || true && " +
+                      "docker run -d --name " + c0.name + " " +
+                      "--restart " + (c0.restart ?? "unless-stopped") + " " +
+                      portArgs + envArgs + resourceArgs + " " + prevVersion,
+                    { timeout: cfg.ssh?.timeout },
+                  )
+                  success("  " + server.raw + " → rollback complete")
+                } catch (rollbackErr) {
+                  error("  " + server.raw + " ✖ rollback failed: " + (rollbackErr as Error).message)
+                }
+              } else {
+                warn("  " + server.raw + " → no previous version to rollback to")
+              }
+              throw new Error("Health check failed")
+            }
+          }
           success("  " + server.raw + " ✓")
 
-          // 2e) record deploy in history (so `ros rollback` can find the previous tag)
+          // 2g) record deploy in history (so `ros rollback` can find the previous tag)
           const c0Tag = c0.tag ?? "latest"
           const historyDir = cfg.settings?.history_dir ?? DEFAULT_HISTORY_DIR
           try {
@@ -200,12 +338,12 @@ export const deploy: Command = async ({ args, opts }) => {
     // 3) Webhook notification (best-effort, non-blocking)
     const duration = Math.round((Date.now() - deployStart) / 1000)
     const c0Tag = c0.tag ?? "latest"
-    const servers = resolveServers(env, opts.server).map((s) => s.raw)
+    const serverNames = resolveServers(env, opts.server).map((s) => s.raw)
     const event = makeDeployEvent(
       podName,
       envName,
       c0Tag,
-      servers,
+      serverNames,
       duration,
     )
     const wh = await sendWebhook(
