@@ -260,8 +260,10 @@ export async function handleUpload(options: UploadOptions): Promise<FileResult> 
   // Insert metadata first to get the MongoDB auto-generated ObjectId
   let _id: string;
   try {
-    const rest = new useRest({ tenant_id, internal: false, useHook: false, useCustomApi: false });
-    const result = await rest.db.collection(collection).insertOne({
+    // Coerce relation field IDs from string to ObjectId before insert.
+    // Form-data / JSON always sends IDs as strings, but MongoDB expects
+    // ObjectId for fields that reference other collections.
+    const insertDoc: Record<string, any> = {
       _file: {
         filename: '',
         name: file.name,
@@ -269,8 +271,35 @@ export async function handleUpload(options: UploadOptions): Promise<FileResult> 
         size: 0,
         url: '',
       },
-      ...(data || {}),
-    });
+    }
+    if (data) {
+      const relationFields =
+        col.fields?.filter(
+          (f) => f.type === 'relationship' && f.relation?.to && data[f.name] !== undefined && data[f.name] !== null,
+        ) ?? []
+      for (const [key, value] of Object.entries(data)) {
+        const field = relationFields.find((f) => f.name === key)
+        if (field) {
+          const hasMany = field.relation?.hasMany ?? false
+          if (hasMany && Array.isArray(value)) {
+            insertDoc[key] = value.map((id) =>
+              ObjectId.isValid(id) ? new ObjectId(id) : id,
+            )
+          } else if (!hasMany) {
+            insertDoc[key] =
+              typeof value === 'string' && ObjectId.isValid(value)
+                ? new ObjectId(value)
+                : value
+          } else {
+            insertDoc[key] = value
+          }
+        } else {
+          insertDoc[key] = value
+        }
+      }
+    }
+    const rest = new useRest({ tenant_id, internal: false, useHook: false, useCustomApi: false });
+    const result = await rest.db.collection(collection).insertOne(insertDoc);
     _id = String(result.insertedId);
   } catch (err) {
     throw new AppError('Failed to save file metadata', {

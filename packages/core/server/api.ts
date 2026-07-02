@@ -31,7 +31,6 @@ const ActionsValues = [
     'deleteMany',
     'findOne',
     'find',
-    'findOneAndUpdate',
     'runService',
     'upload',
     'auth',
@@ -181,7 +180,6 @@ const crudHandlers: Record<string, CrudHandler> = {
     insertMany:      (rest, collection, body) => rest.insertMany(collection, body?.data),
     updateOne:       (rest, collection, body) => rest.updateOne(collection, body?.id || body?._id, body?.update || {}),
     updateMany:      (rest, collection, body) => rest.updateMany(collection, body?.ids || body?._ids || [], body?.update || {}),
-    findOneAndUpdate:(rest, collection, body) => rest.findOneAndUpdate(collection, body?.filter || {}, body?.update || {}, body?.options || {}),
     deleteOne:       (rest, collection, body) => rest.deleteOne(collection, body?.id || body?._id),
     deleteMany:      (rest, collection, body) => rest.deleteMany(collection, body?.ids || body?._ids || []),
 };
@@ -378,7 +376,7 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
                 // Strip readOnlyFields for mutations
                 if (action === 'insertOne' || action === 'insertMany') {
                     stripReadOnlyData(col, body);
-                } else if (action === 'updateOne' || action === 'updateMany' || action === 'findOneAndUpdate') {
+                } else if (action === 'updateOne' || action === 'updateMany') {
                     stripReadOnlyUpdate(col, body);
                 }
 

@@ -116,14 +116,6 @@ describe("updateMany", () => {
     });
 });
 
-describe("findOneAndUpdate", () => {
-    it("finds and updates atomically", async () => {
-        await rest.insertOne("items", { title: "fau", count: 0 });
-        const doc = await rest.findOneAndUpdate("items", { title: "fau" }, { $set: { count: 10 } });
-        expect(doc.count).toBe(10);
-    });
-});
-
 describe("deleteMany", () => {
     it("deletes multiple by ids", async () => {
         const a = await rest.insertOne("items", { title: "d1" });

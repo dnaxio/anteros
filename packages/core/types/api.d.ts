@@ -17,7 +17,6 @@ export declare enum ApiActions {
 }
 
 export type ActionsApiList =
-    | "findOneAndUpdate"
     | "insertOne"
     | "insertMany"
     | "updateOne"

@@ -53,7 +53,7 @@ function safePublicConfig() {
             actions: [
                 'insertOne', 'insertMany', 'updateOne', 'updateMany',
                 'deleteOne', 'deleteMany', 'findOne', 'find',
-                'findOneAndUpdate', 'aggregate',
+                'aggregate',
                 ...Object.keys(c.actions ?? {}),
             ],
             fields: (c.fields ?? []).map(f => ({

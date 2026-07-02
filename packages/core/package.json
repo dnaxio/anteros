@@ -1,7 +1,7 @@
 {
   "name": "@anteros/core",
   "module": "index.ts",
-  "version": "0.0.2-alpha.6",
+  "version": "0.0.2-alpha.7",
   "type": "module",
   "description": "Anteros Core",
   "private": false,
