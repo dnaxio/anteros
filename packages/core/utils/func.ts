@@ -409,8 +409,10 @@ export type GenerateRandomOptions = {
     useNumbers?: boolean;
     includeSymbols?: string;
     excludeSymbols?: string;
-    startWith?: string;
-    endWith?: string;
+    /** Préfixe (string fixe ou fonction qui reçoit la valeur générée). Ex: `(v) => 'BP-' + v` */
+    startWith?: string | ((value: string) => string);
+    /** Suffixe (string fixe ou fonction qui reçoit la valeur générée). Ex: `(v) => v + '-X'` */
+    endWith?: string | ((value: string) => string);
     toLowerCase?: boolean;
     toUpperCase?: boolean;
     toNumber?: boolean;
@@ -463,7 +465,9 @@ async function generateRandom(options: GenerateRandomOptions, ctx: {
         result += charset[randomIndex];
     }
 
-    result = startWith + result + endWith;
+    const start = typeof startWith === 'function' ? startWith(result) : startWith;
+    const end = typeof endWith === 'function' ? endWith(result) : endWith;
+    result = start + result + end;
 
     if (toLowerCase) {
         result = result.toLowerCase();

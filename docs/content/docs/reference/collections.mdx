@@ -94,8 +94,15 @@ Each field can have these options:
     pipeline?: any[];   // Aggregation pipeline
   };
   randomOptions?: {
-    type: 'uuid' | 'string' | 'number';
-    prefix?: string;
+    length: number;
+    useLetters?: boolean;
+    useNumbers?: boolean;
+    includeSymbols?: string;
+    excludeSymbols?: string;
+    startWith?: string | ((value: string) => string);
+    endWith?: string | ((value: string) => string);
+    toLowerCase?: boolean;
+    toUpperCase?: boolean;
     toNumber?: boolean;
   };
 }

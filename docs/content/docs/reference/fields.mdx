@@ -297,6 +297,21 @@ Auto-generate a unique value on **insert only**. The value is not regenerated on
 }
 ```
 
+`startWith` and `endWith` can also be **functions** that receive the generated value and return a customized prefix/suffix:
+
+```typescript
+{
+  name: 'ref',
+  type: 'random',
+  randomOptions: {
+    length: 8,
+    useNumbers: true,
+    startWith: (value) => 'BP-' + value,   // → "BP-38472910"
+    endWith:   (value) => value + '-X',     // → "BP-38472910-X"
+  },
+}
+```
+
 ### Random Options
 
 | Option | Type | Default | Description |
@@ -306,8 +321,8 @@ Auto-generate a unique value on **insert only**. The value is not regenerated on
 | `useNumbers` | `boolean` | `true` | Include digits (`0-9`) |
 | `includeSymbols` | `string` | `''` | Extra characters to include in the charset |
 | `excludeSymbols` | `string` | `''` | Characters to exclude from the charset |
-| `startWith` | `string` | `''` | Prefix prepended to the generated value |
-| `endWith` | `string` | `''` | Suffix appended to the generated value |
+| `startWith` | `string \| ((value: string) => string)` | `''` | Prefix (static string or function) |
+| `endWith` | `string \| ((value: string) => string)` | `''` | Suffix (static string or function) |
 | `toLowerCase` | `boolean` | `false` | Convert to lowercase |
 | `toUpperCase` | `boolean` | `false` | Convert to uppercase |
 | `toNumber` | `boolean` | `false` | Parse the result as an integer |
