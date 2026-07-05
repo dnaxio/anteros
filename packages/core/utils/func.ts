@@ -208,16 +208,28 @@ function cleanDeep<T extends DeepRecord | DeepRecord[]>(data: T): Partial<T> {
     return result as Partial<T>;
 }
 
+/**
+ * Vérifie si une string est une date valide.
+ * Accepte : ISO 8601 (YYYY-MM-DD, YYYY-MM-DDTHH:mm...) et timestamps UNIX (s ou ms).
+ * Rejette les strings ambiguës que certains moteurs JS parsent en date (ex: "REF-2024").
+ */
 function isDate(value: string): boolean {
     if (!value || typeof value !== 'string') return false;
     const trimmed = value.trim();
-    // Chaînes 100 % chiffres : seuls timestamps UNIX s (10) ou ms (13) — sinon codes type "170273" seraient des dates via `new Date("170273")`.
+
+    // Timestamps numériques purs (10 ou 13 chiffres)
     if (/^\d+$/.test(trimmed)) {
         const len = trimmed.length;
         if (len !== 10 && len !== 13) return false;
         const ms = new Date(Number(trimmed)).getTime();
         return !isNaN(ms);
     }
+
+    // ISO 8601 : YYYY-MM-DD avec heure optionnelle
+    if (!/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})?)?$/.test(trimmed)) {
+        return false;
+    }
+
     const date = new Date(trimmed);
     return !isNaN(date.getTime());
 }
@@ -269,14 +281,26 @@ function joinFormatToDatePath(parent: string, segment: string | number): string 
     return parent === '' ? s : `${parent}.${s}`;
 }
 
-/** Correspond à un nom de champ schéma (`createdAt`, `user.birthDate`) y compris en profondeur (`$set.createdAt`). */
+/**
+ * Correspond à un nom de champ schéma (`createdAt`, `user.birthDate`)
+ * y compris en profondeur (`$set.createdAt`) ou derrière un opérateur
+ * MongoDB (`createdAt.$lte`, `$match.createdAt.$gte`).
+ */
 function pathMatchesFieldKey(path: string, key: string): boolean {
-    return path === key || path.endsWith('.' + key);
+    // Strip trailing MongoDB operator segments: createdAt.$lte → createdAt
+    const cleanPath = path.replace(/\.\$[a-z]+$/i, '');
+    return cleanPath === key || cleanPath.endsWith('.' + key);
 }
 
 function shouldFormatDateAtPath(path: string, options?: FormatToDateOptions): boolean {
     // Aucune option → convertir partout où `isDate` est vrai
     if (!options) return true;
+
+    // Contexte d'opérateur MongoDB ($lte, $gte, $eq, $in, $nin, $exists, etc.)
+    // → toujours convertir : un opérateur sur une date n'a de sens qu'avec un vrai Date
+    // On vérifie si un segment du chemin commence par '$' (ex: createdAt.$lte, $in.0)
+    if (path.split('.').some((seg) => /^\$[a-z]+$/i.test(seg))) return true;
+
     if (options.omitKeys?.some((k) => pathMatchesFieldKey(path, k))) return false;
     // Whitelist seulement si includeKeys est un tableau non vide
     if (options.includeKeys && options.includeKeys.length > 0) {
@@ -289,6 +313,11 @@ function formatToDate(data: any, options?: FormatToDateOptions, path = ''): any 
     if (data === null || data === undefined) return data;
     if (data instanceof Date) return data;
     if (data instanceof ObjectId) return data;
+
+    // String racine (ex: item de tableau $in) — vérifier avant la branche objet
+    if (typeof data === 'string' && isDate(data)) {
+        return shouldFormatDateAtPath(path, options) ? stringToDate(data) : data;
+    }
 
     if (Array.isArray(data)) {
         return data.map((item, i) => {
@@ -563,13 +592,11 @@ function collectDateFieldPathsFromCollection(col: Collection): string[] {
     return [...paths];
 }
 
-function toBson<T>(data: any | any[], options?: FormatInputOptions): T {
+function toBson<T>(data: any | any[], _options?: FormatInputOptions): T {
     let data_ = formatToObjectId(data);
-    const dateOpts: FormatToDateOptions | undefined =
-        options?.col !== undefined
-            ? { includeKeys: collectDateFieldPathsFromCollection(options.col) }
-            : undefined;
-    data_ = formatToDate(data_, dateOpts);
+    // Toujours convertir toutes les strings date valide en Date,
+    // quel que soit le contexte (insert, update, match, pipeline).
+    data_ = formatToDate(data_);
 
     if (Array.isArray(data)) {
         data.length = 0;
