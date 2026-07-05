@@ -465,9 +465,19 @@ async function generateRandom(options: GenerateRandomOptions, ctx: {
         result += charset[randomIndex];
     }
 
-    const start = typeof startWith === 'function' ? startWith(result) : startWith;
-    const end = typeof endWith === 'function' ? endWith(result) : endWith;
-    result = start + result + end;
+    // String → préfixe/suffixe classique. Fonction → elle reçoit la valeur
+    // et retourne le résultat final (pas de re-concaténation pour éviter la duplication).
+    if (typeof startWith === 'function') {
+        result = startWith(result);
+    } else {
+        result = startWith + result;
+    }
+
+    if (typeof endWith === 'function') {
+        result = endWith(result);
+    } else {
+        result = result + endWith;
+    }
 
     if (toLowerCase) {
         result = result.toLowerCase();
