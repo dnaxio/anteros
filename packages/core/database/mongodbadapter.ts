@@ -168,7 +168,7 @@ class MongoRest {
 
         const { request: requestMeta, ...restMeta } = ctxMeta ?? {}
 
-        const meta: Record<string, any> = {
+        const meta: any = {
             ...restMeta,
             platform: restMeta?.platform ?? os.platform(),
             core_version: cfg.version ?? restMeta?.core_version,
@@ -273,17 +273,9 @@ class MongoRest {
                 throw isSafe.error;
             }
             pipeline = func.toBson(pipeline, { col })
+            const meta: any = { action, collection, pipeline }
             if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({
-                    rest: this,
-                    io,
-                    action: action,
-                    meta: {
-                        action,
-                        collection: collection,
-                        pipeline: pipeline,
-                    }
-                })
+                await col.hooks.beforeOperation({ rest: this, io, action, meta })
             }
 
             let result = await this.db.collection(collection).aggregate(pipeline, {
@@ -291,18 +283,9 @@ class MongoRest {
                 allowDiskUse: true,
             }).toArray()
             result = func.toJson(result)
+            meta.result = result
 
-            await col.hooks?.afterOperation?.({
-                rest: this,
-                    io,
-                    action: action,
-                    meta: {
-                    action,
-                    collection: collection,
-                    pipeline: pipeline,
-                    result: result,
-                }
-            })
+            await col.hooks?.afterOperation?.({ rest: this, io, action, meta })
 
             return result as any[]
         } catch (err: any) {
@@ -320,18 +303,9 @@ class MongoRest {
             pipeline = await func.buildInput(pipeline, { rest: this })
             pipeline = func.toBson(pipeline, { col })
 
+            const meta: any = { action, collection, params, options }
             if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({
-                    rest: this,
-                    io,
-                    action: action,
-                    meta: {
-                        action: action,
-                        collection: collection,
-                        params: func.clone(params),
-                        options: func.clone(options),
-                    }
-                })
+                await col.hooks.beforeOperation({ rest: this, io, action, meta })
             }
 
             let result = await this.db.collection(collection).aggregate(pipeline, {
@@ -339,20 +313,10 @@ class MongoRest {
                 allowDiskUse: true
             }).toArray()
             result = func.toJson(result)
+            meta.result = result
 
             if (col.hooks?.afterOperation) {
-                await col.hooks.afterOperation({
-                    rest: this,
-                    io,
-                    action: action,
-                    meta: {
-                        action: action,
-                        collection: collection,
-                        params: func.clone(params),
-                        options: func.clone(options),
-                        result: func.clone(result),
-                    }
-                })
+                await col.hooks.afterOperation({ rest: this, io, action, meta })
             }
 
             return result as any[]
@@ -374,18 +338,9 @@ class MongoRest {
             pipeline = await func.buildInput(pipeline, { rest: this })
             pipeline = func.toBson(pipeline, { col })
 
+            const meta: any = { action, collection, params, id: _id }
             if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({
-                    rest: this,
-                    io,
-                    action: action,
-                    meta: {
-                        action: action,
-                        collection: collection,
-                        params: func.clone(params),
-                        id: _id,
-                    }
-                })
+                await col.hooks.beforeOperation({ rest: this, io, action, meta })
             }
 
             let result = (await this.db.collection(collection).aggregate(pipeline, {
@@ -393,20 +348,10 @@ class MongoRest {
                 allowDiskUse: true
             }).toArray()).at(0) ?? null
             result = func.toJson(result)
+            meta.result = result
 
             if (col.hooks?.afterOperation) {
-                await col.hooks.afterOperation({
-                    rest: this,
-                    io,
-                    action: action,
-                    meta: {
-                        action: action,
-                        collection: collection,
-                        result: func.clone(result),
-                        params: func.clone(params),
-                        id: _id,
-                    }
-                })
+                await col.hooks.afterOperation({ rest: this, io, action, meta })
             }
 
             return result
@@ -427,17 +372,9 @@ class MongoRest {
             })
             this._validate({ collection, action: action, data: data })
 
+            const meta: any = { action, collection, data }
             if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({
-                    rest: this,
-                    io,
-                    action,
-                    meta: {
-                        action,
-                        collection,
-                        data: func.clone(data),
-                    }
-                })
+                await col.hooks.beforeOperation({ rest: this, io, action, meta })
             }
 
             await this.db.collection(collection).insertOne(func.toBson(data, { col }) as any, {
@@ -445,18 +382,9 @@ class MongoRest {
             })
 
             const result: T & { _id: string } = func.toJson(data as T & { _id: string })
+            meta.result = result
             if (col?.hooks?.afterOperation) {
-                await col.hooks.afterOperation({
-                    rest: this,
-                    io,
-                    action: action,
-                    meta: {
-                        action: action,
-                        collection: collection,
-                        data: func.clone(data),
-                        result: func.clone(result),
-                    }
-                })
+                await col.hooks.afterOperation({ rest: this, io, action, meta })
             }
 
             return result
@@ -482,17 +410,9 @@ class MongoRest {
 
             this._validate({ collection, action: action, data: dataInput })
 
+            const meta: any = { action, collection, data: dataInput }
             if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({
-                    rest: this,
-                    io,
-                    action: action,
-                    meta: {
-                        action: action,
-                        collection: collection,
-                        data: func.clone(dataInput),
-                    }
-                })
+                await col.hooks.beforeOperation({ rest: this, io, action, meta })
             }
 
             await this.db.collection(collection).insertMany(func.toBson(dataInput, { col }) as any, {
@@ -500,18 +420,10 @@ class MongoRest {
             })
 
             const result: (T & { _id: string })[] = func.toJson(dataInput as (T & { _id: string })[])
+            meta.result = result
 
             if (col.hooks?.afterOperation) {
-                await col.hooks.afterOperation({
-                    rest: this,
-                    io,
-                    action: action,
-                    meta: {
-                        action: action,
-                        collection: collection,
-                        result: func.clone(result),
-                    }
-                })
+                await col.hooks.afterOperation({ rest: this, io, action, meta })
             }
 
             return result as (T & { _id: string })[]
@@ -533,18 +445,9 @@ class MongoRest {
             this._validate({ collection, action: action, update: update })
             update = func.toBson(update, { col })
 
+            const meta: any = { action, collection, update, id: _id }
             if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({
-                    rest: this,
-                    io,
-                    action: action,
-                    meta: {
-                        action: action,
-                        update: func.clone(update),
-                        collection: collection,
-                        id: _id,
-                    }
-                })
+                await col.hooks.beforeOperation({ rest: this, io, action, meta })
             }
 
             const data = await this.db.collection(collection).findOneAndUpdate(
@@ -554,20 +457,10 @@ class MongoRest {
             )
 
             const result = func.toJson(data)
+            meta.result = result
 
             if (col.hooks?.afterOperation) {
-                await col.hooks.afterOperation({
-                    rest: this,
-                    io,
-                    action: action,
-                    meta: {
-                        action: action,
-                        collection: collection,
-                        update: func.clone(update),
-                        id: _id,
-                        result: func.clone(result),
-                    }
-                })
+                await col.hooks.afterOperation({ rest: this, io, action, meta })
             }
 
             return result
@@ -616,23 +509,10 @@ class MongoRest {
             update = func.toBson(update, { col })
             filter = func.toBson(filter, { col })
 
+            const meta: any = { action, collection, filter, update }
             if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({
-                    rest: this,
-                    io,
-                    action: action,
-                    meta: {
-                        action: action,
-                        collection: collection,
-                        filter: func.clone(filter),
-                        update: func.clone(update),
-                    }
-                })
+                await col.hooks.beforeOperation({ rest: this, io, action, meta })
             }
-
-
-
-
 
             const data = await this.db.collection(collection).findOneAndUpdate(
                 filter,
@@ -644,20 +524,10 @@ class MongoRest {
             )
 
             const result = func.toJson(data)
+            meta.result = result
 
             if (col.hooks?.afterOperation) {
-                await col.hooks.afterOperation({
-                    rest: this,
-                    io,
-                    action: action,
-                    meta: {
-                        action: action,
-                        collection: collection,
-                        filter: func.clone(filter),
-                        update: func.clone(update),
-                        result: func.clone(result),
-                    }
-                })
+                await col.hooks.afterOperation({ rest: this, io, action, meta })
             }
 
             return result as Document | null
@@ -678,18 +548,9 @@ class MongoRest {
             this._validate({ collection, action: action, update: update })
             update = func.toBson(update, { col })
 
+            const meta: any = { action, collection, update, ids: _ids }
             if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({
-                    rest: this,
-                    io,
-                    action: action,
-                    meta: {
-                        action: action,
-                        collection: collection,
-                        update: func.clone(update),
-                        ids: _ids,
-                    }
-                })
+                await col.hooks.beforeOperation({ rest: this, io, action, meta })
             }
 
             const result = await this.db.collection(collection).updateMany(
@@ -697,20 +558,10 @@ class MongoRest {
                 { ...(update as any) },
                 { session: this.session }
             )
+            meta.result = result
 
             if (col.hooks?.afterOperation) {
-                await col.hooks.afterOperation({
-                    rest: this,
-                    io,
-                    action: action,
-                    meta: {
-                        action: action,
-                        collection: collection,
-                        update: func.clone(update),
-                        ids: _ids,
-                        result: func.clone(result),
-                    }
-                })
+                await col.hooks.afterOperation({ rest: this, io, action, meta })
             }
 
             return result as UpdateResult
@@ -724,13 +575,9 @@ class MongoRest {
         return this.#executeWithAudit(action, collection, { id: _id }, async () => {
             const col = getCollection(collection, this.#tenant.id) as Collection
 
+            const meta: any = { action, collection, id: _id }
             if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({
-                    rest: this,
-                    io,
-                    action: action,
-                    meta: { action: action, collection: collection, id: _id }
-                })
+                await col.hooks.beforeOperation({ rest: this, io, action, meta })
             }
 
             let result = await this.db.collection(collection).findOneAndDelete(
@@ -738,14 +585,10 @@ class MongoRest {
                 { session: this.session }
             )
             result = func.toJson(result)
+            meta.result = result
 
             if (col.hooks?.afterOperation) {
-                await col.hooks.afterOperation({
-                    rest: this,
-                    io,
-                    action: action,
-                    meta: { action: action, collection: collection, id: _id, result: func.clone(result) }
-                })
+                await col.hooks.afterOperation({ rest: this, io, action, meta })
             }
 
             return result
@@ -760,13 +603,9 @@ class MongoRest {
         return this.#executeWithAudit(action, collection, { ids: _ids }, async () => {
             const col = getCollection(collection, this.#tenant.id) as Collection
 
+            const meta: any = { action, collection, ids: _ids }
             if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({
-                    rest: this,
-                    io,
-                    action: action,
-                    meta: { action: action, collection: collection, ids: _ids }
-                })
+                await col.hooks.beforeOperation({ rest: this, io, action, meta })
             }
 
             let result: DeleteResult = await this.db.collection(collection).deleteMany(
@@ -774,14 +613,10 @@ class MongoRest {
                 { session: this.session }
             )
             result = func.toJson(result) as DeleteResult
+            meta.result = result
 
             if (col.hooks?.afterOperation) {
-                await col.hooks.afterOperation({
-                    rest: this,
-                    io,
-                    action: action,
-                    meta: { action: action, collection: collection, ids: _ids, result: func.clone(result) }
-                })
+                await col.hooks.afterOperation({ rest: this, io, action, meta })
             }
 
             return result

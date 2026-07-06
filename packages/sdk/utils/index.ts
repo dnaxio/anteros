@@ -5,12 +5,14 @@ const isEmptyObject = (v: unknown): boolean =>
 const shouldRemove = (v: unknown): boolean =>
     v === null ||
     v === undefined ||
+    v === '' ||
     isEmptyArray(v) ||
     isEmptyObject(v);
 
 /**
  * Nettoie récursivement un objet ou un tableau en supprimant :
  * - les valeurs `null` et `undefined`
+ * - les chaînes vides `''`
  * - les tableaux vides `[]`
  * - les objets vides `{}`
  *

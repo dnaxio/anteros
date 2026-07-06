@@ -7,6 +7,7 @@ import type { Service } from "./service";
 import type { Script } from "./scripts";
 import type { FileCollection } from "./file";
 export type ServerConfig = {
+    debug?: boolean;
     version?: string;
     clusterMode?: boolean;
     server: {

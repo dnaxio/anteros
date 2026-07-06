@@ -391,6 +391,7 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
             return c.json(response);
 
         } catch (err: any) {
+            if (cfg?.debug) console.error(err)
             return errorResponse(c, err);
         }
     });
@@ -443,6 +444,7 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
                 throw err;
             }
         } catch (err: any) {
+            if (cfg?.debug) console.error(err)
             return errorResponse(c, err);
         }
     });
@@ -483,6 +485,7 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
             const result = await handleUpload({ collection, tenant_id, file: fileField, data });
             return c.json(result);
         } catch (err: any) {
+            if (cfg?.debug) console.error(err)
             return errorResponse(c, err);
         }
     });
@@ -528,6 +531,7 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
             c.header('Cache-Control', 'public, max-age=31536000, immutable');
             return c.newResponse(result.stream);
         } catch (err: any) {
+            if (cfg?.debug) console.error(err)
             return errorResponse(c, err);
         }
     });
@@ -555,6 +559,7 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
             await handleDelete(tenant_id, collection, fileId);
             return c.json({ message: 'File deleted', ok: true });
         } catch (err: any) {
+            if (cfg?.debug) console.error(err)
             return errorResponse(c, err);
         }
     });

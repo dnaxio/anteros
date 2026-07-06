@@ -209,21 +209,13 @@ function cleanDeep<T extends DeepRecord | DeepRecord[]>(data: T): Partial<T> {
 }
 
 /**
- * Vérifie si une string est une date valide.
- * Accepte : ISO 8601 (YYYY-MM-DD, YYYY-MM-DDTHH:mm...) et timestamps UNIX (s ou ms).
- * Rejette les strings ambiguës que certains moteurs JS parsent en date (ex: "REF-2024").
+ * Vérifie si une string est une date ISO 8601 valide.
+ * Les timestamps numériques (ex: "1704067200") ne sont PAS convertis ici —
+ * ils passent par `isEpochNumber` quand la valeur est un `number`.
  */
 function isDate(value: string): boolean {
     if (!value || typeof value !== 'string') return false;
     const trimmed = value.trim();
-
-    // Timestamps numériques purs (10 ou 13 chiffres)
-    if (/^\d+$/.test(trimmed)) {
-        const len = trimmed.length;
-        if (len !== 10 && len !== 13) return false;
-        const ms = new Date(Number(trimmed)).getTime();
-        return !isNaN(ms);
-    }
 
     // ISO 8601 : YYYY-MM-DD avec heure optionnelle
     if (!/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})?)?$/.test(trimmed)) {
@@ -234,26 +226,31 @@ function isDate(value: string): boolean {
     return !isNaN(date.getTime());
 }
 
-/** Aligné sur `isDate` : `new Date("1438839831092")` est NaN, il faut passer par `Number`. */
+/** Convertit une string ISO 8601 en Date. */
 function stringToDate(value: string): Date {
-    const trimmed = value.trim();
-    if (/^\d+$/.test(trimmed)) {
-        const len = trimmed.length;
-        if (len === 10 || len === 13) {
-            return new Date(Number(trimmed));
-        }
-    }
-    return new Date(trimmed);
+    return new Date(value.trim());
 }
 
-/** Nombre entier type timestamp UNIX (s ou ms), ex. `1438839831092`. */
+/**
+ * Nombre entier type timestamp UNIX (s ou ms).
+ * Restreint à ≥ an 2000 pour éviter les faux positifs (ex: numéros de téléphone).
+ */
 function isEpochNumber(value: number): boolean {
     if (typeof value !== 'number' || !Number.isFinite(value)) return false;
     const int = Math.trunc(value);
     if (int !== value) return false;
     const s = String(Math.abs(int));
-    if (s.length !== 10 && s.length !== 13) return false;
-    return !isNaN(new Date(int).getTime());
+    if (s.length === 10) {
+        // Secondes UNIX : ≥ 2000-01-01
+        if (int < 946684800) return false;
+        return !isNaN(new Date(int * 1000).getTime());
+    }
+    if (s.length === 13) {
+        // Millisecondes UNIX : ≥ 2000-01-01
+        if (int < 946684800000) return false;
+        return !isNaN(new Date(int).getTime());
+    }
+    return false;
 }
 
 function deepCopy<T>(value: T): T {
@@ -339,7 +336,10 @@ function formatToDate(data: any, options?: FormatToDateOptions, path = ''): any 
                 }
             } else if (typeof value === 'number' && isEpochNumber(value)) {
                 if (shouldFormatDateAtPath(p, options)) {
-                    result[key] = new Date(value);
+                    // 10 chiffres = secondes (×1000), 13 chiffres = millisecondes (déjà en ms)
+                    const absVal = Math.abs(Math.trunc(value));
+                    const asMs = String(absVal).length === 10 ? value * 1000 : value;
+                    result[key] = new Date(asMs);
                 } else {
                     result[key] = value;
                 }
@@ -608,8 +608,6 @@ function collectDateFieldPathsFromCollection(col: Collection): string[] {
 
 function toBson<T>(data: any | any[], _options?: FormatInputOptions): T {
     let data_ = formatToObjectId(data);
-    // Toujours convertir toutes les strings date valide en Date,
-    // quel que soit le contexte (insert, update, match, pipeline).
     data_ = formatToDate(data_);
 
     if (Array.isArray(data)) {
