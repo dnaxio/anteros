@@ -13,18 +13,19 @@ export default function HomePage() {
               <span className="absolute inline-flex size-full animate-ping rounded-full bg-fd-primary opacity-75" />
               <span className="relative inline-flex size-2 rounded-full bg-fd-primary" />
             </span>
-            v1.0 — Now available
+            v0.0.11 — Now available
           </div>
           <h1 className="text-4xl font-extrabold tracking-tight sm:text-5xl md:text-6xl lg:text-7xl mb-6">
             Build backends
             <span className="block text-fd-primary">at light speed.</span>
           </h1>
           <p className="mx-auto max-w-2xl text-lg text-fd-muted-foreground mb-10 leading-relaxed">
-            A single cohesive stack —{" "}
+            A robust backend for building business logic —{" "}
             <Bun size={20} className="inline align-text-bottom mx-0.5" />{" "}
             <strong>Bun</strong> runtime,{" "}
             <MongodbIcon size={20} className="inline align-text-bottom mx-0.5" />{" "}
             <strong>MongoDB</strong> database, multi-tenant architecture,
+            real-time <strong>Socket.IO</strong>, built-in <strong>caching</strong>, symmetric & asymmetric <strong>crypto</strong>,
             workflow engine, file management, and audit trail. All in one.
           </p>
           <div className="flex flex-wrap items-center justify-center gap-4">
@@ -80,66 +81,6 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* Code demo + checklist */}
-      <section className="border-y">
-        <div className="mx-auto max-w-5xl px-6 py-20">
-          <div className="flex flex-col lg:flex-row items-start gap-10">
-            <div className="flex-1">
-              <h2 className="text-2xl font-bold tracking-tight mb-4">Works the way you think.</h2>
-              <p className="text-fd-muted-foreground mb-6 leading-relaxed">
-                Define your data model, API access, hooks, and custom actions in a single declarative file.
-                Anteros handles the REST API, validation, authentication, and audit trail automatically.
-              </p>
-              <div className="grid grid-cols-2 gap-4">
-                {[
-                  "Auto-generated REST API",
-                  "JWT Authentication",
-                  "Schema Validation",
-                  "File Uploads",
-                  "Workflow Engine",
-                  "Audit Trail",
-                ].map((item) => (
-                  <div key={item} className="flex items-center gap-2.5 text-sm">
-                    <span className="flex size-5 items-center justify-center rounded-full bg-fd-primary/20 text-fd-primary text-xs font-bold">✓</span>
-                    {item}
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="flex-1 w-full rounded-xl border bg-fd-background overflow-hidden">
-              <div className="flex items-center gap-2 px-4 py-3 border-b">
-                <span className="size-3 rounded-full bg-red-400" />
-                <span className="size-3 rounded-full bg-yellow-400" />
-                <span className="size-3 rounded-full bg-green-400" />
-                <span className="ml-2 text-xs text-fd-muted-foreground font-mono">collections/users.ts</span>
-              </div>
-              <pre className="p-5 text-sm font-mono text-fd-foreground leading-relaxed overflow-x-auto">
-{`import { define } from "anteros";
-
-export default define.Collection({
-  slug: "users",
-  fields: [
-    { name: "email", type: "email", required: true, unique: true },
-    { name: "name",  type: "string", required: true },
-    { name: "role",  type: "enum",
-      enumOptions: {
-        items: ["admin", "editor", "viewer"]
-      }
-    },
-  ],
-  api: {
-    access: { "*": "authenticated" }
-  },
-  hooks: {
-    beforeOperation: [sendWelcomeEmail]
-  },
-});`}
-              </pre>
-            </div>
-          </div>
-        </div>
-      </section>
-
       {/* Everything you need */}
       <section className="mx-auto max-w-5xl px-6 py-20">
         <div className="text-center mb-12">
@@ -156,6 +97,21 @@ export default define.Collection({
               desc: "JWT, access control, rate limiting, IP restriction.",
             },
             {
+              icon: <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>,
+              title: "Crypto",
+              desc: "AES-256-GCM symmetric & RSA-OAEP asymmetric encryption out of the box.",
+            },
+            {
+              icon: <><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="12" cy="12" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><path d="M9 6h6M9 18h6M6 9v6M18 9v6M9 9l6 6M15 9l-6 6"/></>,
+              title: "Socket.IO",
+              desc: "Real-time WebSocket communication with room support and built-in auth.",
+            },
+            {
+              icon: <><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></>,
+              title: "Caching",
+              desc: "In-memory, filesystem, and Redis caching with TTL, grace periods, and stampede protection.",
+            },
+            {
               icon: <><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></>,
               title: "File Upload",
               desc: "Disk/S3 storage, image transforms, multi-destination replication.",
@@ -169,6 +125,11 @@ export default define.Collection({
               icon: <><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></>,
               title: "Workflows",
               desc: "Saga pattern, compensation, progress tracking, resume on failure.",
+            },
+            {
+              icon: <><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></>,
+              title: "Business Logic",
+              desc: "Services, scripts, and custom actions to encapsulate your domain logic cleanly.",
             },
           ].map(({ icon, title, desc }) => (
             <div key={title} className="rounded-xl border bg-fd-card p-6 hover:bg-fd-accent/50 transition-colors duration-200">
