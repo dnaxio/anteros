@@ -1,42 +1,200 @@
 ---
 title: Anteros Framework
-description: A robust backend server built on Bun and MongoDB with multi-tenant support.
+description: The all-in-one backend framework — Bun, MongoDB, multi-tenant, workflows, and more.
 icon: BookOpen
 full: true
 ---
 
-## All in One Backend Framework
+import { Bun, MongodbIcon } from "@dev.icons/react/mono";
 
-A robust backend server built on **Bun** as the JavaScript runtime and **MongoDB** as the database. Includes multi-tenant architecture, unified REST API, JWT authentication, hooks, file uploads, workflow engine, and more.
+<div className="relative overflow-hidden rounded-2xl border bg-gradient-to-br from-fd-background via-fd-primary/5 to-fd-background p-12 md:p-20 mb-16">
+  <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,var(--color-fd-primary)_0%,transparent_50%)] opacity-[0.07]" />
+  <div className="relative mx-auto max-w-3xl text-center">
+    <div className="inline-flex items-center gap-2 rounded-full border border-fd-primary/30 bg-fd-primary/10 px-4 py-1.5 text-sm font-medium text-fd-primary mb-6">
+      <span className="relative flex size-2">
+        <span className="absolute inline-flex size-full animate-ping rounded-full bg-fd-primary opacity-75" />
+        <span className="relative inline-flex size-2 rounded-full bg-fd-primary" />
+      </span>
+      v1.0 — Now available
+    </div>
+    <h1 className="text-4xl font-extrabold tracking-tight sm:text-5xl md:text-6xl lg:text-7xl mb-6">
+      Build backends
+      <span className="block text-fd-primary">at light speed.</span>
+    </h1>
+    <p className="mx-auto max-w-2xl text-lg text-fd-muted-foreground mb-10 leading-relaxed">
+      A single cohesive stack — <Bun size={18} className="inline align-text-bottom mx-0.5" /> <strong>Bun</strong> runtime,{" "}
+      <MongodbIcon size={18} className="inline align-text-bottom mx-0.5" /> <strong>MongoDB</strong> database, multi-tenant architecture,
+      workflow engine, file management, and audit trail. All in one.
+    </p>
+    <div className="flex flex-wrap items-center justify-center gap-4">
+      <a
+        href="/docs/getting-started/quick-start"
+        className="inline-flex items-center gap-2 rounded-xl bg-fd-primary px-7 py-3.5 text-sm font-semibold text-fd-primary-foreground shadow-lg shadow-fd-primary/25 hover:bg-fd-primary/90 hover:shadow-fd-primary/40 transition-all duration-200"
+      >
+        Get Started
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="rtl:rotate-180">
+          <path d="M3.333 8h9.334M8 3.333 12.667 8 8 12.667" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </a>
+      <a
+        href="/docs/getting-started/introduction"
+        className="inline-flex items-center gap-2 rounded-xl border px-7 py-3.5 text-sm font-semibold hover:bg-fd-accent transition-colors duration-200"
+      >
+        Read the docs
+      </a>
+    </div>
+  </div>
+</div>
 
-<Cards>
-  <Card title="Quick Start" href="/docs/getting-started/quick-start">
-    Create a project and make your first API call in minutes.
-  </Card>
-  <Card title="Introduction" href="/docs/getting-started/introduction">
-    Learn what Anteros is and why you should use it.
-  </Card>
-  <Card title="Configuration" href="/docs/reference/configuration">
-    Set up your server, tenants, JWT, CORS, and more.
-  </Card>
-</Cards>
+<div className="grid gap-8 sm:grid-cols-2 lg:grid-cols-3 mb-16">
+  <div className="group rounded-xl border bg-fd-card p-8 hover:border-fd-primary/50 hover:shadow-lg transition-all duration-300">
+    <div className="mb-4 inline-flex rounded-lg bg-fd-primary/10 p-3">
+      <Bun size={24} />
+    </div>
+    <h3 className="font-semibold text-lg mb-2">Bun Runtime</h3>
+    <p className="text-sm text-fd-muted-foreground leading-relaxed">
+      Blazing fast APIs powered by Bun — one of the fastest JavaScript runtimes. Zero-config hot reload and native TypeScript support.
+    </p>
+  </div>
+  <div className="group rounded-xl border bg-fd-card p-8 hover:border-fd-primary/50 hover:shadow-lg transition-all duration-300">
+    <div className="mb-4 inline-flex rounded-lg bg-fd-primary/10 p-3">
+      <MongodbIcon size={24} />
+    </div>
+    <h3 className="font-semibold text-lg mb-2">MongoDB Native</h3>
+    <p className="text-sm text-fd-muted-foreground leading-relaxed">
+      Full database integration with automatic schema validation, indexing, aggregation pipelines, and change streams out of the box.
+    </p>
+  </div>
+  <div className="group rounded-xl border bg-fd-card p-8 hover:border-fd-primary/50 hover:shadow-lg transition-all duration-300">
+    <div className="mb-4 inline-flex rounded-lg bg-fd-primary/10 p-3">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" /><rect x="14" y="14" width="7" height="7" /><rect x="3" y="14" width="7" height="7" /></svg>
+    </div>
+    <h3 className="font-semibold text-lg mb-2">Multi-Tenant</h3>
+    <p className="text-sm text-fd-muted-foreground leading-relaxed">
+      Isolated databases, per-tenant code folders, scoped collections, routes, services, and middlewares. One server, infinite tenants.
+    </p>
+  </div>
+</div>
 
-## Why Anteros?
+<div className="mb-16 rounded-2xl border bg-fd-card/50 p-8 md:p-12">
+  <div className="flex flex-col lg:flex-row items-start gap-10">
+    <div className="flex-1">
+      <h2 className="text-2xl font-bold tracking-tight mb-4">Works the way you think.</h2>
+      <p className="text-fd-muted-foreground mb-6 leading-relaxed">
+        Define your data model, API access, hooks, and custom actions in a single declarative file.
+        Anteros handles the REST API, validation, authentication, and audit trail automatically.
+      </p>
+      <div className="grid grid-cols-2 gap-4">
+        <div className="flex items-center gap-2.5 text-sm">
+          <span className="flex size-5 items-center justify-center rounded-full bg-fd-primary/20 text-fd-primary text-xs font-bold">✓</span>
+          Auto-generated REST API
+        </div>
+        <div className="flex items-center gap-2.5 text-sm">
+          <span className="flex size-5 items-center justify-center rounded-full bg-fd-primary/20 text-fd-primary text-xs font-bold">✓</span>
+          JWT Authentication
+        </div>
+        <div className="flex items-center gap-2.5 text-sm">
+          <span className="flex size-5 items-center justify-center rounded-full bg-fd-primary/20 text-fd-primary text-xs font-bold">✓</span>
+          Schema Validation
+        </div>
+        <div className="flex items-center gap-2.5 text-sm">
+          <span className="flex size-5 items-center justify-center rounded-full bg-fd-primary/20 text-fd-primary text-xs font-bold">✓</span>
+          File Uploads
+        </div>
+        <div className="flex items-center gap-2.5 text-sm">
+          <span className="flex size-5 items-center justify-center rounded-full bg-fd-primary/20 text-fd-primary text-xs font-bold">✓</span>
+          Workflow Engine
+        </div>
+        <div className="flex items-center gap-2.5 text-sm">
+          <span className="flex size-5 items-center justify-center rounded-full bg-fd-primary/20 text-fd-primary text-xs font-bold">✓</span>
+          Audit Trail
+        </div>
+      </div>
+    </div>
+    <div className="flex-1 w-full rounded-xl border bg-fd-background p-6 overflow-hidden">
+      <div className="flex items-center gap-2 mb-4">
+        <span className="size-3 rounded-full bg-red-400" />
+        <span className="size-3 rounded-full bg-yellow-400" />
+        <span className="size-3 rounded-full bg-green-400" />
+        <span className="ml-2 text-xs text-fd-muted-foreground font-mono">collections/users.ts</span>
+      </div>
+      <pre className="text-sm font-mono text-fd-foreground leading-relaxed overflow-x-auto">
+{`import { define } from "anteros";
 
-- **Blazing Fast** — Powered by Bun, one of the fastest JavaScript runtimes available.
-- **MongoDB** — Full database integration with automatic schema validation, indexing, and aggregation pipeline support.
-- **Multi-Tenant** — Isolate data between tenants with isolated database connections and per-tenant code folders.
-- **File Upload** — Built-in file upload system with disk/S3 storage, image transformations via Bun.Image, and multi-destination replication.
-- **Workflows** — Sequential step execution with progress tracking, compensation (Saga pattern), versioning, and resume on failure.
-- **Security** — JWT authentication, configurable access control, rate limiting, IP restriction, and tenant middlewares.
-- **Hooks** — Execute logic before and after database operations with lifecycle hooks.
-- **Unified REST API** — Single endpoint pattern for all CRUD, custom actions, services, uploads, and file serving.
-- **Audit Trail** — Automatic activity logging for every database operation with trace correlation and collection-type tracking.
+export default define.Collection({
+  slug: "users",
+  fields: [
+    { name: "email", type: "email", required: true, unique: true },
+    { name: "name",  type: "string", required: true },
+    { name: "role",  type: "enum", enumOptions: { items: ["admin", "editor", "viewer"] } },
+  ],
+  api: { access: { "*": "authenticated" } },
+  hooks: { beforeOperation: [sendWelcomeEmail] },
+});`}
+      </pre>
+    </div>
+  </div>
+</div>
 
-## Backend Framework
+<div className="mb-16">
+  <div className="text-center mb-10">
+    <h2 className="text-2xl font-bold tracking-tight mb-3">Everything you need.</h2>
+    <p className="text-fd-muted-foreground max-w-xl mx-auto">
+      Batteries included. No stitching together disparate tools.
+    </p>
+  </div>
+  <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+    <div className="rounded-xl border bg-fd-card p-6 hover:bg-fd-accent/50 transition-colors duration-200">
+      <div className="mb-3 text-fd-primary">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      </div>
+      <h3 className="font-semibold text-sm mb-1">Security</h3>
+      <p className="text-xs text-fd-muted-foreground">JWT, access control, rate limiting, IP restriction.</p>
+    </div>
+    <div className="rounded-xl border bg-fd-card p-6 hover:bg-fd-accent/50 transition-colors duration-200">
+      <div className="mb-3 text-fd-primary">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><path d="M10 13H8"/><path d="M16 13H8"/><path d="M10 17H8"/><path d="M13 17H8"/></svg>
+      </div>
+      <h3 className="font-semibold text-sm mb-1">File Upload</h3>
+      <p className="text-xs text-fd-muted-foreground">Disk/S3 storage, image transforms, multi-destination replication.</p>
+    </div>
+    <div className="rounded-xl border bg-fd-card p-6 hover:bg-fd-accent/50 transition-colors duration-200">
+      <div className="mb-3 text-fd-primary">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+      </div>
+      <h3 className="font-semibold text-sm mb-1">Hooks & Actions</h3>
+      <p className="text-xs text-fd-muted-foreground">Lifecycle hooks, custom actions, services, before/after operation.</p>
+    </div>
+    <div className="rounded-xl border bg-fd-card p-6 hover:bg-fd-accent/50 transition-colors duration-200">
+      <div className="mb-3 text-fd-primary">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
+      </div>
+      <h3 className="font-semibold text-sm mb-1">Workflows</h3>
+      <p className="text-xs text-fd-muted-foreground">Saga pattern, compensation, progress tracking, resume on failure.</p>
+    </div>
+  </div>
+</div>
 
-Built for teams that want one cohesive stack — runtime, HTTP API, data layer, file management, workflow orchestration, and tenant isolation — without stitching together disparate tooling.
-
-<Cards>
-  <Card title="Explore the docs" href="/docs/reference/configuration" />
-</Cards>
+<div className="rounded-2xl border bg-gradient-to-br from-fd-primary/10 via-fd-background to-fd-primary/5 p-10 md:p-16 text-center">
+  <h2 className="text-2xl font-bold tracking-tight mb-3">Ready to build?</h2>
+  <p className="text-fd-muted-foreground mb-8 max-w-lg mx-auto">
+    Create your first Anteros project in seconds.
+  </p>
+  <div className="flex flex-wrap items-center justify-center gap-4">
+    <a
+      href="/docs/getting-started/quick-start"
+      className="inline-flex items-center gap-2 rounded-xl bg-fd-primary px-6 py-3 text-sm font-semibold text-fd-primary-foreground shadow-lg shadow-fd-primary/25 hover:shadow-fd-primary/40 transition-all duration-200"
+    >
+      Quick Start
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <path d="M3.333 8h9.334M8 3.333 12.667 8 8 12.667" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </a>
+    <a
+      href="/docs/reference/configuration"
+      className="inline-flex items-center gap-2 rounded-xl border px-6 py-3 text-sm font-semibold hover:bg-fd-accent transition-colors duration-200"
+    >
+      Explore the docs
+    </a>
+  </div>
+</div>

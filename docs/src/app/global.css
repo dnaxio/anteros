@@ -1,6 +1,18 @@
 @import 'tailwindcss';
-@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/solar.css';
 @import 'fumadocs-ui/css/preset.css';
+
+@theme {
+  --color-fd-primary: #FFF382;
+  --color-fd-primary-foreground: #1a1a2e;
+  --color-fd-ring: #e6da4e;
+}
+
+.dark {
+  --color-fd-primary: #FFF382;
+  --color-fd-primary-foreground: #1a1a2e;
+  --color-fd-ring: #e6da4e;
+}
 
 html {
   scrollbar-gutter: stable;
