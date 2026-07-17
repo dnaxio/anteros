@@ -12,7 +12,7 @@ bun.lock
 demo/*
 .agents/*
 AGENTS.md
-
+opencode.json
 
 # code coverage
 coverage

@@ -36,6 +36,14 @@ class Rest {
         this.#headers[name] = value;
     }
 
+    setServer(url: string) {
+        this.#server = url.replace(/\/+$/, "");
+    }
+
+    setTenant(tenant: string) {
+        this.#tenant = tenant;
+    }
+
     private setToken(token: string | undefined) {
         if (!token) {
             this.#token = undefined;
