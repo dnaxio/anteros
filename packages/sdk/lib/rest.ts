@@ -97,6 +97,26 @@ class Rest {
         return withQuery(base, query as Record<string, string | number | boolean | null | undefined>);
     }
 
+    private async handleResponse<T>(res: Response): Promise<T> {
+        const contentType = res.headers.get("Content-Type") || "";
+        const isJson = contentType.includes("application/json");
+        const payload = isJson ? await res.json() : await res.text();
+
+        if (!res.ok) {
+            const error: any = new Error(
+                (isJson && (payload as any)?.message) || res.statusText || "Request failed",
+            );
+            if (isJson && typeof payload === "object" && payload) {
+                error.code = (payload as any).code;
+                error.meta = (payload as any).meta;
+            }
+            error.status = res.status;
+            throw error;
+        }
+
+        return payload as T;
+    }
+
     private async postJson<TResponse = unknown>(
         url: string,
         body?: unknown,
@@ -116,23 +136,7 @@ class Rest {
             signal: options.signal,
         });
 
-        const contentType = res.headers.get("Content-Type") || "";
-        const isJson = contentType.includes("application/json");
-        const payload = isJson ? await res.json() : await res.text();
-
-        if (!res.ok) {
-            const error: any = new Error(
-                (isJson && (payload as any)?.message) || res.statusText || "Request failed",
-            );
-            if (isJson && typeof payload === "object" && payload) {
-                error.code = (payload as any).code;
-                error.meta = (payload as any).meta;
-            }
-            error.status = res.status;
-            throw error;
-        }
-
-        return payload as TResponse;
+        return this.handleResponse<TResponse>(res);
     }
 
     private async request<TResponse = any>(
@@ -202,8 +206,8 @@ class Rest {
         data: TBody,
         options?: RestRequestOptions,
     ): Promise<T & { _id: string }> {
-        const merged = { ...(this.#defaultParams?.insertOne ?? {}), ...(options ?? {}) };
-        return this.request<T & { _id: string }>(collection, "insertOne", { data, ...merged }, options);
+        const extra = this.#defaultParams?.insertOne ?? {};
+        return this.request<T & { _id: string }>(collection, "insertOne", { data, ...extra }, options);
     }
 
     async insertMany<T = any, TBody = any>(
@@ -211,8 +215,8 @@ class Rest {
         data: TBody[],
         options?: RestRequestOptions,
     ): Promise<(T & { _id: string })[]> {
-        const merged = { ...(this.#defaultParams?.insertMany ?? {}), ...(options ?? {}) };
-        return this.request<(T & { _id: string })[]>(collection, "insertMany", { data, ...merged }, options);
+        const extra = this.#defaultParams?.insertMany ?? {};
+        return this.request<(T & { _id: string })[]>(collection, "insertMany", { data, ...extra }, options);
     }
 
     async updateOne<T = any, TUpdate = any>(
@@ -221,8 +225,8 @@ class Rest {
         update: TUpdate,
         options?: RestRequestOptions,
     ): Promise<T> {
-        const merged = { ...(this.#defaultParams?.updateOne ?? {}), ...(options ?? {}) };
-        return this.request<T>(collection, "updateOne", { id, update, ...merged }, options);
+        const extra = this.#defaultParams?.updateOne ?? {};
+        return this.request<T>(collection, "updateOne", { id, update, ...extra }, options);
     }
 
     async updateMany<TUpdate = any>(
@@ -231,8 +235,8 @@ class Rest {
         update: TUpdate,
         options?: RestRequestOptions,
     ): Promise<any> {
-        const merged = { ...(this.#defaultParams?.updateMany ?? {}), ...(options ?? {}) };
-        return this.request(collection, "updateMany", { ids, update, ...merged }, options);
+        const extra = this.#defaultParams?.updateMany ?? {};
+        return this.request(collection, "updateMany", { ids, update, ...extra }, options);
     }
 
     async deleteOne(
@@ -240,8 +244,8 @@ class Rest {
         id: string,
         options?: RestRequestOptions,
     ): Promise<any> {
-        const merged = { ...(this.#defaultParams?.deleteOne ?? {}), ...(options ?? {}) };
-        return this.request(collection, "deleteOne", { id, ...merged }, options);
+        const extra = this.#defaultParams?.deleteOne ?? {};
+        return this.request(collection, "deleteOne", { id, ...extra }, options);
     }
 
     async deleteMany(
@@ -249,8 +253,8 @@ class Rest {
         ids: string[],
         options?: RestRequestOptions,
     ): Promise<any> {
-        const merged = { ...(this.#defaultParams?.deleteMany ?? {}), ...(options ?? {}) };
-        return this.request(collection, "deleteMany", { ids, ...merged }, options);
+        const extra = this.#defaultParams?.deleteMany ?? {};
+        return this.request(collection, "deleteMany", { ids, ...extra }, options);
     }
 
     async aggregate<T = any>(
@@ -258,8 +262,8 @@ class Rest {
         pipeline: unknown[],
         options?: RestRequestOptions,
     ): Promise<T[]> {
-        const merged = { ...(this.#defaultParams?.aggregate ?? {}), ...(options ?? {}) };
-        return this.request<T[]>(collection, "aggregate", { pipeline, ...merged }, options);
+        const extra = this.#defaultParams?.aggregate ?? {};
+        return this.request<T[]>(collection, "aggregate", { pipeline, ...extra }, options);
     }
 
     async runAction<T = any>(
@@ -325,21 +329,10 @@ class Rest {
                 signal: opts?.signal,
             });
 
-            const payload = await res.json();
-
-            if (!res.ok) {
-                const error: any = new Error(
-                    (payload as any)?.message || res.statusText || "Upload failed",
-                );
-                error.code = (payload as any)?.code;
-                error.status = res.status;
-                throw error;
-            }
-
-            return payload as T;
+            return this.handleResponse<T>(res);
         }
 
-        // Upload multiple — chaque fichier dans un champ séparé du même FormData
+        // Upload multiple
         const url = this.buildUploadUrl(collection);
         const formData = new FormData();
         for (let i = 0; i < files.length; i++) {
@@ -354,18 +347,7 @@ class Rest {
             signal: opts?.signal,
         });
 
-        const payload = await res.json();
-
-        if (!res.ok) {
-            const error: any = new Error(
-                (payload as any)?.message || res.statusText || "Upload failed",
-            );
-            error.code = (payload as any)?.code;
-            error.status = res.status;
-            throw error;
-        }
-
-        return payload as T[];
+        return this.handleResponse<T[]>(res);
     }
 
     /**
@@ -399,25 +381,12 @@ class Rest {
         signal?: AbortSignal,
     ): Promise<TResponse> {
         const url = joinURL(this.#server, "files", this.#tenant, collection, fileId);
-
         const res = await fetch(url, {
             method: "DELETE",
             headers: { ...this.#headers },
             signal,
         });
-
-        const payload = await res.json();
-
-        if (!res.ok) {
-            const error: any = new Error(
-                (payload as any)?.message || res.statusText || "Delete failed",
-            );
-            error.code = (payload as any)?.code;
-            error.status = res.status;
-            throw error;
-        }
-
-        return payload as TResponse;
+        return this.handleResponse<TResponse>(res);
     }
 
     /**
@@ -430,19 +399,7 @@ class Rest {
             method: 'GET',
             headers: { ...this.#headers },
         });
-
-        const payload = await res.json();
-
-        if (!res.ok) {
-            const error: any = new Error(
-                (payload as any)?.message || res.statusText || 'Failed to fetch config',
-            );
-            error.code = (payload as any)?.code;
-            error.status = res.status;
-            throw error;
-        }
-
-        return payload as PublicConfig;
+        return this.handleResponse<PublicConfig>(res);
     }
 }
 

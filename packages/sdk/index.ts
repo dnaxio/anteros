@@ -4,6 +4,8 @@ export { Rest };
 export type {
     ApiAction,
     FileResult,
+    FindOptions,
+    LookupOptions,
     PublicConfig,
     RestClientOptions,
     RestQueryOptions,

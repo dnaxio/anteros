@@ -1,6 +1,7 @@
 {
   "name": "@anteros/sdk",
-  "version": "0.0.5",
+  "version": "0.0.6",
+  "main": "index.ts",
   "module": "index.ts",
   "description": "Anteros SDK",
   "type": "module",
@@ -12,7 +13,6 @@
     "typescript": "^6.0.3"
   },
   "dependencies": {
-    "qs": "^6.15.0",
     "ufo": "^1.6.3"
   }
 }
