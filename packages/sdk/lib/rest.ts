@@ -11,6 +11,7 @@ class Rest {
     #token?: string;
     #persistToken: boolean;
     #tokenStorageKey: string;
+    #defaultParams: RestClientOptions["defaultParams"];
 
     constructor(options: RestClientOptions) {
         this.#server = options.server.replace(/\/+$/, "");
@@ -18,6 +19,7 @@ class Rest {
         this.#headers = options.headers ?? {};
         this.#persistToken = options.token?.persist ?? true;
         this.#tokenStorageKey = options.token?.storageKey ?? "dnax_token";
+        this.#defaultParams = options.defaultParams ?? {};
 
         // Récupération éventuelle d'un token déjà stocké côté client
         if (this.#persistToken && typeof globalThis !== "undefined" && "localStorage" in globalThis) {
@@ -181,7 +183,8 @@ class Rest {
         params: FindOptions,
         options?: RestRequestOptions,
     ): Promise<T[]> {
-        return this.request<T[]>(collection, "find", { params }, options);
+        const merged = { ...(this.#defaultParams?.find ?? {}), ...params };
+        return this.request<T[]>(collection, "find", { params: merged }, options);
     }
 
     async findOne<T = any>(
@@ -190,7 +193,8 @@ class Rest {
         params: Record<string, unknown> = {},
         options?: RestRequestOptions,
     ): Promise<T | null> {
-        return this.request<T | null>(collection, "findOne", { id, params }, options);
+        const merged = { ...(this.#defaultParams?.findOne ?? {}), ...params };
+        return this.request<T | null>(collection, "findOne", { id, params: merged }, options);
     }
 
     async insertOne<T = any, TBody = any>(
@@ -198,7 +202,8 @@ class Rest {
         data: TBody,
         options?: RestRequestOptions,
     ): Promise<T & { _id: string }> {
-        return this.request<T & { _id: string }>(collection, "insertOne", { data }, options);
+        const merged = { ...(this.#defaultParams?.insertOne ?? {}), ...(options ?? {}) };
+        return this.request<T & { _id: string }>(collection, "insertOne", { data, ...merged }, options);
     }
 
     async insertMany<T = any, TBody = any>(
@@ -206,7 +211,8 @@ class Rest {
         data: TBody[],
         options?: RestRequestOptions,
     ): Promise<(T & { _id: string })[]> {
-        return this.request<(T & { _id: string })[]>(collection, "insertMany", { data }, options);
+        const merged = { ...(this.#defaultParams?.insertMany ?? {}), ...(options ?? {}) };
+        return this.request<(T & { _id: string })[]>(collection, "insertMany", { data, ...merged }, options);
     }
 
     async updateOne<T = any, TUpdate = any>(
@@ -215,7 +221,8 @@ class Rest {
         update: TUpdate,
         options?: RestRequestOptions,
     ): Promise<T> {
-        return this.request<T>(collection, "updateOne", { id, update }, options);
+        const merged = { ...(this.#defaultParams?.updateOne ?? {}), ...(options ?? {}) };
+        return this.request<T>(collection, "updateOne", { id, update, ...merged }, options);
     }
 
     async updateMany<TUpdate = any>(
@@ -224,7 +231,8 @@ class Rest {
         update: TUpdate,
         options?: RestRequestOptions,
     ): Promise<any> {
-        return this.request(collection, "updateMany", { ids, update }, options);
+        const merged = { ...(this.#defaultParams?.updateMany ?? {}), ...(options ?? {}) };
+        return this.request(collection, "updateMany", { ids, update, ...merged }, options);
     }
 
     async deleteOne(
@@ -232,7 +240,8 @@ class Rest {
         id: string,
         options?: RestRequestOptions,
     ): Promise<any> {
-        return this.request(collection, "deleteOne", { id }, options);
+        const merged = { ...(this.#defaultParams?.deleteOne ?? {}), ...(options ?? {}) };
+        return this.request(collection, "deleteOne", { id, ...merged }, options);
     }
 
     async deleteMany(
@@ -240,7 +249,8 @@ class Rest {
         ids: string[],
         options?: RestRequestOptions,
     ): Promise<any> {
-        return this.request(collection, "deleteMany", { ids }, options);
+        const merged = { ...(this.#defaultParams?.deleteMany ?? {}), ...(options ?? {}) };
+        return this.request(collection, "deleteMany", { ids, ...merged }, options);
     }
 
     async aggregate<T = any>(
@@ -248,7 +258,8 @@ class Rest {
         pipeline: unknown[],
         options?: RestRequestOptions,
     ): Promise<T[]> {
-        return this.request<T[]>(collection, "aggregate", { pipeline }, options);
+        const merged = { ...(this.#defaultParams?.aggregate ?? {}), ...(options ?? {}) };
+        return this.request<T[]>(collection, "aggregate", { pipeline, ...merged }, options);
     }
 
     async runAction<T = any>(
@@ -431,7 +442,7 @@ class Rest {
             throw error;
         }
 
-        return payload as T;
+        return payload as PublicConfig;
     }
 }
 

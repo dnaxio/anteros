@@ -1,6 +1,6 @@
 {
   "name": "@anteros/sdk",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "module": "index.ts",
   "description": "Anteros SDK",
   "type": "module",

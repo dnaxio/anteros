@@ -18,7 +18,7 @@ async function syncTenants() {
             tenant.database.db = db
         }
     } catch (err: any) {
-        console.error('Error bootstrapping tenants', err?.message)
+        console.error('Error bootstrapping tenants', cfg.debug ? err : err?.message)
         process.exit(1)
     }
 }

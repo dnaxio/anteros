@@ -45,7 +45,7 @@ async function syncCollections() {
         cfg.collections = collections
 
     } catch (err: any) {
-        console.error(err?.message)
+        console.error(cfg.debug ? err : err?.message)
     }
 }
 

@@ -91,7 +91,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
 
         return server;
     } catch (err: any) {
-        console.error('Failed to boot server', err?.message);
+        console.error('Failed to boot server', cfg.debug ? err : err?.message);
         process.exit(1);
     }
 }

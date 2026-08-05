@@ -11,7 +11,7 @@ type routeContext = {
 type Route = {
     enabled?: boolean;
     path: string;
-    method: 'GET' | 'POST';
+    method: 'GET' | 'POST'|'PUT';
     handler: (ctx: routeContext) => void;
     _tenant_?: string;
     _isRoute_?: boolean;

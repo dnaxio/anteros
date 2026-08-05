@@ -39,7 +39,18 @@ export type RestClientOptions = {
         persist?: boolean;
         storageKey?: string;
     };
-
+    /** Default params merged into CRUD calls. Provided params take priority. */
+    defaultParams?: {
+        find?: FindOptions;
+        findOne?: Record<string, unknown>;
+        insertOne?: Record<string, unknown>;
+        insertMany?: Record<string, unknown>;
+        updateOne?: Record<string, unknown>;
+        updateMany?: Record<string, unknown>;
+        deleteOne?: Record<string, unknown>;
+        deleteMany?: Record<string, unknown>;
+        aggregate?: Record<string, unknown>;
+    };
 };
 
 

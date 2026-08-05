@@ -1,0 +1,23 @@
+{
+  "name": "@anteros/plot",
+  "version": "0.0.1",
+  "type": "module",
+  "private": false,
+  "exports": {
+    ".": "./index.ts",
+    "./echarts": "./echarts/index.ts",
+    "./observable": "./observable/index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@fontsource/mona-sans": "^5.2.6",
+    "@observablehq/plot": "^0.6.17",
+    "@types/echarts": "^5.0.0",
+    "echarts": "^6.1.0"
+  }
+}
