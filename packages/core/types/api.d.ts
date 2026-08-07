@@ -32,6 +32,17 @@ export type ActionsApiList =
     | "login"
     | "logout"
     | "aggregate"
+    | "watch"
+    | "countDocuments"
+    | "bulkWrite"
+    | "bulkUpdate"
+    | "replaceOne"
+    | "findOneAndUpdate"
+    | "dropCollection"
+    | "dropIndex"
+    | "dropIndexes"
+    | "stats"
+    | "workflows"
     | "*"
 
 

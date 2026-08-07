@@ -114,11 +114,15 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
 
 
 
+            const requestCtx: Record<string, string> = c.req.header();
+            // Faille 1: never log sensitive headers (JWT, cookies)
+            delete requestCtx.authorization;
+            delete requestCtx.cookie;
             requestCtxStorage.set('meta', {
                 request: {
                     ip: connInfo.remote.address ?? c.req.header('CF-Connecting-IP') ?? c.req.header('True-Client-IP') ?? c.req.header('X-Forwarded-For') ?? 'unknown',
                     user_agent: c.req.header('User-Agent') ?? '',
-                    headers: c.req.header(),
+                    headers: requestCtx,
                     method: c.req.method,
                     path: c.req.path,
                     query: c.req.query(),
@@ -129,15 +133,14 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
             })
             const bearer = c.req.header('Authorization')?.replace('Bearer ', '');
             if (bearer) {
-                const { value, error } = await jwt.verify(bearer);
+                const { value, error, expired } = await jwt.verify(bearer);
                 const isValid = !error && value != null;
-                const isExpired = !!error && error.toLowerCase().includes('exp');
 
                 const tokenData = {
-                    value: bearer,
+                    value: isValid ? bearer : null,
                     decoded: isValid ? (value as Record<string, unknown>) : null,
                     provided: true,
-                    expired: isExpired || (value != null && typeof (value as any)?.exp === 'number' && (value as any).exp * 1000 < Date.now()),
+                    expired: expired || (value != null && typeof (value as any)?.exp === 'number' && (value as any).exp * 1000 < Date.now()),
                 };
 
                 requestCtxStorage.set('token', tokenData);

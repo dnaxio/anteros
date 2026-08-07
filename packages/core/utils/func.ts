@@ -36,7 +36,7 @@ const jwt = {
         const token = await signer.sign(secret);
         return token;
     },
-    verify: async (token: string): Promise<{ value: Record<string, unknown> | null, error: string | null }> => {
+    verify: async (token: string): Promise<{ value: Record<string, unknown> | null, error: string | null, expired: boolean }> => {
         try {
             if (!token) throw new Error('Token is required');
             let SECRET_ = cfg.server.jwt?.secret || Bun.env.JWT_SECRET
@@ -45,12 +45,17 @@ const jwt = {
             const { payload, protectedHeader } = await Jose.jwtVerify(token, secret);
             return {
                 value: payload,
-                error: null
+                error: null,
+                expired: false,
             }
-        } catch (error) {
+        } catch (error: any) {
+            // Reliable expiry detection via jose error code (not string matching)
+            const isExpired = error?.code === 'ERR_JWT_EXPIRED'
+                || /expired|expiration/i.test(error?.message ?? '');
             return {
                 value: null,
-                error: error instanceof Error ? error.message : 'Invalid token'
+                error: error instanceof Error ? error.message : 'Invalid token',
+                expired: isExpired,
             }
         }
     }
@@ -150,6 +155,48 @@ function pick<T extends DeepRecord>(data: T | T[], keys: string[]): Partial<T> |
         }
     }
     return result as Partial<T>;
+}
+
+/**
+ * Convertit la dot-notation MongoDB en structure imbriquée pour la validation Joi.
+ * Ex: { "address.zip": "BP28", "items.0.name": "x" } → { address: { zip }, items: [{ name }] }
+ * Les clés opérateurs ($inc, $push…) sont laissées telles quelles.
+ */
+function unflattenKeys(input: Record<string, unknown>): Record<string, unknown> {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(input)) {
+        // Opérateurs Mongo → laisser tel quel (interdits dans $set de toute façon)
+        if (key.startsWith('$')) {
+            result[key] = value;
+            continue;
+        }
+        const parts = key.split('.');
+        let target: any = result;
+        for (let i = 0; i < parts.length - 1; i++) {
+            const part = parts[i]!;
+            const nextPart = parts[i + 1]!;
+            const isArrayIndex = /^\d+$/.test(nextPart);
+            if (typeof target[part] !== 'object' || target[part] === null) {
+                target[part] = isArrayIndex ? [] : {};
+            }
+            target = target[part];
+        }
+        const last = parts[parts.length - 1]!;
+        // Fusion si les deux côtés sont des objets (ex. "a.b" + a: { c })
+        if (
+            target[last] &&
+            typeof target[last] === 'object' &&
+            !Array.isArray(target[last]) &&
+            typeof value === 'object' &&
+            value !== null &&
+            !Array.isArray(value)
+        ) {
+            target[last] = { ...(target[last] as object), ...(value as object) };
+        } else {
+            target[last] = value;
+        }
+    }
+    return result;
 }
 
 function toJson<T>(data: any): T {
@@ -372,7 +419,10 @@ function formatToObjectId<T>(value: T): FormatToObjectIdResult<T> {
         return value as FormatToObjectIdResult<T>;
     }
 
-
+    // Pass through primitives and Date instances untouched
+    if (value instanceof Date) {
+        return value as FormatToObjectIdResult<T>;
+    }
 
     if (typeof value === 'string') {
 
@@ -530,7 +580,7 @@ async function buildInput<T>(data: any | any[], options?: FormatInputOptions): P
 
         /* Set Default Value For Insert */
         if (options?.action?.match(/(insert)/)) {
-            if (Object.hasOwn(f, 'defaultValue') && !dataValue) {
+            if (Object.hasOwn(f, 'defaultValue') && (dataValue === undefined || dataValue === null)) {
                 data[fieldName] = f.defaultValue
             }
         }
@@ -608,7 +658,15 @@ function collectDateFieldPathsFromCollection(col: Collection): string[] {
 
 function toBson<T>(data: any | any[], _options?: FormatInputOptions): T {
     let data_ = formatToObjectId(data);
-    data_ = formatToDate(data_);
+
+    // Build omitKeys for fields that should NOT be date-converted (random, number, integer)
+    const omitKeys: string[] = [];
+    for (const f of _options?.col?.fields ?? []) {
+        if (f.type === 'random' || f.type === 'number' || f.type === 'integer') {
+            omitKeys.push(f.name);
+        }
+    }
+    data_ = formatToDate(data_, { omitKeys: omitKeys.length > 0 ? omitKeys : undefined });
 
     if (Array.isArray(data)) {
         data.length = 0;
@@ -634,12 +692,34 @@ function buildPipeline(p: FindOptions, options?: {
                 status: 400
             });
         }
+        // Faille 13: bound $regex (ReDoS) and $in/$nin (memory DoS)
+        boundMatchOperators(p.$match);
         pipeline.push({
             $match: p.$match
         })
     }
 
-    // $sort
+    // $sort — Faille 14: values must be 1 or -1
+    if (p?.$sort) {
+        for (const [key, dir] of Object.entries(p.$sort)) {
+            if (dir !== 1 && dir !== -1) {
+                throw new AppError(`Invalid $sort direction for '${key}' (expected 1 or -1)`, {
+                    code: 'INVALID_SORT_DIRECTION',
+                    status: 400
+                });
+            }
+        }
+    }
+
+    // $skip — Faille 14: must be a safe non-negative integer
+    if (p?.$skip !== undefined && p?.$skip !== null) {
+        if (!Number.isSafeInteger(p.$skip) || p.$skip < 0) {
+            throw new AppError('Invalid $skip (expected a non-negative integer)', {
+                code: 'INVALID_SKIP',
+                status: 400
+            });
+        }
+    }
     if (!p?.$sort?.createdAt) {
         pipeline.push({
             $sort: {
@@ -653,20 +733,25 @@ function buildPipeline(p: FindOptions, options?: {
         })
     }
 
-    // $skip
+    // $skip (validated above)
     if (p?.$skip) {
         pipeline.push({
             $skip: p.$skip
         })
     }
 
-    // $limit
+    // $limit — Faille 14: must be a safe integer in (0, MAX_LIMIT]; 0 would mean "no limit"
+    const MAX_LIMIT = 1000;
     p.$limit = p?.$limit ?? 100
-    if (p?.$limit > 0) {
-        pipeline.push({
-            $limit: p.$limit
-        })
+    if (!Number.isSafeInteger(p.$limit) || p.$limit <= 0 || p.$limit > MAX_LIMIT) {
+        throw new AppError(`Invalid $limit (expected an integer between 1 and ${MAX_LIMIT})`, {
+            code: 'INVALID_LIMIT',
+            status: 400
+        });
     }
+    pipeline.push({
+        $limit: p.$limit
+    })
 
     // $include
     if (p?.$include && Array.isArray(p?.$include)) {
@@ -730,6 +815,17 @@ function buildPipeline(p: FindOptions, options?: {
                 }
 
                 let as = include.as || include.localField
+
+                // Faille 3: never trust client-supplied $lookup sub-pipeline — scan it
+                if (include.pipeline && Array.isArray(include.pipeline)) {
+                    const check = isSafeAggregatePipeline(include.pipeline as Array<Record<string, unknown>>)
+                    if (!check.isSafe) {
+                        throw check.error ?? new AppError('Unauthorized $include pipeline', {
+                            code: 'UNAUTHORIZED_PIPELINE_KEYS',
+                            status: 400
+                        })
+                    }
+                }
 
                 pipeline.push({
                     $lookup: {
@@ -796,20 +892,65 @@ function clone<T>(data: T): T {
     return data_
 }
 
+/**
+ * Faille 13: bounds dangerous $match operators to prevent ReDoS ($regex) and memory DoS ($in).
+ * Walks nested objects/arrays ($and, $or, $nor, dotted fields).
+ */
+const MAX_REGEX_LENGTH = 1000;
+const MAX_IN_ARRAY_SIZE = 10000;
 
+function boundMatchOperators(node: unknown): void {
+    if (node === null || node === undefined) return;
 
+    if (Array.isArray(node)) {
+        for (const item of node) {
+            boundMatchOperators(item);
+        }
+        return;
+    }
 
-//slugify function
-function slugify(text: string): string {
-    return text
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .toLowerCase()
-        .replace(/[^\w\s-]/g, '')
-        .replace(/[\s_]+/g, '-')
-        .replace(/-+/g, '-')
-        .replace(/^-|-$/g, '');
+    if (typeof node === 'object') {
+        const obj = node as Record<string, unknown>;
+        for (const [key, value] of Object.entries(obj)) {
+            if (key === '$regex' && typeof value === 'string') {
+                if (value.length > MAX_REGEX_LENGTH) {
+                    throw new AppError(`$regex pattern too long (max ${MAX_REGEX_LENGTH} chars)`, {
+                        code: 'REGEX_TOO_LONG',
+                        status: 400
+                    });
+                }
+            } else if ((key === '$in' || key === '$nin') && Array.isArray(value)) {
+                if (value.length > MAX_IN_ARRAY_SIZE) {
+                    throw new AppError(`$in/$nin too large (max ${MAX_IN_ARRAY_SIZE} items)`, {
+                        code: 'ARRAY_OPERATOR_TOO_LARGE',
+                        status: 400
+                    });
+                }
+            }
+            boundMatchOperators(value);
+        }
+    }
 }
+
+
+
+
+	//slugify function
+	function slugify(text: string): string {
+	    return text
+	        .normalize('NFD')
+	        .replace(/[\u0300-\u036f]/g, '')
+	        .toLowerCase()
+	        .replace(/[^\w\s-]/g, '')
+	        .replace(/[\s_]+/g, '-')
+	        .replace(/-+/g, '-')
+	        .replace(/^-|-$/g, '');
+	}
+
+	/** Vérifie qu'une chaîne est un slug valide (lettres minuscules, chiffres, tirets simples) */
+	function isSlug(value: string): boolean {
+	    return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value);
+	}
 
 
 /**
@@ -991,20 +1132,46 @@ function countAggregatePipelineStages(pipeline: unknown): number {
 }
 
 
-function isSafeAggregatePipeline(pipeline: Array<Record<string, unknown>>): {
+function isSafeAggregatePipeline(pipeline: Array<Record<string, unknown>>, allowedCollections?: string[]): {
     isSafe: boolean;
     forbiddenKeys: string[];
     error: AppError | null;
 } {
 
-    // Unauthorized pipeline keys
-    const UNAUTHORIZED_PIPELINE_KEYS = ['$out', '$merge', '$function', '$where', '$accumulator'];
+    // Unauthorized pipeline keys — Faille 12: include cross-collection exfiltration stages
+    const UNAUTHORIZED_PIPELINE_KEYS = [
+        '$out', '$merge', '$function', '$where', '$accumulator',
+        '$unionWith', '$collStats', '$indexStats', '$planCacheStats',
+        '$currentOp', '$listLocalSessions', '$listSessions', '$changeStream',
+    ];
     const forbiddenFound = hasUnauthorizedKeys(pipeline, UNAUTHORIZED_PIPELINE_KEYS);
     if (forbiddenFound.length > 0) {
         return {
             isSafe: false,
             forbiddenKeys: forbiddenFound,
             error: new AppError('Unauthorized pipeline keys: ' + forbiddenFound.join(', '), { code: 'UNAUTHORIZED_PIPELINE_KEYS', status: 400 })
+        }
+    }
+
+    // Faille 12: restrict $lookup / $graphLookup targets to declared tenant collections
+    if (allowedCollections && allowedCollections.length > 0) {
+        const badTargets: string[] = [];
+        walkAggregatePipeline(pipeline, (stage) => {
+            const lookup = (stage as any).$lookup;
+            if (lookup?.from && !allowedCollections.includes(lookup.from)) {
+                badTargets.push(lookup.from);
+            }
+            const graph = (stage as any).$graphLookup;
+            if (graph?.from && !allowedCollections.includes(graph.from)) {
+                badTargets.push(graph.from);
+            }
+        });
+        if (badTargets.length > 0) {
+            return {
+                isSafe: false,
+                forbiddenKeys: badTargets,
+                error: new AppError('Unauthorized $lookup target collection: ' + [...new Set(badTargets)].join(', '), { code: 'UNAUTHORIZED_LOOKUP_TARGET', status: 400 })
+            };
         }
     }
 
@@ -1050,6 +1217,7 @@ export {
     reorder,
     omit,
     pick,
+    unflattenKeys,
     toJson,
     stringToBoolean,
     cleanDeep,
@@ -1065,6 +1233,7 @@ export {
     jwt,
     isEmpty,
     slugify,
+    isSlug,
     paginate,
     hasUnauthorizedKeys,
     protectFieldRenameOnProject,

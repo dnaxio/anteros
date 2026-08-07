@@ -17,6 +17,20 @@ import { loadServices } from '../lib/services'
 import { loadSockets } from '../lib/sockets'
 import { syncWorkflows } from '../lib/workflow'
 import { loadTenantsMiddlewares } from '../lib/middleware'
+import crypto from 'node:crypto';
+
+/** Check if a TCP port is already bound */
+async function isPortInUse(port: number): Promise<boolean> {
+    try {
+        const proc = Bun.spawn(['lsof', '-ti', `:${port}`], { stdout: 'pipe' });
+        const output = await new Response(proc.stdout).text();
+        await proc.exited;
+        return output.trim().length > 0;
+    } catch {
+        return false;
+    }
+}
+
 type BootAppOptions = ServerConfig & {
 
 }
@@ -38,17 +52,50 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
         //******************************* */
 
 
+        // JWT_SECRET check: auto-generate if missing and auth is enabled
+        const hasAuth = cfg.collections?.some((c: any) => c.api?.auth?.enabled);
+        let jwtSecret = cfg.server.jwt?.secret || Bun.env.JWT_SECRET;
+        if (hasAuth && !jwtSecret) {
+            // CSPRNG: crypto.randomBytes (not Math.random — predictable)
+            jwtSecret = crypto.randomBytes(48).toString('base64url');
+            try {
+                const envPath = '.env';
+                const exists = await Bun.file(envPath).exists();
+                const content = exists ? await Bun.file(envPath).text() : '';
+                if (!content.includes('JWT_SECRET=')) {
+                    const suffix = content ? '\n' : '';
+                    await Bun.write(envPath, `${content}${suffix}# Auto-generated on boot\nJWT_SECRET=${jwtSecret}\n`);
+                }
+                Bun.env.JWT_SECRET = jwtSecret;
+                console.log('🔐 JWT_SECRET auto-generated and saved to .env'.gray);
+            } catch {
+                Bun.env.JWT_SECRET = jwtSecret;
+                console.log('⚠ JWT_SECRET auto-generated (in-memory only, could not write .env)'.yellow);
+            }
+        }
+
         const PORT = (cfg.server.port || 4000);
         const NAME = cfg.server.name || process.env.APP_NAME || 'SERVER';
         const useClusterMode = cfg.clusterMode || false;
         const env = process.env.NODE_ENV || Bun.env.NODE_ENV || 'dev';
+        // reusePort: cluster mode ON by default, dev mode OFF to detect zombies
+        const reusePort = cfg.server.reusePort ?? (useClusterMode && env !== 'dev');
+
+        // Detect zombie: check if port is already in use in dev mode
+        if (!reusePort && env === 'dev') {
+            const occupied = await isPortInUse(PORT);
+            if (occupied) {
+                console.error(`\n⚠ Port ${PORT} is already in use. Possible zombie server.\n  → Kill it: lsof -ti :${PORT} | xargs kill -9\n  → Or set server.reusePort: true in config\n`.red.bold);
+                process.exit(1);
+            }
+        }
 
 
         const app = createApp();
 
         const server = Bun.serve({
             port: PORT,
-            reusePort: useClusterMode,
+            reusePort,
             fetch: (req, server) => {
                 const url = new URL(req.url);
 

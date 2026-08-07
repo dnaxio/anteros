@@ -10,7 +10,7 @@ export function CheckIfCollectionExists(): any {
             return descriptor;
         }
         const originalMethod = descriptor.value;
-        descriptor.value = async function (...args: any[]) {
+        descriptor.value = async function (this: any, ...args: any[]) {
             let collection = args[0];
             let col = getCollection(collection, this.tenant_id)
             if (!col) {

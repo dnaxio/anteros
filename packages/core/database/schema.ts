@@ -69,6 +69,13 @@ function buildSchema(col: CollectionType, opts = {
                 propertiesSchema[fieldName] = Joi.string().uri()
             }
 
+            if (f.type == 'slug') {
+                let schema = Joi.string().pattern(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+                if (f.slugOptions?.min != null) schema = schema.min(f.slugOptions.min)
+                if (f.slugOptions?.max != null) schema = schema.max(f.slugOptions.max)
+                propertiesSchema[fieldName] = schema
+            }
+
             if (f.type == 'ipv4') {
                 propertiesSchema[fieldName] = Joi.string().ip({ version: 'ipv4' })
             }

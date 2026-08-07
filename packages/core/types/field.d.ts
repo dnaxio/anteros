@@ -21,6 +21,7 @@ export type FieldType = "boolean"
     | "geojson.LineString"
     | "geojson.Polygon"
     | "uuid"
+    | "slug"
 
 
 
@@ -28,6 +29,11 @@ export type FieldType = "boolean"
 export type enumOptions = {
     multiple?: boolean;
     items?: Array<string | number | boolean | object>;
+}
+
+export type SlugOptions = {
+    min?: number;
+    max?: number;
 }
 
 
@@ -45,6 +51,7 @@ export type Field = {
     },
     required?: boolean;
     enumOptions?: enumOptions;
+    slugOptions?: SlugOptions;
     unique?: boolean;
     nullable?: boolean;
     empty?: boolean;

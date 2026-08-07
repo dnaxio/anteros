@@ -70,6 +70,8 @@ export type Collection = {
      */
     _tenant_?: string;
     _isTimeSerie_?: boolean;
+    /** Drop MongoDB indexes for fields no longer in the schema (default: false) */
+    purgeOrphanIndexes?: boolean;
     _isCollection_?: boolean;
     _schema_?: Joi.Schema;
     _schemaPartial_?: Joi.Schema;

@@ -84,23 +84,35 @@ async function initializeOnDatabase(collections: Collection[]) {
                     }
 
                     if (field?.index) {
-                        let indexValue: Boolean | number = field.index;
-                        let includesStringType: Field['type'][] = ['string', 'email', 'enum', 'url', 'random'];
-                        let includesDateType: Field['type'][] = ['date', 'datetime-local'];
-                        if (typeof indexValue == "boolean" && includesStringType.includes(field.type)) {
-                            indexValue = 1
+                        let indexValue: number | string = 1;
+
+                        // Honor explicit indexType first
+                        if (field.indexType) {
+                            indexValue = field.indexType;
+                        } else if (typeof field.index === 'number') {
+                            indexValue = field.index;
+                        } else if (field.type === 'geojson.Point' || field.type === 'geojson.LineString' || field.type === 'geojson.Polygon') {
+                            indexValue = '2dsphere';
+                        } else {
+                            let includesStringType: Field['type'][] = ['string', 'email', 'enum', 'url', 'random', 'slug', 'relationship', 'uuid', 'password'];
+                            let includesDateType: Field['type'][] = ['date', 'datetime-local'];
+                            if (includesStringType.includes(field.type)) {
+                                indexValue = 1;
+                            } else if (includesDateType.includes(field.type)) {
+                                indexValue = -1;
+                            }
                         }
 
-                        if (typeof indexValue == "boolean" && includesDateType.includes(field.type)) {
-                            indexValue = -1
-                        }
+                        let isSparse = field.type === 'random'
+                            || (field.unique && field.required !== true);
+
                         specsFieldsIndexes.push({
                             key: {
-                                [field.name]: indexValue as number
+                                [field.name]: indexValue as any
                             },
                             unique: field.unique ?? false,
-                            sparse: field.type == 'random' ? true : false,
-                            ...field.indexOptions,
+                            sparse: isSparse,
+                            ...field.indexOptions,  // explicit overrides win
                         })
 
                     }
@@ -110,6 +122,22 @@ async function initializeOnDatabase(collections: Collection[]) {
                 }
                 if (specsFieldsIndexes.length) {
                     await db.collection(collection.slug).createIndexes(specsFieldsIndexes)
+                }
+
+                // Purge orphan indexes (fields removed from schema)
+                if (collection.purgeOrphanIndexes) {
+                    const expectedKeys = new Set(specsFieldsIndexes.map((idx) =>
+                        JSON.stringify(Object.keys(idx.key!).sort())
+                    ));
+                    const existingIndexes = await db.collection(collection.slug).listIndexes().toArray();
+                    for (const idx of existingIndexes) {
+                        if (idx.name === '_id_') continue; // built-in
+                        const idxKeys = JSON.stringify(Object.keys(idx.key!).sort());
+                        if (!expectedKeys.has(idxKeys)) {
+                            await db.collection(collection.slug).dropIndex(idx.name!);
+                            console.log(`🧹 Dropped orphan index: ${collection.slug}.${idx.name}`.gray);
+                        }
+                    }
                 }
             }
 

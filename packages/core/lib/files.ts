@@ -53,7 +53,8 @@ export function createDiskStorage(baseDir?: string): FileStorage {
       const filename = `${meta.id}${ext}`;
       const filepath = path.join(dir, filename);
       const buffer = await file.arrayBuffer();
-      await fs.writeFile(filepath, new Uint8Array(buffer));
+      // Faille 17: 'wx' — fail if file already exists (no silent overwrite)
+      await fs.writeFile(filepath, new Uint8Array(buffer), { flag: 'wx' });
       const outPath = subpath ? `${subpath}/${filename}` : `${tenant_id}/${collection}/${filename}`;
       return { path: outPath, size: buffer.byteLength };
     },
@@ -146,6 +147,15 @@ async function transformImage(
   const format = options.format || 'webp';
   const quality = options.quality ?? 80;
 
+  // Faille 20: validate params (reject NaN / out-of-range)
+  if (!Number.isFinite(quality) || quality < 1 || quality > 100) {
+    throw new AppError('Invalid quality parameter', { code: 'INVALID_TRANSFORM', status: 400 });
+  }
+  if ((options.width != null && (!Number.isFinite(options.width) || options.width <= 0))
+    || (options.height != null && (!Number.isFinite(options.height) || options.height <= 0))) {
+    throw new AppError('Invalid width/height parameter', { code: 'INVALID_TRANSFORM', status: 400 });
+  }
+
   // Convertir ReadableStream en Uint8Array si nécessaire
   let buffer: Uint8Array;
   if (input instanceof Uint8Array) {
@@ -165,6 +175,12 @@ async function transformImage(
       buffer.set(chunk, offset);
       offset += chunk.length;
     }
+  }
+
+  // Faille 20: only transform real images (magic bytes check)
+  const detected = detectMimeFromBuffer(buffer);
+  if (!detected || !detected.startsWith('image/')) {
+    throw new AppError('Not an image file', { code: 'NOT_AN_IMAGE', status: 400 });
   }
 
   // Utiliser Bun.Image (natif, zéro dépendance)
@@ -246,6 +262,28 @@ export async function handleUpload(options: UploadOptions): Promise<FileResult> 
   if (col.upload?.allowedMimeTypes?.length && !col.upload.allowedMimeTypes.includes(mimetype)) {
     throw new AppError(`MIME type '${mimetype}' not allowed`, {
       code: 'MIMETYPE_NOT_ALLOWED', status: 400,
+    });
+  }
+
+  // Faille 4: validate magic bytes — don't trust client-declared Content-Type
+  const fullBuffer = new Uint8Array(await file.arrayBuffer());
+  const probe = fullBuffer.subarray(0, 4096);
+  const detected = detectMimeFromBuffer(probe);
+  const declaredMime = mimetype.toLowerCase();
+  const isImageDeclared = declaredMime.startsWith('image/');
+  const isImageDetected = detected?.startsWith('image/') ?? false;
+
+  // Reject content that lies about being an image (e.g. HTML/JS uploaded as image/png)
+  if (isImageDeclared && !isImageDetected) {
+    throw new AppError(`File content does not match declared MIME type '${mimetype}'`, {
+      code: 'MIMETYPE_MISMATCH', status: 400,
+    });
+  }
+
+  // Hardening: block SVG with embedded script (stored XSS)
+  if (detected === 'image/svg+xml' && svgContainsScript(probe)) {
+    throw new AppError('SVG with executable content is not allowed', {
+      code: 'SVG_SCRIPT_NOT_ALLOWED', status: 400,
     });
   }
 
@@ -358,18 +396,37 @@ export async function handleServe(
   fileId: string,
   filename: string,
   transform?: TransformOptions,
-): Promise<{ stream: ReadableStream; mimetype: string; size?: number } | null> {
+): Promise<{ stream: ReadableStream; mimetype: string; size?: number; attachment?: boolean } | null> {
   const storage = getStorageForCollection(collection, tenant_id);
   const col = getFileCollection(collection, tenant_id);
   const subpath = col?.storage?.path || undefined;
   const stream = await storage.getStream(tenant_id, collection, fileId, filename, subpath);
   if (!stream) return null;
 
-  let mimetype = getMimeType(filename);
+  // Faille 10: serve the MIME validated at upload time (content-checked),
+  // not re-derived from the extension.
+  let mimetype: string | undefined;
+  try {
+    const rest = new useRest({ tenant_id, internal: true, useHook: false, useCustomApi: false });
+    const doc = await rest.db.collection(collection).findOne(
+      { _id: (ObjectId.isValid(fileId) ? new ObjectId(fileId) : fileId) as any },
+      { projection: { '_file.mimetype': 1 } },
+    );
+    mimetype = (doc as any)?._file?.mimetype;
+  } catch {}
+
+  // Fallback: extension-derived MIME only when nothing stored
+  mimetype = mimetype || getMimeType(filename);
+  const isSvg = mimetype === 'image/svg+xml';
 
   if (transform && (transform.width || transform.height || transform.format)) {
     const { data, mimetype: newMime } = await transformImage(stream, transform);
     return { stream: new ReadableStream({ start(controller) { controller.enqueue(data); controller.close(); } }), mimetype: newMime, size: data.length };
+  }
+
+  // Faille 4: SVG is served as an attachment (never inline) to prevent stored XSS
+  if (isSvg) {
+    return { stream, mimetype, attachment: true };
   }
 
   return { stream, mimetype };
@@ -389,6 +446,44 @@ function getMimeType(filename: string): string {
   return map[ext] || 'application/octet-stream';
 }
 
+/**
+ * Detect a file's real type from its magic bytes.
+ * Returns null when unknown. Used to prevent content spoofing (XSS via SVG etc).
+ */
+export function detectMimeFromBuffer(buf: Uint8Array): string | null {
+  const head = (offset: number, len: number) =>
+    String.fromCharCode(...buf.slice(offset, offset + len));
+  const hex = (offset: number, len: number) =>
+    Array.from(buf.slice(offset, offset + len)).map(b => b.toString(16).padStart(2, '0')).join('');
+
+  // JPEG: FF D8 FF
+  if (hex(0, 3) === 'ffd8ff') return 'image/jpeg';
+  // PNG: 89 50 4E 47
+  if (hex(0, 4) === '89504e47') return 'image/png';
+  // GIF: GIF87a / GIF89a
+  if (head(0, 4) === 'GIF8') return 'image/gif';
+  // WebP: RIFF....WEBP
+  if (head(0, 4) === 'RIFF' && head(8, 4) === 'WEBP') return 'image/webp';
+  // AVIF: ftypavif / ftypavis at offset 4
+  if (hex(4, 4) === '66747970' && (head(8, 4) === 'avif' || head(8, 4) === 'avis')) return 'image/avif';
+  // BMP: BM
+  if (head(0, 2) === 'BM') return 'image/bmp';
+  // PDF: %PDF
+  if (head(0, 4) === '%PDF') return 'application/pdf';
+  // ZIP (docx/xlsx/etc): PK\x03\x04
+  if (hex(0, 4) === '504b0304') return 'application/zip';
+  // SVG: XML declaration or <svg — MUST be served as attachment
+  const text = new TextDecoder().decode(buf.subarray(0, 2048));
+  if (/^\s*(<\?xml|<!DOCTYPE|<svg)/i.test(text)) return 'image/svg+xml';
+  return null;
+}
+
+/** True if the file content contains executable script (used for SVG hardening) */
+function svgContainsScript(buf: Uint8Array): boolean {
+  const text = new TextDecoder().decode(buf.subarray(0, 65536)); // first 64KB is enough
+  return /<script|onload\s*=|onerror\s*=|javascript:/i.test(text);
+}
+
 export async function handleDelete(
   tenant_id: string,
   collection: string,
@@ -403,7 +498,7 @@ export async function handleDelete(
   try {
     const rest = new useRest({ tenant_id, internal: true, useHook: false, useCustomApi: false });
     const doc = await rest.db.collection(collection).findOne(
-      { _id: ObjectId.isValid(fileId) ? new ObjectId(fileId) : fileId },
+      { _id: (ObjectId.isValid(fileId) ? new ObjectId(fileId) : fileId) as any },
       { projection: { '_file.filename': 1 } },
     );
     filename = doc?._file?.filename;
@@ -426,7 +521,7 @@ export async function handleDelete(
   try {
     const rest = new useRest({ tenant_id, internal: true, useHook: false, useCustomApi: false });
     await rest.db.collection(collection).deleteOne({
-      _id: ObjectId.isValid(fileId) ? new ObjectId(fileId) : fileId,
+      _id: (ObjectId.isValid(fileId) ? new ObjectId(fileId) : fileId) as any,
     });
   } catch (err: any) {
     console.error('Failed to delete file metadata:', err?.message || err);

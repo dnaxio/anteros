@@ -1,3 +1,4 @@
+
 import type { Tenant } from "../types/tenant";
 import type { MongoClientOptions, Db, ClientSession, UpdateOptions, UpdateFilter, Document, DeleteResult, ChangeStreamOptions, ChangeStream, ChangeStreamDocument, AnyBulkWriteOperation, BulkWriteOptions, BulkWriteResult, UpdateResult } from "mongodb";
 import { MongoClient, ObjectId, AggregationCursor } from "mongodb";
@@ -41,18 +42,22 @@ class MongoRest {
         if (options.session) {
             this.session = options.session;
         }
-        let tenant = getTenant(options?.tenant_id ?? '-')
-        if (options.tenant_id && tenant) {
+        // Resolve tenant: explicit tenant_id, else from request context
+        let tenantId = options.tenant_id;
+        if (!tenantId) {
+            tenantId = requestCtxStorage.get<string>('tenant_id');
+        }
+        let tenant = getTenant(tenantId ?? '-')
+        if (tenant) {
             this.#tenant = tenant;
             this.tenant_id = tenant.id;
             this.db = tenant.database.db as Db;
             this.client = tenant.database.client as MongoClient;
         }
-
     }
 
 
-    private _validate(options: { collection: string, action?: ActionsApiList, data?: any, update?: UpdateFilter<any> }) {
+    private _validate(options: { collection: string, action?: ActionsApiList, data?: any, update?: UpdateFilter<any> }): any {
         let col = getCollection(options.collection, this.#tenant.id)
         let schema = col?._schema_
         let partialSchema = col?._schemaPartial_
@@ -71,82 +76,81 @@ class MongoRest {
         })
 
 
-        //let unauthorizedKeys = func.unauthorizedKeys(options.data, getCollectionKeys(col))
-        /*  if (unauthorizedKeys.length > 0) {
-             throw new AppError(`Unauthorized keys in "${options.collection}" : ${unauthorizedKeys.join(', ')}`, {
-                 code: 'UNAUTHORIZED_KEYS',
-                 status: 400
-             })
-         } */
-
-
-
         if (schema && partialSchema) {
 
 
             if (options?.data) {
                 if (options.action == 'insertMany') {
-                    options.data.map(d => {
-                        validationResult = schema.validate(d, {
-                            allowUnknown: false,
-                        })
-                        if (validationResult && validationResult.error) {
+                    const sanitized: any[] = [];
+                    for (let i = 0; i < options.data.length; i++) {
+                        validationResult = schema.validate(options.data[i], { allowUnknown: false })
+                        if (validationResult?.error) {
                             throw new AppError(validationResult.error.message, {
                                 code: 'VALIDATION_ERROR',
                                 status: 400
                             })
                         }
-                    })
+                        sanitized.push(validationResult.value)
+                    }
+                    return sanitized;
                 }
 
                 if (options.action == 'insertOne') {
-                    validationResult = schema.validate(options.data, {
-                        allowUnknown: false,
-                    })
+                    validationResult = schema.validate(options.data, { allowUnknown: false })
+                    if (validationResult?.error) {
+                        throw new AppError(validationResult.error.message, {
+                            code: 'VALIDATION_ERROR',
+                            status: 400
+                        })
+                    }
+                    // Return sanitized value (Joi defaults applied, unknown keys handled)
+                    return validationResult.value;
                 }
             }
 
 
             if (options?.update) {
-                if (options.action == 'insertOne' && options.update?.$set) {
-                    validationResult = partialSchema.validate(options.update?.$set, {
-                        allowUnknown: false,
-                    })
-                }
-
-                if (options.action == 'insertMany' && options.update?.$set) {
-                    validationResult = partialSchema.validate(options.update?.$set, {
-                        allowUnknown: false,
-                    })
+                if ((options.action == 'insertOne' || options.action == 'insertMany') && options.update?.$set) {
+                    validationResult = partialSchema.validate(options.update.$set, { allowUnknown: false })
                 }
 
                 if (options.action == "findOneAndUpdate" && options.update.$set) {
-                    validationResult = partialSchema.validate(options.update.$set, {
-                        allowUnknown: false,
-                    })
+                    validationResult = partialSchema.validate(options.update.$set, { allowUnknown: false })
                 }
 
                 if (options.action == "findOneAndUpdate" && options.update.$setOnInsert) {
-                    validationResult = partialSchema.validate(options.update.$setOnInsert, {
-                        allowUnknown: false,
+                    validationResult = partialSchema.validate(options.update.$setOnInsert, { allowUnknown: false })
+                }
+
+                // Faille 9: updateOne/updateMany — unflatten dot-notation ("address.zip") before Joi validation
+                if ((options.action == 'updateOne' || options.action == 'updateMany') && options.update?.$set) {
+                    const unflattened = func.unflattenKeys(options.update.$set)
+                    validationResult = partialSchema.validate(unflattened, { allowUnknown: false })
+                    if (validationResult?.error) {
+                        throw new AppError(validationResult.error.message, {
+                            code: 'VALIDATION_ERROR',
+                            status: 400
+                        })
+                    }
+                    // Write sanitized (nested) value back — MongoDB accepts nested objects
+                    if (validationResult.value) {
+                        options.update.$set = validationResult.value
+                    }
+                }
+
+                if (validationResult?.error) {
+                    throw new AppError(validationResult.error.message, {
+                        code: 'VALIDATION_ERROR',
+                        status: 400
                     })
                 }
-            }
-
-            if (validationResult?.error) {
-                throw new AppError(validationResult.error.message, {
-                    code: 'VALIDATION_ERROR',
-                    status: 400
-                })
+                return validationResult?.value;
             }
 
         }
-
-
-
     }
 
-    private async #logActivity(data: {
+    async #logActivity(data: {
         action: string,
         collection: string,
         input?: any,
@@ -203,7 +207,7 @@ class MongoRest {
         await this.audit.addActivities([activity])
     }
 
-    private async #executeWithAudit<T>(
+    async #executeWithAudit<T>(
         action: string,
         collection: string,
         input: any,
@@ -268,7 +272,17 @@ class MongoRest {
         try {
 
             const col = getCollection(collection, this.#tenant.id) as Collection
-            const isSafe = func.isSafeAggregatePipeline(pipeline);
+            // Faille 12: restrict $lookup targets to this tenant's declared collections
+            const allowedCollections = [
+                ...(cfg.collections ?? [])
+                    .filter(c => c._tenant_ === this.tenant_id)
+                    .map(c => c.slug),
+                ...(cfg.fileCollections ?? [])
+                    .filter(fc => fc._tenant_ === this.tenant_id)
+                    .map(fc => fc.slug),
+                '_activities_', '_locks_', '_workflows_',
+            ];
+            const isSafe = func.isSafeAggregatePipeline(pipeline, allowedCollections);
             if (!isSafe.isSafe) {
                 throw isSafe.error;
             }
@@ -370,18 +384,19 @@ class MongoRest {
             data = await func.buildInput(data as T, {
                 action: action, col: col, rest: this
             })
-            this._validate({ collection, action: action, data: data })
 
             const meta: any = { action, collection, data }
             if (col.hooks?.beforeOperation) {
                 await col.hooks.beforeOperation({ rest: this, io, action, meta })
             }
+            // Validate AFTER hooks (they may fill required fields or apply Joi defaults)
+            meta.data = this._validate({ collection, action: action, data: meta.data })
 
-            await this.db.collection(collection).insertOne(func.toBson(data, { col }) as any, {
+            await this.db.collection(collection).insertOne(func.toBson(meta.data, { col }) as any, {
                 session: this.session,
             })
 
-            const result: T & { _id: string } = func.toJson(data as T & { _id: string })
+            const result: T & { _id: string } = func.toJson(meta.data as T & { _id: string })
             meta.result = result
             if (col?.hooks?.afterOperation) {
                 await col.hooks.afterOperation({ rest: this, io, action, meta })
@@ -408,18 +423,18 @@ class MongoRest {
                 dataInput.push(d)
             }
 
-            this._validate({ collection, action: action, data: dataInput })
-
             const meta: any = { action, collection, data: dataInput }
             if (col.hooks?.beforeOperation) {
                 await col.hooks.beforeOperation({ rest: this, io, action, meta })
             }
+            // Validate AFTER hooks (they may fill required fields or apply Joi defaults)
+            meta.data = this._validate({ collection, action: action, data: meta.data })
 
-            await this.db.collection(collection).insertMany(func.toBson(dataInput, { col }) as any, {
+            await this.db.collection(collection).insertMany(func.toBson(meta.data, { col }) as any, {
                 session: this.session,
             })
 
-            const result: (T & { _id: string })[] = func.toJson(dataInput as (T & { _id: string })[])
+            const result: (T & { _id: string })[] = func.toJson(meta.data as (T & { _id: string })[])
             meta.result = result
 
             if (col.hooks?.afterOperation) {
@@ -768,14 +783,14 @@ class MongoRest {
 
         const token = requestCtxStorage.get<{ value: string | null, decoded: Record<string, unknown> | null, provided: boolean, expired: boolean }>('token')
 
-        return await col.actions?.[action]({
+        return await col.actions?.[action]?.({
             rest: this,
-                    io,
+            io,
             data,
             error: fn.error,
             jwt: func.jwt,
-            token: token ?? { value: null, decoded: null },
-        })
+            token: token ?? { value: null, decoded: null, provided: false, expired: false },
+        } as any)
     }
 
     async runService<T = any>(service: string, action: string, data?: any): Promise<T> {
@@ -792,15 +807,14 @@ class MongoRest {
 
         const token = requestCtxStorage.get<{ value: string | null, decoded: Record<string, unknown> | null, provided: boolean, expired: boolean }>('token')
 
-        return await serviceInstance.actions?.[action]({
+        return await serviceInstance.actions?.[action]?.({
             data,
             error: fn.error,
             io,
             jwt: func.jwt,
             token: token ?? { value: null, decoded: null, provided: false, expired: false },
             rest: this,
-                    io,
-        })
+        } as any)
     }
 
     async stats() {
@@ -917,8 +931,8 @@ class MongoRest {
 
         try {
             const result = await this.db.collection('_locks_').findOneAndUpdate(
-                { _id: id, expiresAt: { $lt: now } },
-                { $set: { _id: id, tid: this.tenant_id, name, acquiredAt: now, expiresAt } },
+                { _id: id as any, expiresAt: { $lt: now } },
+                { $set: { tid: this.tenant_id, name, acquiredAt: now, expiresAt } },
                 { upsert: true, returnDocument: 'after' }
             );
             if (!result) {

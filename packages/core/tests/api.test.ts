@@ -11,6 +11,7 @@ let rest: InstanceType<typeof useRest>;
 
 beforeAll(async () => {
     formatConfig({
+        server: { port: 4000 },
         tenants: [{ id: TEST_TENANT, dir: "src", database: { uri: TEST_DB } }],
     });
     await syncTenants();
@@ -45,7 +46,7 @@ describe("insertOne", () => {
         expect(doc._id.length).toBe(24);
     });
     it("sets createdAt and updatedAt", async () => {
-        const doc = await rest.insertOne("items", { title: "ts" });
+        const doc: any = await rest.insertOne("items", { title: "ts" });
         expect(doc.createdAt).toBeString();
         expect(doc.updatedAt).toBeString();
     });
@@ -84,8 +85,8 @@ describe("findOne", () => {
 
 describe("updateOne", () => {
     it("$set title and changes updatedAt", async () => {
-        const doc = await rest.insertOne("items", { title: "old" });
-        const upd = await rest.updateOne("items", doc._id, { $set: { title: "new" } });
+        const doc: any = await rest.insertOne("items", { title: "old" });
+        const upd: any = await rest.updateOne("items", doc._id, { $set: { title: "new" } });
         expect(upd.title).toBe("new");
         expect(upd.updatedAt).not.toBe(doc.updatedAt);
     });
@@ -93,17 +94,18 @@ describe("updateOne", () => {
 
 describe("deleteOne", () => {
     it("deletes and returns _id", async () => {
-        const doc = await rest.insertOne("items", { title: "del-me" });
-        expect((await rest.deleteOne("items", doc._id))._id).toBe(doc._id);
+        const doc: any = await rest.insertOne("items", { title: "del-me" });
+        const deleted: any = await rest.deleteOne("items", doc._id);
+        expect(deleted?._id).toBe(doc._id);
     });
 });
 
 describe("insertMany", () => {
     it("inserts and returns array with _id", async () => {
-        const docs = await rest.insertMany("items", [{ title: "m1" }, { title: "m2" }]);
+        const docs: any[] = await rest.insertMany("items", [{ title: "m1" }, { title: "m2" }]);
         expect(docs.length).toBe(2);
-        expect(docs[0]._id).toBeString();
-        expect(docs[1]._id).toBeString();
+        expect(docs[0]!._id).toBeString();
+        expect(docs[1]!._id).toBeString();
     });
 });
 
@@ -173,7 +175,7 @@ describe("bulkUpdate", () => {
 
 describe("stats", () => {
     it("returns collection stats", async () => {
-        const s = await rest.stats("items");
+        const s: any = await rest.stats();
         expect(s).toBeDefined();
         expect(typeof s).toBe("object");
     });
@@ -184,7 +186,7 @@ describe("audit", () => {
         await rest.audit.addActivities([{
             internal: false,
             trace: { id: crypto.randomUUID() },
-            request: null,
+            request: undefined,
             meta: {},
             operation: {
                 tenant: TEST_TENANT,
@@ -199,7 +201,7 @@ describe("audit", () => {
             },
             ts: new Date(),
         }]);
-        const activities = await rest.audit.getActivities({ $limit: 10 });
+        const activities = await rest.audit.getActivities({ $match: {}, $limit: 10 });
         expect(Array.isArray(activities)).toBe(true);
         expect(activities.length).toBeGreaterThanOrEqual(1);
     });
@@ -266,7 +268,7 @@ describe("transactions", () => {
 
 describe("watch", () => {
     it("returns a change stream", async () => {
-        const stream = await rest.watch("items", [{ $match: { operationType: "insert" } }]);
+        const stream = await rest.watch("items", [{ $match: { operationType: "insert" } }], {} as any);
         expect(stream).toBeDefined();
         await stream.close();
     });

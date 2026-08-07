@@ -1,4 +1,4 @@
-import type { Hono } from "hono"
+import type { Hono, Context } from "hono"
 import { cfg, safePublicConfig } from "./config";
 import type { ApiOptions } from "../types/api";
 import { getCollection } from "../database/collection";
@@ -244,11 +244,10 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
     }
 
     // ─── Collection API ─────────────────────────────────────────────────
-    app.post(API_PREFIX, async (c) => {
+    app.post(API_PREFIX, async (c: Context<{ Variables: HonoVariables }>) => {
         let response: any;
         let body: any;
         let rest: InstanceType<typeof useRest>;
-        let canAccessToAction: boolean | undefined;
 
         try {
             const ContentType = c.req.header('Content-Type');
@@ -273,6 +272,9 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
             if (!cfg.tenants.find(t => t.id === tenant_id)) {
                 throw new AppError('Tenant `' + tenant_id + '` not found', { status: 400, code: 'TENANT_NOT_FOUND' });
             }
+
+            // Store tenant in request context so nested useRest() calls (hooks, actions) resolve it
+            requestCtxStorage.set('tenant_id', tenant_id);
 
             const col = getCollection(collection, tenant_id)
             if (!col) {
@@ -344,27 +346,8 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
             }
 
             // ── Access control ──
-            const access = col?.api?.access as Record<string, boolean | Function> | undefined;
-
-            if (access?.['*'] !== undefined && access?.[action] === undefined) {
-                if (typeof access['*'] === 'function') {
-                    canAccessToAction = await access['*']({ rest, error: fn.error, jwt: func.jwt, token: accessToken });
-                } else {
-                    canAccessToAction = access['*'] as boolean;
-                }
-                if (canAccessToAction !== true) throw new AppError('Access denied', { status: 401, code: 'ACCESS_DENIED' });
-            }
-
-            if (access?.[action] !== undefined) {
-                canAccessToAction = typeof access[action] === 'function'
-                    ? await (access[action] as Function)({ rest, error: fn.error, jwt: func.jwt, token: accessToken })
-                    : access[action] as boolean;
-                if (canAccessToAction !== true) throw new AppError('Access denied', { status: 401, code: 'ACCESS_DENIED' });
-            }
-
-            if (canAccessToAction !== true) {
-                throw new AppError('Unauthorized', { status: 401, code: 'ACCESS_DENIED_TO_PERFORM_THIS_ACTION' });
-            }
+            // Faille 7: single implementation via evaluateAccess (checks expired/forged tokens)
+            await evaluateAccess(col?.api?.access as any, action, rest, 'Action', c);
 
             // ── Execute action ──
             if (col.actions?.[action]) {
@@ -415,6 +398,7 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
             const { service, tenant_id } = c.req.param() as { service: string, tenant_id: string };
             if (!tenant_id) throw new AppError('Tenant ID is required', { status: 400, code: 'TENANT_ID_REQUIRED' });
             if (!service) throw new AppError('Service is required', { status: 400, code: 'SERVICE_REQUIRED' });
+            requestCtxStorage.set('tenant_id', tenant_id);
 
             const serviceInstance = cfg.services?.find(s => s.name === service && s._tenant_ === tenant_id) as Service;
             const { action } = c.req.param() as { action: string };
@@ -457,6 +441,7 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
             if (!cfg.tenants.find(t => t.id === tenant_id)) {
                 throw new AppError('Tenant `' + tenant_id + '` not found', { status: 400, code: 'TENANT_NOT_FOUND' });
             }
+            requestCtxStorage.set('tenant_id', tenant_id);
 
             const colUpload = getFileCollection(collection, tenant_id);
             if (!colUpload) {
@@ -467,6 +452,16 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
             const contentType = c.req.header('Content-Type') || '';
             if (!contentType.includes('multipart/form-data')) {
                 throw new AppError('Content-Type must be multipart/form-data', { code: 'INVALID_CONTENT_TYPE', status: 400 });
+            }
+
+            // Faille 11: reject oversized bodies BEFORE parseBody buffers them in memory
+            const contentLength = Number(c.req.header('Content-Length') ?? 0);
+            const maxUploadSize = colUpload.upload?.maxSize ?? 10 * 1024 * 1024; // 10MB default
+            // multipart overhead (boundaries/headers) ≈ 64KB max
+            if (Number.isFinite(contentLength) && contentLength > 0 && contentLength > maxUploadSize + 64 * 1024) {
+                throw new AppError(`Request too large (max ${Math.round(maxUploadSize / 1024 / 1024)}MB)`, {
+                    code: 'FILE_TOO_LARGE', status: 413,
+                });
             }
 
             const formData = await c.req.parseBody();
@@ -498,6 +493,7 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
             if (!cfg.tenants.find(t => t.id === tenant_id)) {
                 throw new AppError('Tenant `' + tenant_id + '` not found', { status: 400, code: 'TENANT_NOT_FOUND' });
             }
+            requestCtxStorage.set('tenant_id', tenant_id);
 
             const colServe = getFileCollection(collection, tenant_id);
             if (!colServe) {
@@ -505,10 +501,12 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
             }
             await checkFileAccess(colServe?.api?.access as any, 'read', tenant_id, c);
 
-            const filename = basename(c.req.param('file') as string);
-            if (!filename || filename.startsWith('.') || filename.includes('..') || filename.includes('/')) {
+            // Faille 18: validate the RAW path before basename (checks were dead code)
+            const rawFile = c.req.param('file') as string;
+            if (!rawFile || rawFile.startsWith('.') || rawFile.includes('..') || rawFile.includes('/') || rawFile.includes('\\')) {
                 throw new AppError('Invalid filename', { status: 400, code: 'INVALID_FILENAME' });
             }
+            const filename = basename(rawFile);
             const fileId = filename.replace(/\.[^.]+$/, '');
 
             const query = c.req.query();
@@ -529,6 +527,10 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
             c.header('Content-Type', result.mimetype);
             if (result.size) c.header('Content-Length', String(result.size));
             c.header('Cache-Control', 'public, max-age=31536000, immutable');
+            // Faille 4: SVG served as attachment (no inline execution)
+            if (result.attachment) {
+                c.header('Content-Disposition', `attachment; filename="${filename}"`);
+            }
             return c.newResponse(result.stream);
         } catch (err: any) {
             if (cfg?.debug) console.error(err)
@@ -544,6 +546,7 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
             if (!cfg.tenants.find(t => t.id === tenant_id)) {
                 throw new AppError('Tenant `' + tenant_id + '` not found', { status: 400, code: 'TENANT_NOT_FOUND' });
             }
+            requestCtxStorage.set('tenant_id', tenant_id);
 
             const colDelete = getFileCollection(collection, tenant_id);
             if (!colDelete) {
@@ -567,7 +570,8 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
     // ─── Public config ──────────────────────────────────────────────────
     app.get('/_dnax/config/:tenant_id', (c) => {
         const t = c.get('token');
-        if (!t?.value) {
+        // Faille 6: require a VERIFIED, non-expired token (not just any provided value)
+        if (!t?.decoded || t?.expired || !t?.provided) {
             return c.json({ message: 'Authentication required', code: 'AUTH_REQUIRED' }, 401);
         }
         const { tenant_id } = c.req.param() as { tenant_id: string };

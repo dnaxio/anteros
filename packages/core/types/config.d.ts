@@ -13,6 +13,7 @@ export type ServerConfig = {
     server: {
         name?: string;
         port: number;
+        reusePort?: boolean;  // override Bun's reusePort (default: clusterMode && not dev)
         body?: {
             maxSize?: number;
         };

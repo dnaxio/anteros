@@ -1,9 +1,14 @@
+
+
 import { define } from "./lib/define";
 import { bootApp } from "./server/boot";
 import { useRest } from "./database/rest";
+import { AppError } from "./lib/error";
 import * as v from "joi";
 import utils from "./utils";
 import * as crypto from "./utils/crypto";
+
+
 
 
 // Imort bentocache use as cache
@@ -21,6 +26,7 @@ export {
     define,
     app,
     useRest,
+    AppError,
     v,
     utils,
     cache,

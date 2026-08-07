@@ -1,4 +1,4 @@
-import { cleanDeep, clone, deepCopy, omit, pick,jwt } from './func';
+import { cleanDeep, clone, deepCopy, omit, pick, jwt, isSlug } from './func';
 const jose = jwt
 const utils = {
     password: Bun.password,
@@ -11,6 +11,7 @@ const utils = {
     omit,
     pick,
     jose,
+    isSlug,
 }
 
 

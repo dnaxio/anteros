@@ -1,6 +1,7 @@
 import { Rest } from "./lib/rest";
+import { cleanDeep } from "./utils";
 
-export { Rest };
+export { Rest, cleanDeep };
 export type {
     ApiAction,
     FileResult,
