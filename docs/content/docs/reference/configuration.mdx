@@ -41,7 +41,51 @@ await app.boot(config);
 | `server.jwt` | `object` | - | JWT configuration |
 | `server.ipRestriction` | `object` | - | IP restriction rules |
 | `server.body.maxSize` | `number` | `104857600` (100MB) | Maximum request body size in bytes |
-| `clusterMode` | `boolean` | `true` | Enable cluster mode |
+| `server.reusePort` | `boolean` | `false` | Bun's `SO_REUSEPORT` — allow multiple processes to bind the same port |
+
+## Health & Metrics
+
+The server exposes a built-in **`GET /health`** endpoint with live process metrics (zero dependency):
+
+```bash
+curl http://localhost:4000/health
+```
+
+```json
+{
+  "pid": 10047,
+  "startedAt": 1720000000000,
+  "uptime": 3600,
+  "env": "production",
+  "connections": 0,
+  "pendingRequests": 3,
+  "pendingWebSockets": 7,
+  "requests": {
+    "total": 1523,
+    "active": 3,
+    "errors": 2,
+    "byMethod": { "GET": 1200, "POST": 323 },
+    "byStatus": { "200": 1500, "201": 21, "500": 2 }
+  },
+  "memory": { "rss": 13778944, "heapUsed": 112384, "heapTotal": 521216, "external": 10624 },
+  "cpu": { "percent": 12.5, "cores": 8, "user": 120000, "system": 80000 }
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `uptime` | Seconds since process start |
+| `requests.total` | Total requests served |
+| `requests.active` | Requests currently in flight (= `pendingRequests`) |
+| `requests.errors` | Responses with status ≥ 500 |
+| `requests.byMethod` / `byStatus` | Request counters split by HTTP method / status |
+| `pendingRequests` | Requests currently in flight |
+| `pendingWebSockets` | Active WebSocket connections |
+| `memory` | RSS / heap usage in bytes |
+| `cpu.percent` | % of a single core over the last sample window |
+
+> `pendingRequests` high → possible DB saturation / slow queries.
+> `pendingWebSockets` climbing → possible socket leak.
 
 ## CORS Configuration
 
@@ -260,16 +304,31 @@ MongoDB connection is automatically injected by `syncTenants` at startup. See [T
 </Callout>
 
 
-## Cluster Mode
+## Reuse Port (cluster / multiple processes)
 
-By default, cluster mode is enabled, allowing the server to use multiple processes:
+Set `server.reusePort: true` to enable Bun's `SO_REUSEPORT`. The framework then acts as a **master** that spawns workers and aggregates their metrics:
 
 ```typescript
 const config = define.Server({
-  clusterMode: true, // default
-  server: { port: 4000 },
+  server: {
+    port: 4000,
+    reusePort: true,   // cluster mode
+    workers: 4,        // optional — default: CPU count
+    metricsPort: 4001, // optional — default: port + 1
+  },
   tenants: [...]
 });
 ```
 
-When enabled, you can run multiple server instances on the same port using `Bun.serve({ reusePort: true })`.
+### Behavior
+
+| Role | What it does |
+|------|-------------|
+| **Master** | Spawns N workers, aggregates metrics via **IPC**, restarts crashed workers, serves aggregated `/health` on `metricsPort` |
+| **Worker** | Serves the main port (`reusePort`), reports metrics to the master every 5s, exposes its own `/health` |
+
+```bash
+curl http://localhost:4001/health   # aggregated view of ALL workers
+```
+
+> ⚠️ Each worker is a separate process with its own memory — use **Redis** for shared cache / Socket.io state in cluster mode.

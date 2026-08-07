@@ -9,11 +9,15 @@ import type { FileCollection } from "./file";
 export type ServerConfig = {
     debug?: boolean;
     version?: string;
-    clusterMode?: boolean;
     server: {
         name?: string;
         port: number;
-        reusePort?: boolean;  // override Bun's reusePort (default: clusterMode && not dev)
+        /** Bun's SO_REUSEPORT — allows multiple processes to bind the same port. Spawn them yourself. */
+        reusePort?: boolean;
+        /** Number of worker processes when reusePort is on (default: CPU count) */
+        workers?: number;
+        /** Master supervision port exposing aggregated /health (default: port + 1) */
+        metricsPort?: number;
         body?: {
             maxSize?: number;
         };
@@ -35,7 +39,7 @@ export type ServerConfig = {
             enabled?: boolean;
             windowMs?: number;
             max?: number;
-            /** If true, uses Redis store (requires ioredis client available) */
+            /** If true, uses a Redis store (ioredis) for the rate limiter */
             useRedis?: boolean;
             /** Stricter limits for login endpoints */
             login?: {

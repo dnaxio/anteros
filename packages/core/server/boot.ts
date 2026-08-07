@@ -18,6 +18,9 @@ import { loadSockets } from '../lib/sockets'
 import { syncWorkflows } from '../lib/workflow'
 import { loadTenantsMiddlewares } from '../lib/middleware'
 import crypto from 'node:crypto';
+import os from 'node:os';
+import { registerMetrics, getMetrics, trackRequest } from './metrics';
+import { startMaster, aggregateMetrics } from './cluster';
 
 /** Check if a TCP port is already bound */
 async function isPortInUse(port: number): Promise<boolean> {
@@ -76,16 +79,51 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
 
         const PORT = (cfg.server.port || 4000);
         const NAME = cfg.server.name || process.env.APP_NAME || 'SERVER';
-        const useClusterMode = cfg.clusterMode || false;
-        const env = process.env.NODE_ENV || Bun.env.NODE_ENV || 'dev';
-        // reusePort: cluster mode ON by default, dev mode OFF to detect zombies
-        const reusePort = cfg.server.reusePort ?? (useClusterMode && env !== 'dev');
+        // Widened to `string`: TS narrows `process.env.NODE_ENV` to a literal union
+        // ('development' | 'production' | 'test') and drops the 'dev' fallback branch.
+        const env: string = process.env.NODE_ENV || Bun.env.NODE_ENV || 'dev';
+        // Bun's SO_REUSEPORT: multiple processes can bind the same port (spawn them yourself)
+        const reusePort = cfg.server.reusePort ?? false;
+        const isWorker = process.env.BUN_WORKER !== undefined;
 
-        // Detect zombie: check if port is already in use in dev mode
+        // ── MASTER (cluster): spawn workers, aggregate metrics, supervise ──
+        if (reusePort && !isWorker) {
+            const workersCount = cfg.server.workers ?? os.availableParallelism();
+            console.log(`[cluster] Master ${process.pid} spawning ${workersCount} workers…`.gray.bold);
+
+            const master = startMaster({
+                workers: workersCount,
+                argv: [process.execPath, ...process.argv.slice(1)],
+                env: { ...(process.env as Record<string, string>) },
+            });
+
+            // Supervision port: aggregated /health (master does NOT serve the main port)
+            const metricsPort = cfg.server.metricsPort ?? PORT + 1;
+            const metricsServer = Bun.serve({
+                port: metricsPort,
+                fetch: (req) => {
+                    if (new URL(req.url).pathname === '/health') {
+                        return Response.json({
+                            status: 'ok',
+                            master: { pid: process.pid },
+                            ...aggregateMetrics(master.metrics()),
+                        });
+                    }
+                    return new Response('Not found', { status: 404 });
+                },
+            });
+
+            console.log(`[cluster] Aggregated /health → http://localhost:${metricsPort}/health`.gray);
+
+            // Keep the master alive
+            return { master, metricsServer } as any;
+        }
+
+        // Detect zombie: check if port is already in use when NOT sharing the port
         if (!reusePort && env === 'dev') {
             const occupied = await isPortInUse(PORT);
             if (occupied) {
-                console.error(`\n⚠ Port ${PORT} is already in use. Possible zombie server.\n  → Kill it: lsof -ti :${PORT} | xargs kill -9\n  → Or set server.reusePort: true in config\n`.red.bold);
+                console.error(`\n⚠ Port ${PORT} is already in use. Possible zombie server.\n  → Kill it: lsof -ti :${PORT} | xargs kill -9\n`.red.bold);
                 process.exit(1);
             }
         }
@@ -95,25 +133,47 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
 
         const server = Bun.serve({
             port: PORT,
-            reusePort,
+            reusePort: reusePort || isWorker,
             fetch: (req, server) => {
                 const url = new URL(req.url);
 
-                if (url.pathname === "/socket.io/") {
-                    return engineIo.handleRequest(req, server);
-                } else {
-                    return app.fetch(req, server);
-                }
+                // Track every request for the built-in metrics (zero dependency)
+                const respond = (p: Response | Promise<Response>) =>
+                    Promise.resolve(p).then((res) => {
+                        trackRequest(req, res);
+                        return res;
+                    });
 
+                if (url.pathname === "/socket.io/") {
+                    return respond(engineIo.handleRequest(req, server));
+                }
+                return respond(app.fetch(req, server));
             },
             websocket: websocket,
             maxRequestBodySize: 1024 * 1024 * 100, // 100MB
         })
 
+        // Register server for built-in metrics (GET /health)
+        registerMetrics(server);
+
+        // ── WORKER (cluster): report metrics to the master via IPC ──
+        if (isWorker && typeof process.send === 'function') {
+            setInterval(() => {
+                try {
+                    process.send!({
+                        type: 'metrics',
+                        pid: process.pid,
+                        metrics: getMetrics(),
+                    });
+                } catch {}
+            }, 5000);
+        }
+
         let box = '';
-        box += `${NAME}`.gray.underline + ` (PID: ${process.pid})\n\n`
+        const role = isWorker ? 'worker' : (reusePort ? 'master' : 'standalone');
+        box += `${NAME}`.gray.underline + ` (PID: ${process.pid}) — ${role}\n\n`
         box += `Env: ${env || 'dev'}`.green.bold + '\n'
-        box += `Cluster mode: ${useClusterMode ? 'On'.green.bold : 'Off'.red.bold}\n`.gray.bold
+        box += `reusePort: ${(reusePort || isWorker) ? 'On'.green.bold : 'Off'.red.bold}\n`.gray.bold
         box += `Url: http://localhost:${PORT}`.gray.bold;
         box += '\n\n';
         box += `Last boot: 🔄 ${dayjs().format('YYYY-MM-DD HH:mm:ss')}`.gray;

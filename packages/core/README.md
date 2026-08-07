@@ -22,7 +22,6 @@ Typical entrypoint in your app (working directory = project root that contains t
 import { app, define } from "@anteros/core";
 
 await app.boot({
-  clusterMode: false,
   server: {
     port: 5000,
     jwt: {
@@ -57,6 +56,7 @@ On boot, the server syncs tenants, loads collections (`*.model.ts`), registers r
 | `app` | `{ boot }` — starts the application |
 | `useRest` | REST client / per-tenant Mongo access (programmatic use or in handlers) |
 | `v` | **Joi** (re-export), for schemas in models |
+| `cache` | Native caching: `useMemoryCache`, `useFilesystemCache`, `useRedisCache` (Bun.Redis) |
 | `utils` | Internal utilities exposed by the package |
 
 ## Folder layout (per tenant)
@@ -116,11 +116,96 @@ Per collection, `api.access` allows or denies each action (`boolean` or async fu
 
 When `api.auth.enabled` is set, define `onLogin` / `onLogout` on the model. The JWT secret is read from `server.jwt.secret` or the **`JWT_SECRET`** environment variable.
 
+## Health & metrics
+
+The server exposes a built-in **`GET /health`** endpoint (zero dependency) reporting live process metrics:
+
+```json
+{
+  "pid": 10047,
+  "startedAt": 1720000000000,
+  "uptime": 3600,
+  "env": "production",
+  "connections": 0,
+  "pendingRequests": 3,
+  "pendingWebSockets": 7,
+  "requests": {
+    "total": 1523,
+    "active": 3,
+    "errors": 2,
+    "byMethod": { "GET": 1200, "POST": 323 },
+    "byStatus": { "200": 1500, "201": 21, "500": 2 }
+  },
+  "memory": { "rss": 13778944, "heapUsed": 112384, "heapTotal": 521216, "external": 10624 },
+  "cpu": { "percent": 12.5, "cores": 8, "user": 120000, "system": 80000 }
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `pid` / `uptime` | Process id / seconds since boot |
+| `requests.total` / `requests.errors` | Total requests served / responses ≥ 500 |
+| `requests.byMethod` / `requests.byStatus` | Counters split by HTTP method / status |
+| `memory` | V8 heap + RSS usage (bytes) |
+| `pendingRequests` | Requests currently being processed |
+| `pendingWebSockets` | Active WebSocket connections |
+| `cpu.percent` | % of a single core over the last sample window |
+
+With `reusePort`, each process exposes its **own** metrics — useful to see per-worker load.
+
+## Cluster (reusePort + multiple processes)
+
+Set `server.reusePort: true` to enable Bun's `SO_REUSEPORT`. The framework then acts as a **master**:
+
+- Spawns N workers (`server.workers`, default = CPU count)
+- Each worker serves the main port (the OS round-robins connections)
+- Workers report metrics to the master **via IPC** every 5s
+- The master **restarts any worker that crashes** (auto-respawn)
+- The master exposes an **aggregated `/health`** on `server.metricsPort` (default: `port + 1`)
+
+```typescript
+await app.boot({
+  server: {
+    port: 5000,
+    reusePort: true,     // cluster mode
+    workers: 4,          // optional, default = CPU count
+    metricsPort: 5001,   // optional, default = port + 1
+  },
+  // ...
+});
+```
+
+```bash
+curl http://localhost:5001/health   # aggregated across all workers
+```
+
+```json
+{
+  "status": "ok",
+  "master": { "pid": 1000 },
+  "workers": 4,
+  "uptime": { "min": 12, "max": 15 },
+  "requests": {
+    "total": 1523,
+    "active": 11,
+    "errors": 2,
+    "perSecond": 101,
+    "byMethod": { "GET": 1200, "POST": 323 },
+    "byStatus": { "200": 1500, "201": 21, "500": 2 }
+  },
+  "memory": { "rss": 54067200, "heapUsed": 589294 },
+  "cpu": { "percent": 25.5, "cores": 8 },
+  "pids": [1001, 1002, 1003, 1004]
+}
+```
+
+> ⚠️ Each process has its own memory — use **Redis** for shared cache / Socket.io state.
+
 ## Server configuration
 
 Common options when calling `app.boot`:
 
-- `clusterMode` — Bun `reusePort` for multiple workers
+- `server.reusePort` — Bun `SO_REUSEPORT` (share the port across multiple processes)
 - `server.port`, `server.name`
 - `server.cors` — origins, credentials, headers, and methods
 - `server.ipRestriction` — allow/deny lists (Hono)

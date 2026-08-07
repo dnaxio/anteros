@@ -15,7 +15,6 @@ const cfg: Config = { // app Config
 
 function formatConfig(config: ServerConfig) { // format the config
 
-    cfg.clusterMode = config.clusterMode ?? true;
     cfg.server = {
         ...cfg.server,
         ...config.server,

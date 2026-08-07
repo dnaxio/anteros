@@ -351,7 +351,10 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
 
             // ── Execute action ──
             if (col.actions?.[action]) {
-                response = await col.actions[action]({ rest, data: body?.data, error: fn.error });
+                response = await col.actions[action]({
+                    rest, data: body?.data, error: fn.error,
+                    io, jwt: func.jwt, token: accessToken,
+                });
             } else {
                 const handler = crudHandlers[action];
                 if (!handler) throw new AppError('Action `' + action + '` not found', { status: 400, code: 'ACTION_NOT_FOUND' });

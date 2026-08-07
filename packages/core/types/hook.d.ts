@@ -1,7 +1,8 @@
 import type { MongoRest } from "../database/mongodbadapter";
 import type { Server as SocketIO } from "socket.io";
 import type { ActionsApiList } from "./api";
-type metaHook = {
+
+export type HookMeta = {
     action: ActionsApiList;
     collection: string;
     data?: any;
@@ -14,17 +15,19 @@ type metaHook = {
     pipeline?: any[];
     options?: any;
 }
+
+/** Context passed to a collection hook (`define.Hook`). */
+export type HookContext = {
+    rest: MongoRest;
+    action: ActionsApiList;
+    meta: HookMeta;
+    io: SocketIO;
+};
+
+/** A collection hook — `define.Hook(fn)`, used as beforeOperation/afterOperation. */
+export type CollectionHook = (ctx: HookContext) => Promise<void>;
+
 export type HooksCollection = {
-    beforeOperation?: (ctx: {
-        rest: MongoRest;
-        action: ActionsApiList;
-        meta: metaHook;
-        io: SocketIO;
-    }) => Promise<void>;
-    afterOperation?: (ctx: {
-        rest: MongoRest;
-        action: ActionsApiList;
-        meta: metaHook;
-        io: SocketIO;
-    }) => Promise<void>;
+    beforeOperation?: CollectionHook;
+    afterOperation?: CollectionHook;
 }

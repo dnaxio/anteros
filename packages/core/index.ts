@@ -11,7 +11,7 @@ import * as crypto from "./utils/crypto";
 
 
 
-// Imort bentocache use as cache
+// BentoCache-based caching (memory L1 + filesystem/Redis L2)
 import { useMemoryCache, useFilesystemCache, useRedisCache } from "./utils/cache";
 const cache = {
     useMemoryCache,

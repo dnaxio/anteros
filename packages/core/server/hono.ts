@@ -13,6 +13,7 @@ import { initializeApi } from "./api";
 import { getGlobalMiddlewares } from "../lib/middleware";
 import { jwt } from "../utils/func";
 import { AppError } from "../lib/error";
+import { getMetrics } from "./metrics";
 import type { HonoVariables } from "./env";
 
 const app = new Hono<{ Variables: HonoVariables }>();
@@ -87,6 +88,11 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
     app.use(bodyLimit({
         maxSize: cfg.server.body?.maxSize ?? 1024 * 1024 * 100, // 100MB
     }));
+
+    // ── Health & metrics (built-in, zero dependency) ──
+    app.get('/health', (c) => {
+        return c.json(getMetrics());
+    });
 
 
 

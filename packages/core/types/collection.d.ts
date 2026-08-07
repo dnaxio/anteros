@@ -7,6 +7,25 @@ import type { Context } from "hono";
 import type { useRest } from "../database/rest";
 import type { jwt } from "../utils/func";
 import type { ActionsApiList, ApiAccess, ApiActions } from "./api";
+import type { Server as SocketIO } from "socket.io";
+
+/** Context passed to a collection custom action (`define.Action`). */
+export type CollectionActionContext = {
+    rest: InstanceType<typeof useRest>;
+    data: any;
+    error: typeof fn.error;
+    io: SocketIO;
+    jwt: typeof jwt;
+    token: {
+        value: string | null;
+        decoded: Record<string, unknown> | null;
+        provided: boolean;
+        expired: boolean;
+    };
+};
+
+/** A custom action on a collection — `define.Action(fn)`. */
+export type CollectionAction = (ctx: CollectionActionContext) => Promise<any>;
 export type Collection = {
     type?: "document" | "file";
     slug: string;
@@ -58,11 +77,7 @@ export type Collection = {
         readOnlyFields?: (string | RegExp)[];
     };
     actions?: {
-        [key: string]: (ctx: {
-            rest: InstanceType<typeof useRest>;
-            data: any;
-            error: typeof fn.error;
-        }) => Promise<any>;
+        [key: string]: CollectionAction;
     };
     /**
      * The tenant id of the collection

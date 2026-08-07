@@ -2,6 +2,7 @@ import { getFileCollection } from "../database/file";
 import { useRest } from "../database/rest";
 import { cfg } from "../server/config";
 import { AppError } from "./error";
+import { S3Client } from "bun";
 import type { FileCollection } from "../types/file";
 import path from "path";
 import fs from "fs/promises";
@@ -84,6 +85,14 @@ export type S3Config = {
 };
 
 export function createS3Storage(config: S3Config): FileStorage {
+  const client = new S3Client({
+    region: config.region,
+    bucket: config.bucket,
+    accessKeyId: config.accessKeyId,
+    secretAccessKey: config.secretAccessKey,
+    ...(config.endpoint ? { endpoint: config.endpoint } : {}),
+  });
+
   return {
     async save(tenant_id, collection, file, meta) {
       const { subpath } = meta;
@@ -91,42 +100,21 @@ export function createS3Storage(config: S3Config): FileStorage {
       const filename = `${meta.id}${ext}`;
       const key = subpath ? `${subpath}/${filename}` : `${tenant_id}/${collection}/${filename}`;
       const buffer = await file.arrayBuffer();
-      // S3 upload via fetch (AWS S3 REST API)
-      const url = config.endpoint
-        ? `${config.endpoint}/${config.bucket}/${key}`
-        : `https://${config.bucket}.s3.${config.region}.amazonaws.com/${key}`;
-      const response = await fetch(url, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': meta.mimetype,
-          'Content-Length': String(buffer.byteLength),
-        },
-        body: buffer,
-      });
-      if (!response.ok) {
-        throw new AppError(`S3 upload failed: ${response.statusText}`, {
-          code: 'S3_UPLOAD_ERROR', status: 500,
-        });
-      }
+      // Native Bun S3 client (handles multipart, retries, signing)
+      await client.write(key, buffer, { type: meta.mimetype });
       return { path: key, size: buffer.byteLength };
     },
 
     async getStream(tenant_id, collection, fileId, filename, subpath) {
       const key = subpath ? `${subpath}/${filename}` : `${tenant_id}/${collection}/${filename}`;
-      const url = config.endpoint
-        ? `${config.endpoint}/${config.bucket}/${key}`
-        : `https://${config.bucket}.s3.${config.region}.amazonaws.com/${key}`;
-      const response = await fetch(url);
-      if (!response.ok) return null;
-      return response.body;
+      const s3file = client.file(key);
+      if (!(await s3file.exists())) return null;
+      return s3file.stream();
     },
 
     async delete(tenant_id, collection, fileId, filename, subpath) {
       const key = subpath ? `${subpath}/${filename}` : `${tenant_id}/${collection}/${filename}`;
-      const url = config.endpoint
-        ? `${config.endpoint}/${config.bucket}/${key}`
-        : `https://${config.bucket}.s3.${config.region}.amazonaws.com/${key}`;
-      await fetch(url, { method: 'DELETE' });
+      await client.delete(key).catch(() => {});
     },
   };
 }

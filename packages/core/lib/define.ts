@@ -1,5 +1,6 @@
 import type { ServerConfig } from "../types/config";
-import type { Collection } from "../types/collection";
+import type { Collection, CollectionAction } from "../types/collection";
+import type { CollectionHook } from "../types/hook";
 import type { FileCollection } from "../types/file";
 import type { Script } from "../types/scripts";
 import type { Route } from "../types/route";
@@ -8,7 +9,6 @@ import type { WebSocketHandler } from "../types/websocket";
 import type { TenantMiddlewareConfig, GlobalMiddlewareConfig } from "../types/middleware";
 import { file } from "bun";
 function Server(config: ServerConfig) {
-    config.clusterMode = config?.clusterMode ?? true;
     config.server = {
         ...config?.server,
     }
@@ -30,6 +30,42 @@ function Collection(collection: Collection): Collection {
         _isCollection_: true,
 
     }
+}
+
+/**
+ * Defines a custom action on a collection — usable in `define.Collection({ actions: { ... } })`.
+ *
+ * @example
+ * ```ts
+ * const processOrder = define.Action(async ({ rest, data, error }) => {
+ *   const order = await rest.findOne("orders", data.orderId);
+ *   if (!order) throw error("Order not found", { status: 404 });
+ *   return { ok: true };
+ * });
+ *
+ * define.Collection({ slug: "orders", actions: { processOrder } })
+ * ```
+ */
+function Action(action: CollectionAction): CollectionAction & { _isAction_: true } {
+    return Object.assign(action, { _isAction_: true }) as CollectionAction & { _isAction_: true };
+}
+
+/**
+ * Defines a collection hook — usable as `beforeOperation` / `afterOperation`.
+ *
+ * @example
+ * ```ts
+ * const softDelete = define.Hook(async ({ rest, action, meta }) => {
+ *   if (action === 'deleteOne' && meta.id) {
+ *     await rest.updateOne("items", meta.id, { $set: { deletedAt: new Date().toISOString() } });
+ *   }
+ * });
+ *
+ * define.Collection({ slug: "items", hooks: { beforeOperation: softDelete } })
+ * ```
+ */
+function Hook(hook: CollectionHook): CollectionHook & { _isHook_: true } {
+    return Object.assign(hook, { _isHook_: true }) as CollectionHook & { _isHook_: true };
 }
 
 function FileCollection(collection: FileCollection): FileCollection {
@@ -103,6 +139,8 @@ export const define = {
     Server: Server,
     App: Server,
     Collection,
+    Action,
+    Hook,
     FileCollection,
     Script,
     Route,
