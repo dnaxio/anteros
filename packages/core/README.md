@@ -1,4 +1,4 @@
-# @dnax/core
+# @anteros/core
 
 Server core for **multi-tenant** apps: generic **MongoDB** REST API, **Joi** validation, hooks, JWT auth, custom routes, and boot scripts. Built for **Bun** with **Hono** and **Socket.io**.
 
@@ -11,7 +11,7 @@ Server core for **multi-tenant** apps: generic **MongoDB** REST API, **Joi** val
 ## Installation
 
 ```bash
-bun add @dnax/core@0.0.0-rc.13
+bun add @anteros/core@latest
 ```
 
 ## Quick start
@@ -19,7 +19,7 @@ bun add @dnax/core@0.0.0-rc.13
 Typical entrypoint in your app (working directory = project root that contains tenant folders):
 
 ```ts
-import { app, define } from "@dnax/core";
+import { app, define } from "@anteros/core";
 
 await app.boot({
   clusterMode: false,
