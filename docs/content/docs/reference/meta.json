@@ -18,6 +18,7 @@
     "workflows",
     "routes",
     "scripts",
+    "mcp",
     "caches",
     "audit",
     "utils",

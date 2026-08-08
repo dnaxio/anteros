@@ -148,6 +148,9 @@ class MongoRest {
             }
 
         }
+
+        // No schema or nothing to sanitize → pass the raw data through
+        return options.data;
     }
 
     async #logActivity(data: {

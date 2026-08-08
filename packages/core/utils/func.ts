@@ -19,15 +19,16 @@ const jwt = {
         audience?: string | string[];
         subject?: string;
     }) => {
-        let SECRET_ = cfg.server.jwt?.secret || Bun.env.JWT_SECRET
+        const SECRET_ = cfg.server.jwt?.secret || Bun.env.JWT_SECRET
         if (!SECRET_) throw new Error('JWT_SECRET is not set');
-        let EXPIRES_IN = cfg.server.jwt?.expiresIn || '1h'
+        // Per-call expiresIn wins over the global config (default: 7d)
+        const EXPIRES_IN = options?.expiresIn || cfg.server.jwt?.expiresIn || '7d'
 
         const secret = new TextEncoder().encode(SECRET_);
         const signer = new Jose.SignJWT(payload)
             .setProtectedHeader({ alg: 'HS256' })
             .setIssuedAt()
-            .setExpirationTime(EXPIRES_IN || '1h')
+            .setExpirationTime(EXPIRES_IN)
 
         if (options?.issuer) signer.setIssuer(options.issuer)
         if (options?.audience) signer.setAudience(options.audience)
@@ -301,7 +302,14 @@ function isEpochNumber(value: number): boolean {
 }
 
 function deepCopy<T>(value: T): T {
-    return clone(value);
+    // structuredClone preserves Date / RegExp / Map / Set / typed arrays
+    // (clone() uses toJson, which JSON-serializes and loses those types).
+    // Falls back to clone() for values structuredClone cannot handle.
+    try {
+        return structuredClone(value);
+    } catch {
+        return clone(value);
+    }
 }
 
 type FormatToDateResult<T> = T extends string

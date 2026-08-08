@@ -1,7 +1,7 @@
 {
   "name": "@anteros/core",
   "module": "index.ts",
-  "version": "0.0.20",
+  "version": "0.0.21",
   "type": "module",
   "description": "Anteros Core",
   "private": false,
@@ -17,6 +17,8 @@
   },
   "dependencies": {
     "@colors/colors": "1.6.0",
+    "@hono/mcp": "^0.3.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@socket.io/bun-engine": "0.1.1",
     "bentocache": "1.6.1",
     "boxen": "^8.0.1",
@@ -27,6 +29,7 @@
     "jose": "6.2.8",
     "mongodb": "7.5.0",
     "socket.io": "4.8.3",
-    "ufo": "1.6.4"
+    "ufo": "1.6.4",
+    "zod": "^4.4.3"
   }
 }

@@ -1,0 +1,299 @@
+---
+title: MCP Tools
+description: Expose tenant tools to LLM clients via the Model Context Protocol.
+icon: Bot
+---
+
+
+MCP (Model Context Protocol) lets you expose tools to LLM clients — Claude, Cursor, VS Code, and any MCP-compatible agent — so they can call your tenant's APIs directly.
+
+Anteros serves each tenant's tools and resources over **Streamable HTTP** at:
+
+```
+GET/POST /mcp/:tenant_id
+```
+
+## How It Works
+
+When the server boots, Anteros discovers and registers MCP content from each tenant's `mcp/` folder:
+
+```
+v1/mcp/
+├── tools/                 # *‌*.tool.ts — actions the LLM can call
+│   └── get_user.tool.ts
+└── resources/             # *‌*.resource.ts — read-only data exposed by URI
+    └── users.id.resource.ts
+```
+
+- **Tools** (`**/*.tool.ts`) — executable actions (write, compute…), declared with `define.McpTool`
+- **Resources** (`**/*.resource.ts`) — read-only data addressed by URI (like a file the LLM can open), declared with `define.McpResource`
+
+Both are served through the standard MCP protocol (`tools/list`, `tools/call`, `resources/list`, `resources/read`) using the [`@hono/mcp`](https://honohub.dev/docs/hono-mcp) transport.
+
+## Directory Structure
+
+Place your MCP files inside `{tenant.dir}/mcp/`:
+
+```
+v1/
+├── collections/
+│   └── users.model.ts
+└── mcp/
+    ├── tools/
+    │   ├── get_user.tool.ts
+    │   └── orders/
+    │       └── get_order.tool.ts
+    └── resources/
+        ├── orders.summary.resource.ts
+        └── users.id.resource.ts
+```
+
+<Callout type="info">
+Files are discovered recursively: `**/*.tool.ts` under `mcp/tools/` and `**/*.resource.ts` under `mcp/resources/`.
+</Callout>
+
+## Define a Tool
+
+Use `define.McpTool()` — the argument schema uses **`v` (Joi)**, the same schema language as collections:
+
+```typescript
+import { define, v } from '@anteros/core';
+
+export default define.McpTool({
+  name: 'get_user',
+  description: 'Fetch a user by id',
+  inputSchema: v.object({
+    id: v.string().required().description('User id'),
+    include: v.string().valid('profile', 'orders').default('profile'),
+  }),
+  exec: async ({ rest, args }) => {
+    const user = await rest.findOne('users', args.id);
+    return user ?? { error: 'User not found' };
+  },
+});
+```
+
+The file **must** use `export default` and end with `.tool.ts`.
+
+## Tool Context
+
+The `exec` function receives:
+
+```typescript
+{
+  c: Context;                          // Hono context
+  rest: useRest;                       // Rest instance scoped to the tenant
+  args: Record<string, any>;           // Joi-validated arguments (defaults applied)
+}
+```
+
+The `rest` instance is automatically configured for the owning tenant, so you can immediately perform database operations.
+
+## Validation
+
+Arguments are validated with **Joi** before `exec` runs:
+
+- Invalid arguments → MCP error `isError: true` with the Joi message
+- Joi **defaults are applied** (`default(...)`) before `exec`
+- `allowUnknown: false` — unknown keys are rejected
+- The Joi schema is converted to **JSON Schema** for the protocol (`tools/list`)
+
+## Resources (`define.McpResource`)
+
+Read-only data exposed by **URI** — the LLM opens a resource like a file (no side effects). Useful to ground answers with real data (`orders://summary`, `users://{id}`).
+
+```typescript
+import { define } from '@anteros/core';
+
+// Static resource — fixed URI
+export default define.McpResource({
+  name: 'orders-summary',
+  description: 'Summary of orders',
+  uri: 'orders://summary',
+  mimeType: 'application/json',
+  read: async ({ rest }) => {
+    return {
+      contents: [{
+        uri: 'orders://summary',
+        mimeType: 'application/json',
+        text: JSON.stringify(await rest.find('orders', { $limit: 5 })),
+      }],
+    };
+  },
+});
+```
+
+### Template resources (dynamic URIs)
+
+Use `{param}` placeholders — params are extracted from the requested URI and passed to `read`:
+
+```typescript
+// users://{id} — reading users://abc123 calls read with params = { id: 'abc123' }
+export default define.McpResource({
+  name: 'users-by-id',
+  description: 'Fetch a user by id',
+  uri: 'users://{id}',
+  read: async ({ rest, params }) => {
+    const user = await rest.findOne('users', params.id);
+    return { contents: [{ uri: `users://${params.id}`, text: JSON.stringify(user ?? { error: 'Not found' }) }] };
+  },
+});
+```
+
+### Resource Context
+
+```typescript
+{
+  c: Context;                          // Hono context
+  rest: useRest;                       // Rest instance scoped to the tenant
+  params: Record<string, string>;      // URI template params ({ id } → { id: 'abc123' })
+  uri: string;                         // the exact URI the client requested
+}
+```
+
+### Resource Result
+
+`read` returns the MCP `ReadResourceResult` shape — `contents` is an array of text or blob (base64) blocks:
+
+```typescript
+{
+  contents: [
+    { uri: 'orders://summary', mimeType: 'application/json', text: '{ ... }' },
+    // { uri: 'files://logo.png', mimeType: 'image/png', blob: '<base64>' },
+  ],
+}
+```
+
+Static resources are listed by `resources/list`; template resources by `resources/templates/list`. Reading an unknown URI returns an MCP error.
+
+## Result Format
+
+`exec` must return the **MCP protocol result shape** — the same `{ content: [...] }` structure the MCP server uses (text, image, audio, resource blocks):
+
+```typescript
+exec: async ({ args }) => {
+  return {
+    content: [
+      { type: 'text', text: 'Saved!' },
+      // { type: 'image', data: '<base64>', mimeType: 'image/png' },
+      // { type: 'audio', data: '<base64>', mimeType: 'audio/wav' },
+      // { type: 'resource', resource: { uri, mimeType, text } },
+    ],
+    // isError: true,          // optional — mark the call as failed
+    // structuredContent: { … } // optional — machine-readable result
+  };
+};
+```
+
+- **Text block**: `{ type: 'text', text: string }`
+- **Image block**: `{ type: 'image', data: string /* base64 */, mimeType: string }`
+- **Audio block**: `{ type: 'audio', data: string /* base64 */, mimeType: string }`
+- **Resource block**: `{ type: 'resource', resource: { uri, mimeType, text } }`
+- `isError: true` marks the call as failed
+- Blocks are passed through **as-is** to the MCP client (no JSON wrapping)
+
+<Callout type="info">
+Plain values (string / object) are still accepted for backward compatibility and are auto-wrapped into a text block — but prefer returning the protocol shape for full control (multi-block, images, structured content).
+</Callout>
+
+## Enable / Disable
+
+```typescript
+export default define.McpTool({
+  enabled: false, // This tool is not registered
+  // ...
+});
+```
+
+## Connecting a Client
+
+Configure your MCP client (Claude Desktop, Cursor, VS Code…) with the tenant URL:
+
+```json
+{
+  "mcpServers": {
+    "anteros": {
+      "url": "http://localhost:4000/mcp/v1"
+    }
+  }
+}
+```
+
+The endpoint uses the **Streamable HTTP** transport (responses are framed as Server-Sent Events, which MCP clients handle natively).
+
+## Examples
+
+### Read from a collection
+
+```typescript
+import { define, v } from '@anteros/core';
+
+export default define.McpTool({
+  name: 'list_orders',
+  description: 'List recent orders, optionally filtered by status',
+  inputSchema: v.object({
+    status: v.string().valid('pending', 'paid', 'shipped').optional(),
+    limit: v.number().integer().min(1).max(100).default(20),
+  }),
+  exec: async ({ rest, args }) => {
+    const match = args.status ? { status: args.status } : {};
+    return rest.find('orders', {
+      $match: match,
+      $sort: { createdAt: -1 },
+      $limit: args.limit,
+    });
+  },
+});
+```
+
+### Write to a collection
+
+```typescript
+import { define, v } from '@anteros/core';
+
+export default define.McpTool({
+  name: 'create_note',
+  description: 'Create a note for a user',
+  inputSchema: v.object({
+    userId: v.string().required(),
+    content: v.string().required().min(1).max(5000),
+  }),
+  exec: async ({ rest, args }) => {
+    return rest.insertOne('notes', {
+      userId: args.userId,
+      content: args.content,
+    });
+  },
+});
+```
+
+## Multi-Tenant
+
+Tools are scoped per tenant — each tenant's `mcp/` directory is scanned independently, and each has its own URL:
+
+```
+v1/mcp/get_user.tool.ts     → http://localhost:4000/mcp/v1
+v2/mcp/get_user.tool.ts     → http://localhost:4000/mcp/v2
+```
+
+## Summary
+
+| Property | Description |
+|----------|-------------|
+| `name` | `string` — tool name, unique per tenant (how the LLM calls it) |
+| `description` | `string` — shown to the LLM to decide when to call the tool |
+| `enabled` | `boolean` — whether the tool is registered (default `true`) |
+| `inputSchema` | `Joi.Schema` (`v`) — argument schema, converted to JSON Schema |
+| `exec` | `(ctx) => McpToolResult` — the handler (`ctx: { c, rest, args }`) |
+| Endpoint | `GET/POST /mcp/:tenant_id` (Streamable HTTP) |
+| File pattern | `**/*.tool.ts` inside `{tenant.dir}/mcp/tools/` |
+
+## Resources Summary
+
+| Property | Description |
+|----------|-------------|
+| `name` | `string` — resource name, unique per tenant |
+| `uri` | `string` — static (`orders://summary`) or template (`users://{id}`) URI |
+| `mimeType` | `string` — content type (default `application/json`) |
+| `read` | `(ctx) => McpResourceResult` — the handler (`ctx: { c, rest, params, uri }`) |
+| File pattern | `**/*.resource.ts` inside `{tenant.dir}/mcp/resources/` |

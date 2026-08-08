@@ -74,6 +74,7 @@ export default define.TenantMiddleware({
 
 ```
 Request
+  ├── Client IP resolution (socket / trusted proxy)   ← resolved once, shared by all middlewares
   ├── CORS, compress, IP restriction, security headers
   ├── Body limit
   ├── Rate limiting

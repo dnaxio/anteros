@@ -2,6 +2,20 @@ const IV_LENGTH = 12;
 const TAG_LENGTH = 16;
 const RSA_KEY_SIZE = 256;
 
+/**
+ * Build AES-GCM parameters with optional Additional Authenticated Data.
+ * AAD binds the ciphertext to its context (field/record/tenant) so a valid
+ * ciphertext cannot be swapped into another context (substitution attack).
+ */
+function gcmParams(iv: Uint8Array, aad?: string) {
+    return {
+        name: "AES-GCM" as const,
+        iv,
+        tagLength: TAG_LENGTH * 8,
+        ...(aad ? { additionalData: new TextEncoder().encode(aad) } : {}),
+    };
+}
+
 interface JsonWebKey {
     kty?: string;
     alg?: string;
@@ -43,12 +57,12 @@ class CryptSym {
         return this.#key;
     }
 
-    async encrypt(data: string | object): Promise<string> {
+    async encrypt(data: string | object, aad?: string): Promise<string> {
         const text = typeof data === "object" ? JSON.stringify(data) : data;
         const key = await this.#getKey();
         const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
         const encrypted = await crypto.subtle.encrypt(
-            { name: "AES-GCM", iv, tagLength: TAG_LENGTH * 8 },
+            gcmParams(iv, aad),
             key,
             new TextEncoder().encode(text)
         );
@@ -58,14 +72,17 @@ class CryptSym {
         return Buffer.from(buffer).toString("base64");
     }
 
-    async decrypt<T = string>(cipher: string, parseJson?: boolean): Promise<T> {
+    async decrypt<T = string>(cipher: string, parseJson?: boolean, aad?: string): Promise<T> {
         try {
             const buffer = new Uint8Array(Buffer.from(cipher, "base64"));
+            if (buffer.length < IV_LENGTH + TAG_LENGTH) {
+                throw new Error("ciphertext too short");
+            }
             const iv = buffer.slice(0, IV_LENGTH);
             const data = buffer.slice(IV_LENGTH);
             const key = await this.#getKey();
             const decrypted = await crypto.subtle.decrypt(
-                { name: "AES-GCM", iv, tagLength: TAG_LENGTH * 8 },
+                gcmParams(iv, aad),
                 key,
                 data
             );
@@ -131,7 +148,7 @@ class CryptAsym {
         return this.#keyPair;
     }
 
-    async encrypt(data: string | object, publicKey?: CryptoKey): Promise<string> {
+    async encrypt(data: string | object, publicKey?: CryptoKey, aad?: string): Promise<string> {
         const text = typeof data === "object" ? JSON.stringify(data) : data;
         const rsaKey = publicKey ?? (await this.#getKeyPair()).publicKey;
 
@@ -143,7 +160,7 @@ class CryptAsym {
 
         const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
         const encrypted = await crypto.subtle.encrypt(
-            { name: "AES-GCM", iv, tagLength: TAG_LENGTH * 8 },
+            gcmParams(iv, aad),
             aesKey,
             new TextEncoder().encode(text)
         );
@@ -162,7 +179,7 @@ class CryptAsym {
         return Buffer.from(result).toString("base64");
     }
 
-    async decrypt<T = string>(cipher: string, parseJson?: boolean): Promise<T> {
+    async decrypt<T = string>(cipher: string, parseJson?: boolean, aad?: string): Promise<T> {
         try {
             const buffer = new Uint8Array(Buffer.from(cipher, "base64"));
             if (buffer.length < RSA_KEY_SIZE + IV_LENGTH + TAG_LENGTH) {
@@ -189,7 +206,7 @@ class CryptAsym {
             );
 
             const decrypted = await crypto.subtle.decrypt(
-                { name: "AES-GCM", iv, tagLength: TAG_LENGTH * 8 },
+                gcmParams(iv, aad),
                 aesKey,
                 ciphertext
             );

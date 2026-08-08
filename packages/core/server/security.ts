@@ -1,5 +1,6 @@
 import type { Context } from "hono";
 import { getConnInfo } from "hono/bun";
+import type { ConnInfo } from "hono/conninfo";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -96,15 +97,18 @@ export function createRedisStore(redis: RedisClient): RateLimitStore {
 // ─── Default key generator ───────────────────────────────────────────────────
 
 function defaultKeyGenerator(c: Context): string {
-  const connInfo = getConnInfo(c);
-  const ip =
-    connInfo.remote.address ??
-    c.req.header("CF-Connecting-IP") ??
-    c.req.header("True-Client-IP") ??
-    c.req.header("X-Forwarded-For") ??
-    "unknown";
+  // Prefer the client IP resolved once by the app middleware (trustProxy-aware).
+  const clientIp = (c as any).get('clientIp') as string | undefined;
+  if (clientIp) return `rn:rl:${clientIp}`;
 
-  return `rn:rl:${ip}`;
+  // Fallback: real socket address only (no spoofable proxy headers)
+  let connInfo: ConnInfo | null = null;
+  try {
+    connInfo = getConnInfo(c);
+  } catch {
+    // getConnInfo throws outside a real Bun.serve (e.g. unit tests)
+  }
+  return `rn:rl:${connInfo?.remote.address ?? 'unknown'}`;
 }
 
 // ─── Middleware ──────────────────────────────────────────────────────────────

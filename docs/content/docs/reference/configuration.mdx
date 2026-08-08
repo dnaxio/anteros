@@ -42,6 +42,7 @@ await app.boot(config);
 | `server.ipRestriction` | `object` | - | IP restriction rules |
 | `server.body.maxSize` | `number` | `104857600` (100MB) | Maximum request body size in bytes |
 | `server.reusePort` | `boolean` | `false` | Bun's `SO_REUSEPORT` — allow multiple processes to bind the same port |
+| `server.trustProxy` | `boolean` | `false` | Trust proxy headers (`CF-Connecting-IP` / `X-Forwarded-For`) as the client IP |
 
 ## Health & Metrics
 
@@ -58,6 +59,7 @@ curl http://localhost:4000/health
   "uptime": 3600,
   "env": "production",
   "connections": 0,
+  "ip": "203.0.113.7",
   "pendingRequests": 3,
   "pendingWebSockets": 7,
   "requests": {
@@ -81,6 +83,7 @@ curl http://localhost:4000/health
 | `requests.byMethod` / `byStatus` | Request counters split by HTTP method / status |
 | `pendingRequests` | Requests currently in flight |
 | `pendingWebSockets` | Active WebSocket connections |
+| `ip` | Client IP of the caller (real socket, or trusted proxy header with `trustProxy`) |
 | `memory` | RSS / heap usage in bytes |
 | `cpu.percent` | % of a single core over the last sample window |
 
@@ -211,6 +214,30 @@ ipRestriction: {
 }
 ```
 
+### Client IP Resolution & Trust Proxy
+
+The client IP used for `ipRestriction`, rate limiting, audit logs and `/health` is resolved **once per request** from the real socket address (`server.requestIP()`). By default, proxy headers are **ignored** — a client cannot spoof its IP by sending `X-Forwarded-For`.
+
+If your server sits behind a reverse proxy / CDN (nginx, Cloudflare, …), enable `trustProxy` to use the proxy headers instead:
+
+```typescript
+const config = define.Server({
+  server: {
+    port: 4000,
+    trustProxy: true,   // trust CF-Connecting-IP / X-Forwarded-For
+  },
+  tenants: [...],
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `server.trustProxy` | `boolean` | `false` | When `true`, uses `CF-Connecting-IP` then `X-Forwarded-For` as the client IP, falling back to the socket address |
+
+<Callout type="warn">
+Keep `trustProxy` **disabled** unless your server is really behind a trusted proxy — otherwise clients can spoof their IP and bypass IP restriction / rate limiting.
+</Callout>
+
 ## Rate Limiting
 
 Protect your API against brute-force attacks and excessive usage with configurable rate limiting. Uses the built-in middleware from `@anteros/core`.
@@ -223,6 +250,10 @@ const config = define.Server({
       enabled: true,
       windowMs: 60_000,      // 1 minute window
       max: 100,               // 100 requests per window
+      redis: {                // optional — Redis is detected automatically when present
+        host: 'cache.internal',   // env fallbacks: REDIS_URL / REDIS_HOST / REDIS_PORT / REDIS_PASSWORD
+        port: 6379,
+      },
       login: {
         windowMs: 60_000,
         max: 10,              // 10 login attempts per minute
@@ -238,11 +269,16 @@ const config = define.Server({
 | `rateLimit.enabled` | `boolean` | `true` | Enable or disable rate limiting globally |
 | `rateLimit.windowMs` | `number` | `60000` (1 min) | Time window in milliseconds |
 | `rateLimit.max` | `number` | `100` | Maximum requests per window across all routes |
+| `rateLimit.useRedis` | `boolean` | auto | Override: `false` = force in-memory, `true` = force Redis. Unset = **auto** (Redis if `redis` block or `REDIS_*` env vars present) |
+| `rateLimit.redis.url` | `string` | - | `redis://` connection string (takes precedence over host/port) |
+| `rateLimit.redis.host` | `string` | `localhost` | Redis host |
+| `rateLimit.redis.port` | `number` | `6379` | Redis port |
+| `rateLimit.redis.password` | `string` | - | Redis password |
 | `rateLimit.login.windowMs` | `number` | `60000` (1 min) | Time window for login endpoints |
 | `rateLimit.login.max` | `number` | `10` | Maximum login attempts per window |
 
 <Callout type="info">
-Rate limiting uses an in-memory store by default. For production deployments with multiple server instances, configure a [Redis store](/docs/reference/caches) to share rate limit counters across processes.
+Rate limiting uses an **in-memory store** by default. As soon as Redis connection info is provided (`rateLimit.redis` or `REDIS_URL` / `REDIS_HOST` env vars), the limiter **automatically switches to Redis** to share counters across processes — no `useRedis` flag needed. If Redis becomes unavailable, it falls back to the in-memory store until it recovers.
 </Callout>
 
 ### Login Endpoint Protection

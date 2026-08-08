@@ -16,6 +16,9 @@ Below is a **recommended** repository layout. This guide uses **`v1/`** as the t
 │   ├── collections/        # Collection models (`*.model.ts`)
 │   ├── files/              # File collection models (`*.file.ts`)
 │   ├── middlewares/        # Tenant-scoped middlewares (`*.middleware.ts`)
+│   ├── mcp/                # MCP tools & resources — served at `/mcp/:tenant_id`
+│   │   ├── tools/          #   MCP tools (`*.tool.ts`)
+│   │   └── resources/      #   MCP resources (`*.resource.ts`)
 │   ├── routes/             # Anteros routes (`*.route.ts`)
 │   ├── scripts/            # Anteros boot scripts (`*.run.ts`)
 │   ├── services/           # Anteros services (`*.service.ts`)
@@ -42,6 +45,8 @@ Below is a **recommended** repository layout. This guide uses **`v1/`** as the t
 | `scripts/` | `**/*.run.ts` | Runs shortly after the server is ready |
 | `services/` | `**/*.service.ts` | Exposed under `POST /services/:tenant_id/:service/:action` |
 | `sockets/` | `**/*.ws.ts` | WebSocket handlers — exec called per connection |
+| `mcp/tools/` | `**/*.tool.ts` | MCP tools — exposed at `GET/POST /mcp/:tenant_id` |
+| `mcp/resources/` | `**/*.resource.ts` | MCP resources (read-only URIs) — same endpoint |
 | `middlewares/` | `**/*.middleware.ts` | Tenant-scoped middlewares — runs only for this tenant |
 | `workflows/` | `**/*.workflow.ts` | Workflow definitions |
 
@@ -65,3 +70,4 @@ Below is a **recommended** repository layout. This guide uses **`v1/`** as the t
 - [Routes](/docs/reference/routes) — `*.route.ts` and prefix
 - [Scripts](/docs/reference/scripts) — `*.run.ts`
 - [Services](/docs/reference/services) — `*.service.ts`
+- [MCP Tools](/docs/reference/mcp) — `*.tool.ts` / `*.resource.ts` and the `/mcp/:tenant_id` endpoint

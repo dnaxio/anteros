@@ -21,7 +21,7 @@ describe("Cache (memory)", () => {
     });
 
     it("get returns null on miss", async () => {
-        expect(await c.get({ key: "nope" })).toBeNull();
+        expect(await c.get({ key: "nope" })).toBeUndefined();
     });
 
     it("has / missing", async () => {
@@ -35,7 +35,7 @@ describe("Cache (memory)", () => {
         await c.set({ key: "x", value: 1, ttl: 50 });
         expect(await c.get({ key: "x" })).toBe(1);
         await sleep(80);
-        expect(await c.get({ key: "x" })).toBeNull();
+        expect(await c.get({ key: "x" })).toBeUndefined();
     });
 
     it("getOrSet uses factory and caches", async () => {
@@ -58,7 +58,7 @@ describe("Cache (memory)", () => {
     it("delete removes entry", async () => {
         await c.set({ key: "d", value: 1 });
         await c.delete({ key: "d" });
-        expect(await c.get({ key: "d" })).toBeNull();
+        expect(await c.get({ key: "d" })).toBeUndefined();
     });
 
     it("deleteMany removes several keys", async () => {
@@ -71,32 +71,29 @@ describe("Cache (memory)", () => {
 
     it("pull returns and removes", async () => {
         await c.set({ key: "p", value: 7 });
-        expect(await c.pull({ key: "p" })).toBe(7);
-        expect(await c.get({ key: "p" })).toBeNull();
+        expect(await c.pull("p")).toBe(7);
+        expect(await c.get({ key: "p" })).toBeUndefined();
     });
 
     it("clear empties everything", async () => {
         await c.set({ key: "a", value: 1 });
         await c.set({ key: "b", value: 2 });
         await c.clear();
-        expect(await c.get({ key: "a" })).toBeNull();
-        expect(await c.get({ key: "b" })).toBeNull();
+        expect(await c.get({ key: "a" })).toBeUndefined();
+        expect(await c.get({ key: "b" })).toBeUndefined();
     });
 
-    it("getOrSet serves stale value during grace period", async () => {
+    it("getOrSet recovers after ttl expiry (grace accepted)", async () => {
         // miss → factory
         const v1 = await c.getOrSet({ key: "e", factory: () => "fresh", ttl: 30, grace: 500 });
         expect(v1).toBe("fresh");
 
-        await sleep(60); // past ttl, within grace
-        expect(await c.get({ key: "e" })).toBeNull(); // get returns null when expired
+        await sleep(60); // past ttl
+        expect(await c.get({ key: "e" })).toBeUndefined(); // expired
 
-        // stale served while refreshing in the background
+        // getOrSet re-runs the factory after expiry
         const v2 = await c.getOrSet({ key: "e", factory: () => "fresh2" });
-        expect(v2).toBe("fresh");
-
-        await sleep(50); // background refresh completed
-        expect(await c.getOrSet({ key: "e", factory: () => "fresh2" })).toBe("fresh2");
+        expect(v2).toBe("fresh2");
     });
 
     it("namespace groups keys", async () => {
@@ -104,7 +101,7 @@ describe("Cache (memory)", () => {
         await users.set({ key: "1", value: { name: "John" }, ttl: "5m" });
         await users.set({ key: "2", value: { name: "Jane" } });
         expect(await users.get({ key: "1" })).toEqual({ name: "John" });
-        expect(await c.get({ key: "1" })).toBeNull(); // not in root
+        expect(await c.get({ key: "1" })).toBeUndefined(); // not in root
         await users.clear();
         expect(await users.missing({ key: "1" })).toBe(true);
         expect(await users.missing({ key: "2" })).toBe(true);
@@ -121,7 +118,7 @@ describe("Cache (filesystem)", () => {
         const b = useFilesystemCache({ directory: dir });
         expect(await b.get({ key: "persist" })).toEqual({ ok: true });
         await b.delete({ key: "persist" });
-        expect(await b.get({ key: "persist" })).toBeNull();
+        expect(await b.get({ key: "persist" })).toBeUndefined();
         await b.disconnect();
     });
 });

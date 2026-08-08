@@ -7,6 +7,7 @@ import type { Route } from "../types/route";
 import type { Service } from "../types/service";
 import type { WebSocketHandler } from "../types/websocket";
 import type { TenantMiddlewareConfig, GlobalMiddlewareConfig } from "../types/middleware";
+import type { McpTool, McpResource } from "../types/mcp";
 import { file } from "bun";
 function Server(config: ServerConfig) {
     config.server = {
@@ -66,6 +67,22 @@ function Action(action: CollectionAction): CollectionAction & { _isAction_: true
  */
 function Hook(hook: CollectionHook): CollectionHook & { _isHook_: true } {
     return Object.assign(hook, { _isHook_: true }) as CollectionHook & { _isHook_: true };
+}
+
+function McpTool(tool: McpTool): McpTool {
+    return {
+        ...tool,
+        enabled: tool.enabled ?? true,
+        _isMcpTool_: true,
+    }
+}
+
+function McpResource(resource: McpResource): McpResource {
+    return {
+        ...resource,
+        enabled: resource.enabled ?? true,
+        _isMcpResource_: true,
+    }
 }
 
 function FileCollection(collection: FileCollection): FileCollection {
@@ -148,5 +165,7 @@ export const define = {
   Workflow,
   TenantMiddleware,
   Middleware,
-  WebSocket
+  WebSocket,
+  McpTool,
+  McpResource
 }

@@ -1,6 +1,8 @@
 /**
  * Hono context variables shared by middleware and route handlers.
  */
+import type { ConnInfo } from "hono/conninfo";
+
 export type HonoVariables = {
     /** Present when `Authorization: Bearer <jwt>` was sent and verification succeeded. */
     token?: {
@@ -13,4 +15,8 @@ export type HonoVariables = {
         /** Whether the token is expired */
         expired: boolean;
     };
+    /** Best-effort client IP, resolved once per request (real socket, or trusted proxy header when cfg.server.trustProxy). */
+    clientIp?: string;
+    /** Connection info (real socket address) — set once per request by the IP middleware. */
+    connInfo?: ConnInfo;
 };

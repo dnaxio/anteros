@@ -16,6 +16,7 @@ import { io, engineIo, websocket } from './io'
 import { loadServices } from '../lib/services'
 import { loadSockets } from '../lib/sockets'
 import { syncWorkflows } from '../lib/workflow'
+import { syncMcpTools } from '../lib/mcp'
 import { loadTenantsMiddlewares } from '../lib/middleware'
 import crypto from 'node:crypto';
 import os from 'node:os';
@@ -50,6 +51,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
         await loadServices(); // load services
         await loadSockets(); // load websocket handlers
         await syncWorkflows();
+        await syncMcpTools(); // load MCP tools per tenant (mcp/**/*.tool.ts)
         await loadTenantsMiddlewares();
         loadRoutes(); // load routes
         //******************************* */

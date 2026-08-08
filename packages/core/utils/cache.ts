@@ -50,6 +50,25 @@ class Cache {
             }
         })
     }
+
+    // ─── BentoCache provider API (delegated to the underlying instance) ───
+
+    set(options: any): Promise<boolean> { return this.#cache.set(options); }
+    setForever(options: any): Promise<boolean> { return this.#cache.setForever(options); }
+    get(options: any): Promise<unknown> { return this.#cache.get(options); }
+    getOrSet(options: any): Promise<unknown> { return this.#cache.getOrSet(options); }
+    getOrSetForever(options: any): Promise<unknown> { return this.#cache.getOrSetForever(options); }
+    has(options: any): Promise<boolean> { return this.#cache.has(options); }
+    missing(options: any): Promise<boolean> { return this.#cache.missing(options); }
+    pull(key: string): Promise<unknown> { return this.#cache.pull(key); }
+    delete(options: any): Promise<boolean> { return this.#cache.delete(options); }
+    deleteMany(options: any): Promise<boolean> { return this.#cache.deleteMany(options); }
+    deleteByTag(options: any): Promise<boolean> { return this.#cache.deleteByTag(options); }
+    expire(options: any): Promise<boolean> { return this.#cache.expire(options); }
+    clear(options?: any): Promise<void> { return this.#cache.clear(options); }
+    prune(): Promise<void> { return this.#cache.prune(); }
+    namespace(namespace: string): any { return this.#cache.namespace(namespace); }
+    disconnect(): Promise<void> { return this.#cache.disconnect(); }
 }
 
 
