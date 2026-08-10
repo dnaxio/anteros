@@ -64,13 +64,25 @@ async function initializeOnDatabase(collections: Collection[]) {
                     await db.createCollection(collection.slug)
                 }
 
-                // create default index on collection
+                // Fetch existing indexes once — used to skip already-created
+                // indexes: never force re-creation of an index that already
+                // exists (avoids the "same name but different options" error)
+                const col = db.collection(collection.slug);
+                const existingIndexes = await col.listIndexes().toArray();
+                const existingNames = new Set(existingIndexes.map((idx) => idx.name));
+                const existingKeys = new Set(
+                    existingIndexes.map((idx) => JSON.stringify(Object.keys(idx.key ?? {}).sort()))
+                );
+
+                // create default index on collection (skip if it already exists)
                 let specsTimeStamps = {
                     createdAt: -1,
                     updatedAt: -1
                 }
-                await db.collection(collection.slug).createIndex(specsTimeStamps)
-                // console.log('index created on collection', collection.slug, index)
+                const defaultIndexName = 'createdAt_-1_updatedAt_-1';
+                if (!existingNames.has(defaultIndexName)) {
+                    await col.createIndex(specsTimeStamps)
+                }
 
 
 
@@ -120,8 +132,15 @@ async function initializeOnDatabase(collections: Collection[]) {
 
 
                 }
-                if (specsFieldsIndexes.length) {
-                    await db.collection(collection.slug).createIndexes(specsFieldsIndexes)
+
+                // Only create indexes that don't already exist on the database
+                // (match by name OR by key pattern — never force re-creation)
+                const missingIndexes = specsFieldsIndexes.filter((spec) => {
+                    const keySignature = JSON.stringify(Object.keys(spec.key ?? {}).sort());
+                    return !existingNames.has(spec.name!) && !existingKeys.has(keySignature);
+                });
+                if (missingIndexes.length) {
+                    await col.createIndexes(missingIndexes)
                 }
 
                 // Purge orphan indexes (fields removed from schema)
@@ -129,12 +148,11 @@ async function initializeOnDatabase(collections: Collection[]) {
                     const expectedKeys = new Set(specsFieldsIndexes.map((idx) =>
                         JSON.stringify(Object.keys(idx.key!).sort())
                     ));
-                    const existingIndexes = await db.collection(collection.slug).listIndexes().toArray();
                     for (const idx of existingIndexes) {
                         if (idx.name === '_id_') continue; // built-in
                         const idxKeys = JSON.stringify(Object.keys(idx.key!).sort());
                         if (!expectedKeys.has(idxKeys)) {
-                            await db.collection(collection.slug).dropIndex(idx.name!);
+                            await col.dropIndex(idx.name!);
                             console.log(`🧹 Dropped orphan index: ${collection.slug}.${idx.name}`.gray);
                         }
                     }
@@ -142,7 +160,7 @@ async function initializeOnDatabase(collections: Collection[]) {
             }
 
         } catch (err: any) {
-            console.error(err?.message)
+            console.error(`col: ${collection?.slug||''}`,err?.message)
 
         }
     }

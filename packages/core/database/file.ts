@@ -4,6 +4,7 @@ import path from "path"
 import fs from "fs/promises"
 import type { FileCollection } from "../types/file"
 import { getTenant } from "./tenant"
+import type { IndexDescription } from "mongodb"
 
 async function syncFileCollections() {
     try {
@@ -80,13 +81,24 @@ async function initializeFileCollectionsOnDatabase(files: FileCollection[]) {
                 await db.createCollection(fileCollection.slug)
             }
 
-            // Créer les indexes par défaut
-            await db.collection(fileCollection.slug).createIndexes([
+            // Créer les indexes par défaut (uniquement ceux qui manquent —
+            // ne jamais forcer la recréation d'un index déjà existant)
+            const col = db.collection(fileCollection.slug)
+            const existingIndexes = await col.listIndexes().toArray()
+            const existingNames = new Set(existingIndexes.map((idx) => idx.name))
+            const defaultIndexes: IndexDescription[] = [
                 { key: { filename: 1 } },
                 { key: { name: 1 } },
                 { key: { mimetype: 1 } },
                 { key: { createdAt: -1, updatedAt: -1 } },
-            ])
+            ]
+            const missingIndexes = defaultIndexes.filter((spec) => {
+                const autoName = Object.entries(spec.key).map(([k, v]) => `${k}_${v}`).join('_')
+                return !existingNames.has(autoName)
+            })
+            if (missingIndexes.length) {
+                await col.createIndexes(missingIndexes)
+            }
 
         } catch (err: any) {
             console.error(`Initialize file collection '${fileCollection.slug}' failed`, err?.message)

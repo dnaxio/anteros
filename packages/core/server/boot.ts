@@ -22,18 +22,7 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 import { registerMetrics, getMetrics, trackRequest } from './metrics';
 import { startMaster, aggregateMetrics } from './cluster';
-
-/** Check if a TCP port is already bound */
-async function isPortInUse(port: number): Promise<boolean> {
-    try {
-        const proc = Bun.spawn(['lsof', '-ti', `:${port}`], { stdout: 'pipe' });
-        const output = await new Response(proc.stdout).text();
-        await proc.exited;
-        return output.trim().length > 0;
-    } catch {
-        return false;
-    }
-}
+import tcpPortUsed from 'tcp-port-used';
 
 type BootAppOptions = ServerConfig & {
 
@@ -117,14 +106,38 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
 
             console.log(`[cluster] Aggregated /health → http://localhost:${metricsPort}/health`.gray);
 
+            // Graceful shutdown: stop workers + metrics server so a restart
+            // (e.g. bun --watch) never leaves the port occupied
+            const shutdownCluster = (signal: string) => {
+                console.log(`\n${signal} received — shutting down workers…`.gray);
+                try { master.shutdown(); } catch {}
+                try { metricsServer.stop(true); } catch {}
+                for (const tenant of cfg.tenants ?? []) {
+                    try { tenant.database?.client?.close(); } catch {}
+                }
+                process.exit(0);
+            };
+            process.once('SIGINT', () => shutdownCluster('SIGINT'));
+            process.once('SIGTERM', () => shutdownCluster('SIGTERM'));
+
             // Keep the master alive
             return { master, metricsServer } as any;
         }
 
-        // Detect zombie: check if port is already in use when NOT sharing the port
+        // Detect zombie: check if port is already in use when NOT sharing the port.
+        // tcp-port-used probes with a real TCP connection — only a listening server
+        // counts (a connected client never triggers a false positive) and it works
+        // on any platform (no lsof dependency). Grace period: after a restart the
+        // previous process may still be releasing the port (Mongo / Socket.IO
+        // shutdown) — wait before declaring a zombie.
         if (!reusePort && env === 'dev') {
-            const occupied = await isPortInUse(PORT);
-            if (occupied) {
+            if (await tcpPortUsed.check(PORT)) {
+                console.log(`⏳ Port ${PORT} is still held, waiting for the previous process to release it (~2.5s)…`.gray);
+            }
+            try {
+                // ~2.5s grace (5 × 500ms); rejects if the port stays occupied
+                await tcpPortUsed.waitUntilFree(PORT, 500, 2500);
+            } catch {
                 console.error(`\n⚠ Port ${PORT} is already in use. Possible zombie server.\n  → Kill it: lsof -ti :${PORT} | xargs kill -9\n`.red.bold);
                 process.exit(1);
             }
@@ -157,6 +170,19 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
 
         // Register server for built-in metrics (GET /health)
         registerMetrics(server);
+
+        // Graceful shutdown: release the port & DB connections so restarts
+        // (e.g. bun --watch) never hit a zombie / EADDRINUSE
+        const shutdownServer = (signal: string) => {
+            console.log(`\n${signal} received — shutting down…`.gray);
+            try { server.stop(true); } catch {}
+            for (const tenant of cfg.tenants ?? []) {
+                try { tenant.database?.client?.close(); } catch {}
+            }
+            process.exit(0);
+        };
+        process.once('SIGINT', () => shutdownServer('SIGINT'));
+        process.once('SIGTERM', () => shutdownServer('SIGTERM'));
 
         // ── WORKER (cluster): report metrics to the master via IPC ──
         if (isWorker && typeof process.send === 'function') {

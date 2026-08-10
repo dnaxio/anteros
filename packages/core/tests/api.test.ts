@@ -73,6 +73,56 @@ describe("find", () => {
     });
 });
 
+describe("$limit", () => {
+    it("$limit: 0 means no limit (returns all matching docs)", async () => {
+        const marker = `limit-zero-${crypto.randomUUID()}`;
+        await rest.bulkWrite("items", Array.from({ length: 101 }, (_, i) => ({
+            insertOne: { document: { title: marker, count: i } },
+        })) as any);
+
+        const all = await rest.find("items", { $match: { title: marker }, $limit: 0 });
+        expect(all.length).toBe(101); // the old 100 cap would have returned 100
+
+        await rest.db.collection("items").deleteMany({ title: marker });
+    });
+
+    it("accepts $limit above 1000", async () => {
+        const marker = `limit-big-${crypto.randomUUID()}`;
+        await rest.insertMany("items", [
+            { title: marker, count: 1 },
+            { title: marker, count: 2 },
+            { title: marker, count: 3 },
+        ]);
+
+        const docs = await rest.find("items", { $match: { title: marker }, $limit: 5000 });
+        expect(docs.length).toBe(3);
+
+        await rest.db.collection("items").deleteMany({ title: marker });
+    });
+
+    it("defaults to $limit 100", async () => {
+        const marker = `limit-default-${crypto.randomUUID()}`;
+        await rest.bulkWrite("items", Array.from({ length: 120 }, (_, i) => ({
+            insertOne: { document: { title: marker, count: i } },
+        })) as any);
+
+        const docs = await rest.find("items", { $match: { title: marker } });
+        expect(docs.length).toBe(100);
+
+        await rest.db.collection("items").deleteMany({ title: marker });
+    });
+
+    it("rejects negative $limit with INVALID_LIMIT", async () => {
+        const err: any = await rest.find("items", { $limit: -1 }).then(() => null, (e) => e);
+        expect(err?.code).toBe("INVALID_LIMIT");
+    });
+
+    it("rejects non-integer $limit with INVALID_LIMIT", async () => {
+        const err: any = await rest.find("items", { $limit: 1.5 }).then(() => null, (e) => e);
+        expect(err?.code).toBe("INVALID_LIMIT");
+    });
+});
+
 describe("findOne", () => {
     it("returns single doc by _id", async () => {
         const doc = await rest.insertOne("items", { title: "single" });

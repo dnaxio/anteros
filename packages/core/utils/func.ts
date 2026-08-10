@@ -748,18 +748,20 @@ function buildPipeline(p: FindOptions, options?: {
         })
     }
 
-    // $limit — Faille 14: must be a safe integer in (0, MAX_LIMIT]; 0 would mean "no limit"
-    const MAX_LIMIT = 1000;
+    // $limit — 0 means "no limit" (the $limit stage is omitted);
+    // any positive safe integer is allowed (no 1000 cap)
     p.$limit = p?.$limit ?? 100
-    if (!Number.isSafeInteger(p.$limit) || p.$limit <= 0 || p.$limit > MAX_LIMIT) {
-        throw new AppError(`Invalid $limit (expected an integer between 1 and ${MAX_LIMIT})`, {
+    if (!Number.isSafeInteger(p.$limit) || p.$limit < 0) {
+        throw new AppError(`Invalid $limit (expected a non-negative integer; 0 = no limit)`, {
             code: 'INVALID_LIMIT',
             status: 400
         });
     }
-    pipeline.push({
-        $limit: p.$limit
-    })
+    if (p.$limit > 0) {
+        pipeline.push({
+            $limit: p.$limit
+        })
+    }
 
     // $include
     if (p?.$include && Array.isArray(p?.$include)) {
