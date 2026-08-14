@@ -368,3 +368,22 @@ curl http://localhost:4001/health   # aggregated view of ALL workers
 ```
 
 > ⚠️ Each worker is a separate process with its own memory — use **Redis** for shared cache / Socket.io state in cluster mode.
+
+## Port Conflict & Graceful Shutdown
+
+### Zombie detection (dev only)
+
+When the server is **not** in cluster mode and `NODE_ENV` is not `production`, the boot checks whether the port is already listening before binding it. The check uses a **real TCP connection probe** ([`tcp-port-used`](https://www.npmjs.com/package/tcp-port-used)) — only an actual listening server counts, so a connected client (browser, front-end dev server) never triggers a false positive.
+
+A **grace period of ~2.5s** is applied before declaring a zombie: after a restart, the previous process may still be releasing the port (Mongo / Socket.IO shutdown). If the port stays occupied after the grace period, the boot fails with:
+
+```
+⚠ Port 4000 is already in use. Possible zombie server.
+  → Kill it: lsof -ti :4000 | xargs kill -9
+```
+
+### Graceful shutdown (SIGINT / SIGTERM)
+
+On `SIGINT` (Ctrl+C) or `SIGTERM`, the server shuts down cleanly: `server.stop()` releases the port immediately, MongoDB clients are closed, and the process exits with code `0`. This guarantees that restarts — e.g. `bun --watch index.ts` — never leave an orphan process holding the port.
+
+In cluster mode, the master stops its workers and the metrics server the same way.

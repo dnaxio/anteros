@@ -81,7 +81,7 @@ Content-Type: application/json
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `$match` | `object` | Filter conditions |
-| `$limit` | `number` | Limit results |
+| `$limit` | `number` | Limit results. `0` = **no limit** (the `$limit` stage is omitted); any non-negative integer is accepted (no cap) |
 | `$skip` | `number` | Skip results |
 | `$sort` | `object` | Sort order |
 | `$project` | `object` | Select fields |

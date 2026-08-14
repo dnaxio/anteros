@@ -38,6 +38,8 @@ new useRest({
 
 Retrieve multiple documents with pipeline support.
 
+> `$limit` semantics: `0` = **no limit** (the stage is omitted), any non-negative integer is accepted (no cap).
+
 ```typescript
 const users = await rest.find('users', {
   $match: { status: 'active' },

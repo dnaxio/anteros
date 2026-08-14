@@ -108,6 +108,10 @@ Each field can have these options:
 }
 ```
 
+<Callout type="info">
+**Index creation policy** — at boot, Anteros lists the indexes that already exist on each collection and **only creates the missing ones**. An index that already exists (same name or same key pattern) is never re-created or forced — even if its options (e.g. `sparse`) changed in the model, the existing definition wins. To apply new index options, drop the index first (`rest.dropIndex`). Orphan indexes (fields removed from the schema) are dropped only when `purgeOrphanIndexes` is enabled on the collection.
+</Callout>
+
 ## Example: Blog Posts
 
 ```typescript
