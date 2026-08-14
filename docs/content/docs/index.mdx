@@ -113,6 +113,13 @@ import { Bun, MongodbIcon } from "@dev.icons/react/mono";
       <h3 className="font-semibold text-sm mb-1">Caching</h3>
       <p className="text-xs text-fd-muted-foreground">In-memory, filesystem, and Redis caching with TTL, grace periods, and stampede protection.</p>
     </div>
+    <a href="/docs/reference/mcp" className="group rounded-xl border bg-fd-card p-6 hover:border-fd-primary/50 hover:shadow-lg transition-all duration-300 block">
+      <div className="mb-3 text-fd-primary">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
+      </div>
+      <h3 className="font-semibold text-sm mb-1">MCP Tools & Resources</h3>
+      <p className="text-xs text-fd-muted-foreground">Expose tenant tools & resources to LLM agents (Claude, Cursor, VS Code) via the Model Context Protocol at <code className="text-fd-primary">/mcp/:tenant_id</code>.</p>
+    </a>
     <div className="rounded-xl border bg-fd-card p-6 hover:bg-fd-accent/50 transition-colors duration-200">
       <div className="mb-3 text-fd-primary">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><path d="M10 13H8"/><path d="M16 13H8"/><path d="M10 17H8"/><path d="M13 17H8"/></svg>
@@ -134,13 +141,6 @@ import { Bun, MongodbIcon } from "@dev.icons/react/mono";
       <h3 className="font-semibold text-sm mb-1">Workflows</h3>
       <p className="text-xs text-fd-muted-foreground">Saga pattern, compensation, progress tracking, resume on failure.</p>
     </div>
-    <a href="/docs/reference/mcp" className="group rounded-xl border bg-fd-card p-6 hover:border-fd-primary/50 hover:shadow-lg transition-all duration-300 block">
-      <div className="mb-3 text-fd-primary">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
-      </div>
-      <h3 className="font-semibold text-sm mb-1">MCP Tools & Resources</h3>
-      <p className="text-xs text-fd-muted-foreground">Expose tenant tools & resources to LLM agents (Claude, Cursor, VS Code) via the Model Context Protocol at <code className="text-fd-primary">/mcp/:tenant_id</code>.</p>
-    </a>
     <div className="rounded-xl border bg-fd-card p-6 hover:bg-fd-accent/50 transition-colors duration-200">
       <div className="mb-3 text-fd-primary">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
