@@ -276,6 +276,26 @@ v1/mcp/get_user.tool.ts     → http://localhost:4000/mcp/v1
 v2/mcp/get_user.tool.ts     → http://localhost:4000/mcp/v2
 ```
 
+## Logging
+
+MCP traffic is logged at **two levels** (see [Configuration → Logging](/docs/reference/configuration#logging)):
+
+**1. HTTP access log** — every `/mcp/:tenant_id` request, Caddy-style JSON (method, uri, host, remote ip/port, headers, bytes, traceId):
+
+```
+INFO  POST /mcp/v1 → 200 {"status":200,"duration":19.7,"method":"POST","uri":"/mcp/v1","host":"api.example.com","ip":"1.2.3.4","headers":{...},"traceId":"...","tenant":null}
+```
+
+**2. MCP JSON-RPC log** — each protocol operation, with a dedicated `method` field (`tools/list`, `tools/call`, `resources/list`, `resources/templates/list`, `resources/read`), the tool/resource called, its arguments and the duration:
+
+```
+INFO  MCP tools/list {"method":"tools/list","tenant":"v1","count":2,"duration":8.2}
+INFO  MCP tools/call {"method":"tools/call","tenant":"v1","tool":"echo","args":{"msg":"hello","times":2},"isError":false,"duration":0.3}
+INFO  MCP resources/read {"method":"resources/read","tenant":"v1","uri":"users://abc123","resource":"users-by-id","params":{"id":"abc123"},"duration":0.1}
+```
+
+Failed operations (unknown tool, invalid arguments, tool/resource error) are logged as `WARN` with the error message.
+
 ## Summary
 
 | Property | Description |

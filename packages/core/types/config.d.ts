@@ -58,6 +58,22 @@ export type ServerConfig = {
                 max?: number;
             };
         };
+        logging?: {
+            /** Minimum level emitted (default: 'info') */
+            level?: 'debug' | 'info' | 'warn' | 'error';
+            /** Also write to the console (default: true) */
+            console?: boolean;
+            /** File logging: true → <dir>/anteros.log, string → custom path, false → disabled (default: true) */
+            file?: boolean | string;
+            /** Directory used when `file` is true (default: '.logs') */
+            dir?: string;
+            /** Rotate when the log file exceeds this size in bytes (default: 10MB) */
+            maxSize?: number;
+            /** Keep this many rotated files (default: 5) */
+            maxFiles?: number;
+            /** Log database operations slower than this many ms (default: 200) */
+            slowQueryMs?: number;
+        };
     }
     tenants: Tenant[];
 }

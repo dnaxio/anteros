@@ -18,7 +18,23 @@ import { getGlobalMiddlewares } from "../lib/middleware";
 import { jwt } from "../utils/func";
 import { AppError } from "../lib/error";
 import { getMetrics } from "./metrics";
+import { logger } from "../utils/logger";
 import type { HonoVariables } from "./env";
+
+/**
+ * Caddy-style header collection (array values); sensitive headers stripped
+ * (`authorization`, `cookie`, `proxy-authorization`, `set-cookie`).
+ */
+export function collectHeaders(h: Headers): Record<string, string[]> {
+    const EXCLUDE = ['authorization', 'cookie', 'proxy-authorization', 'set-cookie'];
+    const out: Record<string, string[]> = {};
+    for (const [name, value] of h.entries()) {
+        const key = name.toLowerCase();
+        if (EXCLUDE.includes(key)) continue;
+        out[key] = [value];
+    }
+    return out;
+}
 
 // ─── Redis-backed rate limiting (C3) ─────────────────────────────────────────
 // Lazy singleton: created once per process and reused across createApp() calls.
@@ -200,6 +216,51 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
         await next();
     });
 
+    // Access log — registered before /health & routes so EVERY request is logged.
+    // Runs around the async-context middleware, so traceId/tenant are readable here.
+    // Caddy-compatible JSONL payload: `request`/`resp_headers` blocks + flat fields.
+    app.use(async (c, next) => {
+        const start = performance.now();
+        try {
+            await next();
+        } finally {
+            const duration = performance.now() - start;
+            const trace = requestCtxStorage.get<{ id: string }>('trace');
+            const conn = c.get('connInfo');
+            const token = c.get('token');
+            const url = new URL(c.req.raw.url);
+            const uri = url.pathname + url.search;
+            const ip = c.get('clientIp') ?? 'unknown';
+            const remoteIp = conn?.remote?.address ?? null;
+            const remotePort = conn?.remote?.port ?? null;
+
+            logger.info(`${c.req.method} ${uri} → ${c.res.status}`, {
+                logger: 'http.log.access',
+                status: c.res.status,
+                duration: Math.round(duration * 10) / 10,
+                method: c.req.method,
+                uri,
+                remote_ip: remoteIp,
+                bytes_read: Number(c.req.header('content-length')) || 0,
+                size: Number(c.res.headers.get('content-length')) || 0,
+                user_id: (token?.decoded as Record<string, unknown> | null)?.['sub'] as string ?? '',
+                ip,
+                traceId: trace?.id ?? crypto.randomUUID(),
+                tenant: requestCtxStorage.get<string>('tenant_id') ?? null,
+                request: {
+                    headers: collectHeaders(c.req.raw.headers),
+                    client_ip: ip,
+                    host: c.req.header('host') ?? '',
+                    method: c.req.method,
+                    remote_ip: remoteIp,
+                    remote_port: remotePort,
+                    uri,
+                },
+                resp_headers: collectHeaders(c.res.headers),
+            });
+        }
+    });
+
     // Reuse the cached connInfo instead of re-querying the socket per middleware
     const cachedGetConnInfo: GetConnInfo = (c) =>
         (c as Context<{ Variables: HonoVariables }>).get('connInfo') ?? safeGetConnInfo(c);
@@ -319,6 +380,8 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
                 requestCtxStorage.set('token', emptyToken);
                 c.set('token', emptyToken);
             }
+
+            // (access log is a dedicated middleware registered earlier — see top of createApp)
 
             return await next();
         })

@@ -13,6 +13,7 @@ import * as crypto from "./utils/crypto";
 
 // BentoCache-based caching (memory L1 + filesystem/Redis L2)
 import { useMemoryCache, useFilesystemCache, useRedisCache } from "./utils/cache";
+import { logger } from "./utils/logger";
 const cache = {
     useMemoryCache,
     useFilesystemCache,
@@ -31,4 +32,5 @@ export {
     utils,
     cache,
     crypto,
+    logger,
 }

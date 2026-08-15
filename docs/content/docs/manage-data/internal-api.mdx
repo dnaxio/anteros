@@ -123,6 +123,51 @@ const result = await rest.aggregate('orders', [
 
 ---
 
+### findStream / findPages / aggregateStream
+
+**Streaming** methods to iterate over large result sets **without loading everything into memory** (unlike `find`/`aggregate` which materialize the full array). Docs are **JSON-converted** (`_id` as string, dates as ISO) and the cursor is auto-closed.
+
+```typescript
+// Per-document stream
+for await (const doc of rest.findStream('orders', { $match: { status: 'paid' } }, { batchSize: 500, maxTimeMS: 30000 })) { … }
+
+// Per-document stream + total count (background countDocuments)
+for await (const d of rest.findStream('orders', { $match: { status: 'paid' } }, { withCount: true })) {
+  console.log(d.count, d.doc); // total + document
+}
+
+// Paginated batches: { count, docs, hasNext() }
+for await (const page of rest.findPages('orders', { $match: { status: 'paid' } }, { batchSize: 50 })) {
+  console.log(page.count);        // total matching docs (e.g. 500000)
+  console.log(page.docs.length);  // 50 (batchSize)
+  console.log(page.hasNext());    // true / false
+  for (const doc of page.docs) { … }
+}
+
+// Raw aggregation pipeline (same safety checks as aggregate)
+for await (const doc of rest.aggregateStream('orders', [{ $group: { _id: '$status', n: { $sum: 1 } } }], { batchSize: 500 })) { … }
+```
+
+| Method | Returns | Notes |
+|--------|---------|-------|
+| `findStream(collection, params, options?)` | `AsyncGenerator` | Same query language as `find`, **no default `$limit`** (streams everything) |
+| `findPages(collection, params, options?)` | `AsyncGenerator` | Batched: yields `{ count, docs, hasNext() }` — total + up to `batchSize` docs per page |
+| `aggregateStream(collection, pipeline, options?)` | `AsyncGenerator` | Raw pipeline, same safety checks as `aggregate` |
+
+All accept a third `options` parameter:
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `batchSize` | `number` | Documents fetched per batch from the server (`cursor.batchSize(n)`) |
+| `maxTimeMS` | `number` | Max execution time — the query aborts with a timeout if it runs longer (`cursor.maxTimeMS(n)`) |
+| `comment` | `string` | Comment attached to the query — visible in MongoDB profiling / slow query logs (passed via `aggregate()` options) |
+| `hint` | `string \| object` | Force a specific index: name (`'email_1'`) or key pattern (`{ email: 1 }`) (passed via `aggregate()` options) |
+| `withCount` | `boolean` | **`findStream` only** — runs a background `countDocuments` (parallel with the iteration); each yielded item becomes `{ count, doc }` (total + document) |
+
+> ⚠️ Streaming methods do **not** run collection hooks (`beforeOperation` / `afterOperation`) — documents stream lazily as you iterate.
+
+---
+
 ### countDocuments
 
 Count documents in a collection.

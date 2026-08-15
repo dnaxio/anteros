@@ -9,10 +9,10 @@ import { AppError, fn } from "../lib/error";
 import { createWorkflow } from "./workflow";
 import { getTenant } from "./tenant";
 import { getCollection, getCollectionKeys } from "./collection"
-import type { RestActions, BulkUpdateOperation, RestOptions } from "../types/rest";
+import type { RestActions, BulkUpdateOperation, RestOptions, CursorOptions } from "../types/rest";
 import type Joi from "joi";
 import type { Collection } from "../types/collection";
-import { CheckBulkWriteOperations, CheckIfCollectionExists, CheckIfId, CheckInsertData, CheckIfArrayOfIds, CheckFilter } from "./decorator";
+import { CheckBulkWriteOperations, CheckIfCollectionExists, CheckIfId, CheckInsertData, CheckIfArrayOfIds, CheckFilter, LogSlowQuery } from "./decorator";
 import type { ActionsApiList, updateApiOptions } from "../types/api";
 import type { ActivityInput } from "../types/activity";
 import * as os from 'node:os';
@@ -269,6 +269,7 @@ class MongoRest {
         })
     }
 
+    @LogSlowQuery()
     @CheckIfCollectionExists()
     async aggregate(collection: string, pipeline: any[]): Promise<Document[]> {
         const action = 'aggregate' as ActionsApiList
@@ -310,7 +311,156 @@ class MongoRest {
         }
     }
 
+    /**
+     * Apply cursor methods (batchSize, maxTimeMS). comment/hint are passed
+     * through the aggregate() options (not available on AggregationCursor in v7).
+     */
+    #applyCursorOptions(cursor: AggregationCursor, options: CursorOptions) {
+        if (options.batchSize) cursor.batchSize(options.batchSize)
+        if (options.maxTimeMS) cursor.maxTimeMS(options.maxTimeMS)
+    }
 
+    /**
+     * Stream `find`-style results one by one — JSON-converted docs, cursor auto-closed.
+     * Iterates everything (no default $limit, unlike find() which caps at 100).
+     *
+     * With `{ withCount: true }`, a background `countDocuments` runs in parallel
+     * and each yielded item becomes `{ count, doc }` — the total + the document.
+     *
+     * @example
+     * for await (const doc of rest.findStream('orders', { $match: { status: 'paid' } }, { batchSize: 500 })) { … }
+     * for await (const d of rest.findStream('orders', { $match: { status: 'paid' } }, { withCount: true })) {
+     *   console.log(d.count, d.doc); // total + document
+     * }
+     * for await (const u of rest.findStream<User>('users', { $match: { active: true } }, {
+     *   map: (u) => ({ id: u._id, name: u.name }),
+     *   signal: controller.signal,
+     * })) { … }
+     */
+    @CheckIfCollectionExists()
+    async *findStream<T = any>(collection: string, params: FindOptions = {}, options: CursorOptions = {}): AsyncGenerator<any> {
+        // Background total count (runs in parallel with the iteration)
+        const countPromise = options.withCount
+            ? this.countDocuments(collection, params.$match ?? {})
+            : null;
+        const col = getCollection(collection, this.#tenant.id) as Collection
+        let pipeline = func.buildPipeline({ ...params, $limit: params.$limit ?? 0 }, { col: col })
+        pipeline = await func.buildInput(pipeline, { rest: this })
+        pipeline = func.toBson(pipeline, { col })
+        const cursor = this.db.collection(collection).aggregate(pipeline, {
+            session: this.session,
+            allowDiskUse: true,
+            comment: options.comment,
+            hint: options.hint,
+        }) as AggregationCursor
+        this.#applyCursorOptions(cursor, options)
+        try {
+            for await (const doc of cursor) {
+                if (options.signal?.aborted) break
+                let value: any = func.toJson(doc)
+                if (options.map) value = options.map(value as T)
+                if (options.withCount) {
+                    yield { count: await countPromise, doc: value }
+                } else {
+                    yield value
+                }
+            }
+        } finally {
+            await cursor.close().catch(() => {})
+        }
+    }
+
+    /**
+     * Stream `aggregate` results one by one (same safety checks as `aggregate`) —
+     * JSON-converted docs, cursor auto-closed.
+     *
+     * @example
+     * for await (const doc of rest.aggregateStream('orders', [{ $match: { status: 'paid' } }], { batchSize: 500 })) { … }
+     */
+    @CheckIfCollectionExists()
+    async *aggregateStream<T = any>(collection: string, pipeline: any[] = [], options: CursorOptions = {}): AsyncGenerator<any> {
+        const col = getCollection(collection, this.#tenant.id) as Collection
+        const allowedCollections = [
+            ...(cfg.collections ?? []).filter((c) => c._tenant_ === this.tenant_id).map((c) => c.slug),
+            ...(cfg.fileCollections ?? []).filter((fc) => fc._tenant_ === this.tenant_id).map((fc) => fc.slug),
+            '_activities_', '_locks_', '_workflows_',
+        ];
+        const isSafe = func.isSafeAggregatePipeline(pipeline, allowedCollections);
+        if (!isSafe.isSafe) {
+            throw isSafe.error;
+        }
+        pipeline = func.toBson(pipeline, { col })
+        const cursor = this.db.collection(collection).aggregate(pipeline, {
+            session: this.session,
+            allowDiskUse: true,
+            comment: options.comment,
+            hint: options.hint,
+        }) as AggregationCursor
+        this.#applyCursorOptions(cursor, options)
+        try {
+            for await (const doc of cursor) {
+                if (options.signal?.aborted) break
+                let value: any = func.toJson(doc)
+                if (options.map) value = options.map(value as T)
+                yield value
+            }
+        } finally {
+            await cursor.close().catch(() => {})
+        }
+    }
+
+    /**
+     * Stream results in **pages** (batches) with the total count computed in the
+     * background (parallel with the iteration). Each page yields:
+     * `{ count, docs, hasNext() }` — total matching docs, an array of up to
+     * `batchSize` JSON-converted documents, and whether more pages follow.
+     *
+     * @example
+     * for await (const page of rest.findPages('orders', { $match: { status: 'paid' } }, { batchSize: 50 })) {
+     *   console.log(page.count);        // total matching docs (e.g. 500000)
+     *   console.log(page.docs.length);  // 50 (batchSize)
+     *   console.log(page.hasNext());    // true / false
+     *   for (const doc of page.docs) { … }
+     * }
+     */
+    @CheckIfCollectionExists()
+    async *findPages<T = any>(collection: string, params: FindOptions = {}, options: CursorOptions = {}): AsyncGenerator<{ count: number; docs: any[]; hasNext: () => boolean }> {
+        const batchSize = options.batchSize ?? 100;
+        // Background total count — runs in parallel with the iteration
+        const countPromise = this.countDocuments(collection, params.$match ?? {});
+        const col = getCollection(collection, this.#tenant.id) as Collection
+        let pipeline = func.buildPipeline({ ...params, $limit: params.$limit ?? 0 }, { col: col })
+        pipeline = await func.buildInput(pipeline, { rest: this })
+        pipeline = func.toBson(pipeline, { col })
+        const cursor = this.db.collection(collection).aggregate(pipeline, {
+            session: this.session,
+            allowDiskUse: true,
+            comment: options.comment,
+            hint: options.hint,
+        }) as AggregationCursor
+        this.#applyCursorOptions(cursor, options)
+        try {
+            while (await cursor.hasNext()) {
+                if (options.signal?.aborted) break
+                const docs: any[] = []
+                for (let i = 0; i < batchSize && await cursor.hasNext(); i++) {
+                    let value: any = func.toJson(await cursor.next())
+                    if (options.map) value = options.map(value as T)
+                    docs.push(value)
+                }
+                const hasMore = await cursor.hasNext()
+                yield {
+                    count: await countPromise,
+                    docs,
+                    hasNext: () => hasMore,
+                }
+            }
+        } finally {
+            await cursor.close().catch(() => {})
+        }
+    }
+
+    @LogSlowQuery()
     @CheckIfCollectionExists()
     async find(collection: string, params: FindOptions = {}, options = {}): Promise<Document[]> {
         const action = 'find' as ActionsApiList
@@ -342,6 +492,7 @@ class MongoRest {
         }
     }
 
+    @LogSlowQuery()
     @CheckIfCollectionExists()
     async findOne(collection: string, _id: string, params?: findOneOptions): Promise<any> {
         const action = 'findOne' as ActionsApiList
@@ -377,6 +528,7 @@ class MongoRest {
         }
     }
 
+    @LogSlowQuery()
     @CheckIfCollectionExists()
     @CheckInsertData('insertOne')
     async insertOne<T>(collection: string, data: T): Promise<T & { _id: string }> {
@@ -409,6 +561,7 @@ class MongoRest {
         })
     }
 
+    @LogSlowQuery()
     @CheckIfCollectionExists()
     @CheckInsertData('insertMany')
     async insertMany<T>(collection: string, data: T[]): Promise<(T & { _id: string })[]> {
@@ -448,6 +601,7 @@ class MongoRest {
         })
     }
 
+    @LogSlowQuery()
     @CheckIfCollectionExists()
     @CheckIfId('updateOne')
     async updateOne(collection: string, _id: string, update: UpdateFilter<any>) {
@@ -485,6 +639,7 @@ class MongoRest {
         })
     }
 
+    @LogSlowQuery()
     @CheckIfCollectionExists()
     @CheckFilter()
     async findOneAndUpdate(collection: string, filter: Document, update: UpdateFilter<any>, options?: updateApiOptions): Promise<Document | null> {
@@ -552,6 +707,7 @@ class MongoRest {
         })
     }
 
+    @LogSlowQuery()
     @CheckIfCollectionExists()
     @CheckIfArrayOfIds('updateMany')
     async updateMany(collection: string, _ids: string[], update: UpdateFilter<any>): Promise<UpdateResult> {
@@ -586,6 +742,7 @@ class MongoRest {
         })
     }
 
+    @LogSlowQuery()
     @CheckIfCollectionExists()
     @CheckIfId('deleteOne')
     async deleteOne(collection: string, _id: string) {
@@ -614,6 +771,7 @@ class MongoRest {
     }
 
 
+    @LogSlowQuery()
     @CheckIfCollectionExists()
     @CheckIfArrayOfIds('deleteMany')
     async deleteMany(collection: string, _ids: string[]): Promise<DeleteResult> {
@@ -642,6 +800,7 @@ class MongoRest {
     }
 
 
+    @LogSlowQuery()
     @CheckIfCollectionExists()
     @CheckBulkWriteOperations()
     async bulkWrite(collection: string, operations: AnyBulkWriteOperation[], options?: BulkWriteOptions): Promise<BulkWriteResult> {
@@ -708,6 +867,7 @@ class MongoRest {
     }
 
 
+    @LogSlowQuery()
     @CheckIfCollectionExists()
     async bulkUpdate(collection: string, operations: BulkUpdateOperation[], options?: BulkWriteOptions): Promise<BulkWriteResult> {
         const action = 'bulkUpdate' as ActionsApiList
@@ -742,11 +902,13 @@ class MongoRest {
 
 
 
+    @LogSlowQuery()
     @CheckIfCollectionExists()
     async countDocuments(collection: string, query: any = {}): Promise<number> {
         const action = 'countDocuments' as ActionsApiList
         return this.#executeWithAudit(action, collection, { query }, async () => {
-            return await this.db.collection(collection).countDocuments()
+            // ⚠️ must pass the filter — countDocuments() without args counts the whole collection
+            return await this.db.collection(collection).countDocuments(query)
         })
     }
 

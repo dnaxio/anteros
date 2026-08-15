@@ -73,6 +73,178 @@ describe("find", () => {
     });
 });
 
+describe("cursors / streaming", () => {
+    it("findStream iterates all matching docs (no default limit)", async () => {
+        const marker = `stream-${crypto.randomUUID()}`;
+        await rest.bulkWrite("items", Array.from({ length: 150 }, (_, i) => ({
+            insertOne: { document: { title: marker, count: i } },
+        })) as any);
+
+        const docs: any[] = [];
+        for await (const doc of rest.findStream("items", { $match: { title: marker } })) {
+            docs.push(doc);
+        }
+        expect(docs.length).toBe(150); // no 100-cap (unlike find())
+        expect(docs.every((d) => d.title === marker)).toBe(true);
+
+        await rest.db.collection("items").deleteMany({ title: marker });
+    });
+
+    it("aggregateStream yields JSON-converted docs", async () => {
+        const marker = `astream-${crypto.randomUUID()}`;
+        await rest.insertMany("items", [
+            { title: marker, count: 5 },
+            { title: marker, count: 7 },
+        ]);
+
+        const docs: any[] = [];
+        for await (const doc of rest.aggregateStream("items", [{ $match: { title: marker } }])) {
+            docs.push(doc);
+        }
+        expect(docs.length).toBe(2);
+
+        await rest.db.collection("items").deleteMany({ title: marker });
+    });
+
+    it("findStream honors the batchSize option", async () => {
+        const marker = `bsize-${crypto.randomUUID()}`;
+        await rest.bulkWrite("items", Array.from({ length: 50 }, (_, i) => ({
+            insertOne: { document: { title: marker, count: i } },
+        })) as any);
+
+        const docs: any[] = [];
+        for await (const doc of rest.findStream("items", { $match: { title: marker } }, { batchSize: 10 })) {
+            docs.push(doc);
+        }
+        expect(docs.length).toBe(50);
+        // JSON-converted (id as string, ISO dates)
+        expect(typeof docs[0]!._id).toBe("string");
+        expect(docs[0]!.createdAt).toMatch(/\d{4}-\d{2}-\d{2}/);
+
+        await rest.db.collection("items").deleteMany({ title: marker });
+    });
+
+    it("cursor options: maxTimeMS + comment + hint", async () => {
+        const marker = `copts-${crypto.randomUUID()}`;
+        await rest.insertMany("items", [{ title: marker }, { title: marker }]);
+
+        const docs: any[] = [];
+        for await (const doc of rest.findStream("items", { $match: { title: marker } }, {
+            batchSize: 5,
+            maxTimeMS: 30000,
+            comment: `test-${marker}`,
+            hint: { _id: 1 },
+        })) {
+            docs.push(doc);
+        }
+        expect(docs.length).toBe(2);
+
+        await rest.db.collection("items").deleteMany({ title: marker });
+    });
+
+    it("findStream withCount yields { count, doc } per document", async () => {
+        const marker = `wcount-${crypto.randomUUID()}`;
+        await rest.bulkWrite("items", Array.from({ length: 25 }, (_, i) => ({
+            insertOne: { document: { title: marker, count: i } },
+        })) as any);
+        // non-matching doc to prove the count only covers the $match
+        await rest.insertOne("items", { title: "other" });
+
+        let iterations = 0;
+        for await (const d of rest.findStream("items", { $match: { title: marker } }, { withCount: true })) {
+            expect(d.count).toBe(25);
+            expect(d.doc.title).toBe(marker);
+            iterations++;
+        }
+        expect(iterations).toBe(25);
+
+        await rest.db.collection("items").deleteMany({ title: { $in: [marker, "other"] } });
+    });
+
+    it("findPages yields { count, docs, hasNext } per batch", async () => {
+        const marker = `pages-${crypto.randomUUID()}`;
+        await rest.bulkWrite("items", Array.from({ length: 25 }, (_, i) => ({
+            insertOne: { document: { title: marker, count: i } },
+        })) as any);
+        await rest.insertOne("items", { title: "other" });
+
+        const pages: any[] = [];
+        for await (const page of rest.findPages("items", { $match: { title: marker } }, { batchSize: 10 })) {
+            pages.push(page);
+            expect(page.count).toBe(25);          // total matching docs, not the batch size
+            expect(page.docs.length).toBeLessThanOrEqual(10); // batchSize
+            expect(page.docs.every((d: any) => d.title === marker)).toBe(true);
+        }
+        // 25 docs / batch 10 → 3 pages: 10 + 10 + 5
+        expect(pages.length).toBe(3);
+        expect(pages[0]!.docs.length).toBe(10);
+        expect(pages[0]!.hasNext()).toBe(true);
+        expect(pages[1]!.docs.length).toBe(10);
+        expect(pages[1]!.hasNext()).toBe(true);
+        expect(pages[2]!.docs.length).toBe(5);
+        expect(pages[2]!.hasNext()).toBe(false);
+        const total = pages.reduce((acc: number, p: any) => acc + p.docs.length, 0);
+        expect(total).toBe(25);
+
+        await rest.db.collection("items").deleteMany({ title: { $in: [marker, "other"] } });
+    });
+
+    it("findStream map transforms each doc on the fly", async () => {
+        const marker = `map-${crypto.randomUUID()}`;
+        await rest.insertMany("items", [{ title: marker, count: 1 }, { title: marker, count: 2 }]);
+
+        const out: any[] = [];
+        for await (const doc of rest.findStream("items", { $match: { title: marker } }, {
+            map: (d: any) => ({ id: d._id, n: d.count }),
+        })) {
+            out.push(doc);
+        }
+        expect(out.length).toBe(2);
+        expect(out.every((m) => "id" in m && "n" in m && !("title" in m))).toBe(true);
+
+        await rest.db.collection("items").deleteMany({ title: marker });
+    });
+
+    it("findStream signal aborts the stream and closes the cursor", async () => {
+        const marker = `sig-${crypto.randomUUID()}`;
+        await rest.bulkWrite("items", Array.from({ length: 20 }, (_, i) => ({
+            insertOne: { document: { title: marker, count: i } },
+        })) as any);
+
+        const ac = new AbortController();
+        let seen = 0;
+        for await (const doc of rest.findStream("items", { $match: { title: marker } }, { signal: ac.signal })) {
+            seen++;
+            if (seen === 3) ac.abort();
+        }
+        expect(seen).toBe(3); // stopped early, cursor closed by the generator
+
+        await rest.db.collection("items").deleteMany({ title: marker });
+    });
+
+    it("findPages map + signal", async () => {
+        const marker = `psig-${crypto.randomUUID()}`;
+        await rest.bulkWrite("items", Array.from({ length: 30 }, (_, i) => ({
+            insertOne: { document: { title: marker, count: i } },
+        })) as any);
+
+        const ac = new AbortController();
+        let pages = 0;
+        for await (const page of rest.findPages("items", { $match: { title: marker } }, {
+            batchSize: 10,
+            map: (d: any) => ({ id: d._id }),
+            signal: ac.signal,
+        })) {
+            pages++;
+            expect(page.docs.every((d: any) => "id" in d && !("title" in d))).toBe(true);
+            if (pages === 2) ac.abort();
+        }
+        expect(pages).toBe(2); // stopped after 2 pages
+
+        await rest.db.collection("items").deleteMany({ title: marker });
+    });
+});
+
 describe("$limit", () => {
     it("$limit: 0 means no limit (returns all matching docs)", async () => {
         const marker = `limit-zero-${crypto.randomUUID()}`;
@@ -196,9 +368,13 @@ describe("countDocuments", () => {
         expect(typeof n).toBe("number");
     });
     it("counts with filter", async () => {
-        await rest.insertOne("items", { title: "count-me" });
-        const n = await rest.countDocuments("items", { title: "count-me" });
-        expect(n).toBeGreaterThanOrEqual(1);
+        const marker = `count-me-${crypto.randomUUID()}`;
+        await rest.insertOne("items", { title: marker });
+        await rest.insertOne("items", { title: "count-other" });
+        const n = await rest.countDocuments("items", { title: marker });
+        expect(n).toBe(1); // only the matching doc — not the whole collection
+
+        await rest.db.collection("items").deleteMany({ title: marker });
     });
 });
 

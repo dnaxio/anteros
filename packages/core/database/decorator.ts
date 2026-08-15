@@ -1,6 +1,38 @@
 import { ObjectId } from "mongodb";
 import { getCollection } from "./collection";
 import { AppError } from "../lib/error";
+import { logger } from "../utils/logger";
+import { cfg } from "../server/config";
+
+
+// Logs operations slower than cfg.server.logging.slowQueryMs (default 200ms) —
+// the MongoDB-style slow query log for Anteros
+
+export function LogSlowQuery(): any {
+    return function (target: any, propertyKey: string, descriptor: PropertyDescriptor): any {
+        if (!descriptor || !descriptor.value) {
+            return descriptor;
+        }
+        const originalMethod = descriptor.value;
+        descriptor.value = async function (this: any, ...args: any[]) {
+            const start = performance.now();
+            try {
+                return await originalMethod.apply(this, args);
+            } finally {
+                const duration = performance.now() - start;
+                const slowMs = cfg.server.logging?.slowQueryMs ?? 200;
+                if (duration >= slowMs) {
+                    logger.warn(`Slow ${propertyKey} (${Math.round(duration)}ms)`, {
+                        collection: args[0],
+                        tenant: this.tenant_id,
+                        duration: Math.round(duration),
+                    });
+                }
+            }
+        };
+        return descriptor;
+    }
+}
 
 
 // decoration function checkCollectionExists

@@ -13,6 +13,7 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import type Joi from "joi";
 import { cfg } from "./config";
 import { useRest } from "../database/rest";
+import { logger } from "../utils/logger";
 import type { McpTool, McpResource } from "../types/mcp";
 import type { HonoVariables } from "./env";
 
@@ -113,24 +114,32 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
         { capabilities: { tools: {}, resources: {} } }
     );
 
-    server.setRequestHandler(ListToolsRequestSchema, async () => ({
-        tools: tools.map((t) => ({
+    const ms = (start: number) => Math.round((performance.now() - start) * 10) / 10;
+
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
+        const start = performance.now();
+        const toolsList = tools.map((t) => ({
             name: t.name,
             title: t.name,
             description: t.description,
             inputSchema: joiToJsonSchema(t.inputSchema),
-        })),
-    }));
+        }));
+        logger.info('MCP tools/list', { method: 'tools/list', tenant: tenantId, count: toolsList.length, duration: ms(start) });
+        return { tools: toolsList };
+    });
 
     server.setRequestHandler(CallToolRequestSchema, async (req) => {
+        const start = performance.now();
         const tool = tools.find((t) => t.name === req.params.name);
         if (!tool) {
+            logger.warn('MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, error: 'unknown tool', duration: ms(start) });
             throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${req.params.name}`);
         }
 
         const raw = req.params.arguments ?? {};
         const { error, value } = tool.inputSchema.validate(raw, { allowUnknown: false });
         if (error) {
+            logger.warn('MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, args: raw, error: 'invalid arguments', duration: ms(start) });
             return {
                 content: [{ type: 'text' as const, text: `Invalid arguments: ${error.message}` }],
                 isError: true,
@@ -140,10 +149,13 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
         const rest = new useRest({ tenant_id: tenantId });
         try {
             const result = await tool.exec({ c: undefined as any, rest, args: value });
+            const isError = !!(result as any)?.isError;
+            logger[isError ? 'warn' : 'info']('MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, args: value, isError, duration: ms(start) });
             if (result && Array.isArray(result.content)) return result;
             const text = typeof result === 'string' ? result : JSON.stringify(result);
             return { content: [{ type: 'text' as const, text }] };
         } catch (err: any) {
+            logger.warn('MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, args: value, error: err?.message ?? 'unknown', duration: ms(start) });
             return {
                 content: [{ type: 'text' as const, text: `Error: ${err?.message ?? 'unknown'}` }],
                 isError: true,
@@ -151,32 +163,40 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
         }
     });
 
-    server.setRequestHandler(ListResourcesRequestSchema, async () => ({
-        resources: resources
+    server.setRequestHandler(ListResourcesRequestSchema, async () => {
+        const start = performance.now();
+        const resourcesList = resources
             .filter((r) => !r.uri.includes('{')) // static only; templates are listed separately
             .map((r) => ({
                 uri: r.uri,
                 name: r.name,
                 description: r.description,
                 mimeType: r.mimeType,
-            })),
-    }));
+            }));
+        logger.info('MCP resources/list', { method: 'resources/list', tenant: tenantId, count: resourcesList.length, duration: ms(start) });
+        return { resources: resourcesList };
+    });
 
-    server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
-        resourceTemplates: resources
+    server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => {
+        const start = performance.now();
+        const templates = resources
             .filter((r) => r.uri.includes('{'))
             .map((r) => ({
                 uriTemplate: r.uri,
                 name: r.name,
                 description: r.description,
                 mimeType: r.mimeType,
-            })),
-    }));
+            }));
+        logger.info('MCP resources/templates/list', { method: 'resources/templates/list', tenant: tenantId, count: templates.length, duration: ms(start) });
+        return { resourceTemplates: templates };
+    });
 
     server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
+        const start = performance.now();
         const uri = req.params.uri;
         const matched = matchUri(uri, resources);
         if (!matched) {
+            logger.warn('MCP resources/read', { method: 'resources/read', tenant: tenantId, uri, error: 'unknown uri', duration: ms(start) });
             throw new McpError(ErrorCode.InvalidParams, `Unknown resource URI: ${uri}`);
         }
 
@@ -188,8 +208,10 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
                 params: matched.params,
                 uri,
             });
+            logger.info('MCP resources/read', { method: 'resources/read', tenant: tenantId, uri, resource: matched.resource.name, params: matched.params, duration: ms(start) });
             return result;
         } catch (err: any) {
+            logger.warn('MCP resources/read', { method: 'resources/read', tenant: tenantId, uri, error: err?.message ?? 'unknown', duration: ms(start) });
             throw new McpError(ErrorCode.InternalError, `Failed to read resource: ${err?.message ?? 'unknown'}`);
         }
     });

@@ -1,5 +1,5 @@
 
-import { createApp } from './hono'
+import { createApp, collectHeaders } from './hono'
 import type { ServerConfig } from '../types/config'
 import dayjs from 'dayjs';
 import pkg from '../package.json';
@@ -23,6 +23,7 @@ import os from 'node:os';
 import { registerMetrics, getMetrics, trackRequest } from './metrics';
 import { startMaster, aggregateMetrics } from './cluster';
 import tcpPortUsed from 'tcp-port-used';
+import { logger } from '../utils/logger';
 
 type BootAppOptions = ServerConfig & {
 
@@ -34,6 +35,15 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
         // Load required resources
         //******************************* */
         options = formatConfig(options);
+
+        // Logging: configure from cfg.server.logging (console + file, e.g. logs/anteros.log)
+        logger.configure(cfg.server.logging);
+        logger.info('Starting Anteros server', {
+            name: cfg.server.name ?? process.env.APP_NAME ?? 'SERVER',
+            port: cfg.server.port ?? 4000,
+            env: process.env.NODE_ENV || Bun.env.NODE_ENV || 'dev',
+            tenants: cfg.tenants?.map((t) => t.id),
+        });
         await syncTenants(); // sync tenants and connect to database
         await syncCollections(); // sync collections and create collections on database
         await syncFileCollections(); // sync file collections
@@ -160,7 +170,39 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
                     });
 
                 if (url.pathname === "/socket.io/") {
-                    return respond(engineIo.handleRequest(req, server));
+                    const start = performance.now();
+                    return respond(engineIo.handleRequest(req, server)).then((res) => {
+                        // Access log for the Socket.IO upgrade path (handled outside Hono) —
+                        // same Caddy-compatible structure as the API access log
+                        const remote: any = (server as any).requestIP?.(req);
+                        const remoteIp = remote?.address ?? null;
+                        const remotePort = remote?.port ?? null;
+                        logger.info(`${req.method} ${url.pathname}${url.search} → ${res.status}`, {
+                            logger: 'http.log.access',
+                            status: res.status,
+                            duration: Math.round((performance.now() - start) * 10) / 10,
+                            method: req.method,
+                            uri: url.pathname + url.search,
+                            remote_ip: remoteIp,
+                            bytes_read: Number(req.headers.get('content-length')) || 0,
+                            size: Number(res.headers.get('content-length')) || 0,
+                            user_id: '',
+                            ip: remoteIp ?? 'unknown',
+                            traceId: null,
+                            tenant: null,
+                            request: {
+                                headers: collectHeaders(req.headers),
+                                client_ip: remoteIp ?? 'unknown',
+                                host: req.headers.get('host') ?? '',
+                                method: req.method,
+                                remote_ip: remoteIp,
+                                remote_port: remotePort,
+                                uri: url.pathname + url.search,
+                            },
+                            resp_headers: collectHeaders(res.headers),
+                        });
+                        return res;
+                    });
                 }
                 return respond(app.fetch(req, server));
             },
@@ -224,8 +266,29 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
 
         }, 150);
 
+        // Boot event — recorded in the log file only (the console banner already
+        // shows name / PID / role / URL, so this line would be redundant on screen)
+        logger.file('Server started', {
+            name: NAME,
+            pid: process.pid,
+            role,
+            url: `http://localhost:${PORT}`,
+            env: env || 'dev',
+            logFile: logger.filePath || undefined,
+        });
+
+        // Uncaught errors → log file (MongoDB-style), then exit
+        process.on('uncaughtException', (err) => {
+            logger.error('Uncaught exception', { message: err?.message, stack: err?.stack });
+            process.exit(1);
+        });
+        process.on('unhandledRejection', (reason: any) => {
+            logger.error('Unhandled rejection', { message: reason?.message ?? String(reason), stack: reason?.stack });
+        });
+
         return server;
     } catch (err: any) {
+        logger.error('Failed to boot server', cfg.debug ? { error: err, message: err?.message } : { message: err?.message });
         console.error('Failed to boot server', cfg.debug ? err : err?.message);
         process.exit(1);
     }
