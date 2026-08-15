@@ -186,8 +186,20 @@ class Logger {
     warn(msg: string, meta?: unknown) { this.#write('warn', msg, meta); }
     error(msg: string, meta?: unknown) { this.#write('error', msg, meta); }
 
-    /** Write to the file only (no console output) — for events that would clutter the terminal */
-    file(msg: string, meta?: unknown) { this.#write('info', msg, meta, { console: false }); }
+    /**
+     * Write to the file only (no console output) — for framework-internal events
+     * (access log, MCP operations, slow queries) that would clutter the terminal.
+     * Level defaults to 'info'; `file('warn', msg, meta)` keeps the level.
+     */
+    file(msg: string, meta?: unknown): void;
+    file(level: LogLevel, msg: string, meta?: unknown): void;
+    file(levelOrMsg: LogLevel | string, msgOrMeta?: unknown, meta?: unknown): void {
+        if (levelOrMsg === 'debug' || levelOrMsg === 'info' || levelOrMsg === 'warn' || levelOrMsg === 'error') {
+            this.#write(levelOrMsg, msgOrMeta as string, meta, { console: false });
+        } else {
+            this.#write('info', levelOrMsg, msgOrMeta, { console: false });
+        }
+    }
 
     /** Current log file path (empty when file logging is disabled) */
     get filePath(): string { return this.#filePath; }

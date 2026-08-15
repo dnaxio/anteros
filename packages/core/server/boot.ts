@@ -177,7 +177,8 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
                         const remote: any = (server as any).requestIP?.(req);
                         const remoteIp = remote?.address ?? null;
                         const remotePort = remote?.port ?? null;
-                        logger.info(`${req.method} ${url.pathname}${url.search} → ${res.status}`, {
+                        // File-only: same as the API access log, no console noise.
+                        logger.file(`${req.method} ${url.pathname}${url.search} → ${res.status}`, {
                             logger: 'http.log.access',
                             status: res.status,
                             duration: Math.round((performance.now() - start) * 10) / 10,

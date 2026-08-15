@@ -234,7 +234,8 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
             const remoteIp = conn?.remote?.address ?? null;
             const remotePort = conn?.remote?.port ?? null;
 
-            logger.info(`${c.req.method} ${uri} → ${c.res.status}`, {
+            // File-only: the per-request access log would flood the console.
+            logger.file(`${c.req.method} ${uri} → ${c.res.status}`, {
                 logger: 'http.log.access',
                 status: c.res.status,
                 duration: Math.round(duration * 10) / 10,

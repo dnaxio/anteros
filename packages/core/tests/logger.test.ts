@@ -121,4 +121,27 @@ describe("logger", () => {
         expect(out.some((l) => l.includes("visible info"))).toBe(true);
         expect(out.some((l) => l.includes("Server started"))).toBe(false);
     });
+
+    it("logger.file keeps the level when passed explicitly (never on console)", async () => {
+        const out: string[] = [];
+        const orig = console.log;
+        console.log = (...a: any[]) => { out.push(a.join(" ")); };
+
+        logger.configure({ dir: path.join(DIR, "filelevel"), file: true, console: true, level: "info" });
+        logger.file("default level", { a: 1 }); // 2-arg form → level 'info'
+        logger.file("warn", "explicit warn", { b: 2 }); // explicit level kept
+        logger.file("error", "explicit error", { c: 3 });
+        await flush();
+        console.log = orig;
+
+        const lines = readLogLines("filelevel/anteros.log");
+        expect(lines.find((l) => l.msg === "default level")!.level).toBe("info");
+        expect(lines.find((l) => l.msg === "explicit warn")!.level).toBe("warn");
+        expect(lines.find((l) => l.msg === "explicit warn")!.b).toBe(2);
+        expect(lines.find((l) => l.msg === "explicit error")!.level).toBe("error");
+        // never on the console, whatever the level
+        expect(out.some((l) => l.includes("default level"))).toBe(false);
+        expect(out.some((l) => l.includes("explicit warn"))).toBe(false);
+        expect(out.some((l) => l.includes("explicit error"))).toBe(false);
+    });
 });

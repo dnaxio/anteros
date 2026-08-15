@@ -22,7 +22,7 @@ export function LogSlowQuery(): any {
                 const duration = performance.now() - start;
                 const slowMs = cfg.server.logging?.slowQueryMs ?? 200;
                 if (duration >= slowMs) {
-                    logger.warn(`Slow ${propertyKey} (${Math.round(duration)}ms)`, {
+                    logger.file('warn', `Slow ${propertyKey} (${Math.round(duration)}ms)`, {
                         collection: args[0],
                         tenant: this.tenant_id,
                         duration: Math.round(duration),

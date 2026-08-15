@@ -310,6 +310,8 @@ By default the file is **`.logs/anteros.log`** (created automatically at boot, r
 
 The console output stays human-readable (`[HH:mm:ss] LEVEL message {meta}`, colorized); only the file is JSONL.
 
+> ⚠️ **Console = your logs only.** Everything the framework logs *per request* — the **access log**, **MCP operations** and **slow queries** — is written to the **file only** (`logger.file(...)`), so a busy API doesn't flood the terminal. The console shows the boot banner, fatal errors (`uncaughtException` / `unhandledRejection`), and the `logger.*` calls **you** make from your code. Set `logging.console: false` to silence even those.
+
 ### Access log format
 
 Every request is logged with a **Caddy-compatible JSONL** payload — flat fields + nested `request` / `resp_headers` blocks (a `ts`/`date`/`level`/`msg` envelope is injected automatically):
@@ -400,8 +402,10 @@ logger.warn('Low stock', { sku, remaining });
 logger.error('Payment failed', { code: 'PAYMENT_ERROR' });
 logger.debug('detail', { raw }); // only emitted when level ≤ 'debug'
 
-// Write to the file only (no console output) — for events that would clutter the terminal
+// File only (never on console) — the framework uses this internally for the
+// access log, MCP operations and slow queries.
 logger.file('Server started', { pid: process.pid });
+logger.file('warn', 'Long job finished', { took: 3000 }); // keep the level
 ```
 
 ## DB Query Cache

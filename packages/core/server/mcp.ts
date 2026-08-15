@@ -124,7 +124,7 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
             description: t.description,
             inputSchema: joiToJsonSchema(t.inputSchema),
         }));
-        logger.info('MCP tools/list', { method: 'tools/list', tenant: tenantId, count: toolsList.length, duration: ms(start) });
+        logger.file('MCP tools/list', { method: 'tools/list', tenant: tenantId, count: toolsList.length, duration: ms(start) });
         return { tools: toolsList };
     });
 
@@ -132,14 +132,14 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
         const start = performance.now();
         const tool = tools.find((t) => t.name === req.params.name);
         if (!tool) {
-            logger.warn('MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, error: 'unknown tool', duration: ms(start) });
+            logger.file('warn', 'MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, error: 'unknown tool', duration: ms(start) });
             throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${req.params.name}`);
         }
 
         const raw = req.params.arguments ?? {};
         const { error, value } = tool.inputSchema.validate(raw, { allowUnknown: false });
         if (error) {
-            logger.warn('MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, args: raw, error: 'invalid arguments', duration: ms(start) });
+            logger.file('warn', 'MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, args: raw, error: 'invalid arguments', duration: ms(start) });
             return {
                 content: [{ type: 'text' as const, text: `Invalid arguments: ${error.message}` }],
                 isError: true,
@@ -155,7 +155,7 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
             const text = typeof result === 'string' ? result : JSON.stringify(result);
             return { content: [{ type: 'text' as const, text }] };
         } catch (err: any) {
-            logger.warn('MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, args: value, error: err?.message ?? 'unknown', duration: ms(start) });
+            logger.file('warn', 'MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, args: value, error: err?.message ?? 'unknown', duration: ms(start) });
             return {
                 content: [{ type: 'text' as const, text: `Error: ${err?.message ?? 'unknown'}` }],
                 isError: true,
@@ -173,7 +173,7 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
                 description: r.description,
                 mimeType: r.mimeType,
             }));
-        logger.info('MCP resources/list', { method: 'resources/list', tenant: tenantId, count: resourcesList.length, duration: ms(start) });
+        logger.file('MCP resources/list', { method: 'resources/list', tenant: tenantId, count: resourcesList.length, duration: ms(start) });
         return { resources: resourcesList };
     });
 
@@ -187,7 +187,7 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
                 description: r.description,
                 mimeType: r.mimeType,
             }));
-        logger.info('MCP resources/templates/list', { method: 'resources/templates/list', tenant: tenantId, count: templates.length, duration: ms(start) });
+        logger.file('MCP resources/templates/list', { method: 'resources/templates/list', tenant: tenantId, count: templates.length, duration: ms(start) });
         return { resourceTemplates: templates };
     });
 
@@ -196,7 +196,7 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
         const uri = req.params.uri;
         const matched = matchUri(uri, resources);
         if (!matched) {
-            logger.warn('MCP resources/read', { method: 'resources/read', tenant: tenantId, uri, error: 'unknown uri', duration: ms(start) });
+            logger.file('warn', 'MCP resources/read', { method: 'resources/read', tenant: tenantId, uri, error: 'unknown uri', duration: ms(start) });
             throw new McpError(ErrorCode.InvalidParams, `Unknown resource URI: ${uri}`);
         }
 
@@ -208,10 +208,10 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
                 params: matched.params,
                 uri,
             });
-            logger.info('MCP resources/read', { method: 'resources/read', tenant: tenantId, uri, resource: matched.resource.name, params: matched.params, duration: ms(start) });
+            logger.file('MCP resources/read', { method: 'resources/read', tenant: tenantId, uri, resource: matched.resource.name, params: matched.params, duration: ms(start) });
             return result;
         } catch (err: any) {
-            logger.warn('MCP resources/read', { method: 'resources/read', tenant: tenantId, uri, error: err?.message ?? 'unknown', duration: ms(start) });
+            logger.file('warn', 'MCP resources/read', { method: 'resources/read', tenant: tenantId, uri, error: err?.message ?? 'unknown', duration: ms(start) });
             throw new McpError(ErrorCode.InternalError, `Failed to read resource: ${err?.message ?? 'unknown'}`);
         }
     });
