@@ -144,13 +144,14 @@ class Logger {
 
         const tsLocal = new Date().toLocaleTimeString('en-GB', { hour12: false });
         const ts = Date.now() / 1000;
+        const date = new Date().toISOString(); // ISO 8601 — YYYY-MM-DDTHH:mm:ss.sssZ
         const pad = level.toUpperCase().padEnd(5);
         const isPlain = (v: any): boolean =>
             v !== null && typeof v === 'object' && !Array.isArray(v)
             && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
 
         // JSONL payload (file): Caddy-style envelope + user meta (user keys win)
-        const payload: Record<string, unknown> = { ts, level, msg };
+        const payload: Record<string, unknown> = { ts, date, level, msg };
         if (isPlain(meta)) {
             Object.assign(payload, meta);
         } else if (meta !== undefined && meta !== null) {
