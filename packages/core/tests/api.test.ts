@@ -161,7 +161,7 @@ describe("cursors / streaming", () => {
         await rest.db.collection("items").deleteMany({ title: { $in: [marker, "other"] } });
     });
 
-    it("findPages yields { count, docs, hasNext } per batch", async () => {
+    it("findStream pageSize yields { count, docs, hasNext } per page", async () => {
         const marker = `pages-${crypto.randomUUID()}`;
         await rest.bulkWrite("items", Array.from({ length: 25 }, (_, i) => ({
             insertOne: { document: { title: marker, count: i } },
@@ -169,13 +169,13 @@ describe("cursors / streaming", () => {
         await rest.insertOne("items", { title: "other" });
 
         const pages: any[] = [];
-        for await (const page of rest.findPages("items", { $match: { title: marker } }, { batchSize: 10 })) {
+        for await (const page of rest.findStream("items", { $match: { title: marker } }, { pageSize: 10 })) {
             pages.push(page);
-            expect(page.count).toBe(25);          // total matching docs, not the batch size
-            expect(page.docs.length).toBeLessThanOrEqual(10); // batchSize
+            expect(page.count).toBe(25);          // total matching docs, not the page size
+            expect(page.docs.length).toBeLessThanOrEqual(10); // pageSize
             expect(page.docs.every((d: any) => d.title === marker)).toBe(true);
         }
-        // 25 docs / batch 10 → 3 pages: 10 + 10 + 5
+        // 25 docs / pageSize 10 → 3 pages: 10 + 10 + 5
         expect(pages.length).toBe(3);
         expect(pages[0]!.docs.length).toBe(10);
         expect(pages[0]!.hasNext()).toBe(true);
@@ -189,14 +189,14 @@ describe("cursors / streaming", () => {
         await rest.db.collection("items").deleteMany({ title: { $in: [marker, "other"] } });
     });
 
-    it("findPages withCount: false skips the count query", async () => {
+    it("findStream pageSize withCount: false skips the count query", async () => {
         const marker = `nocount-${crypto.randomUUID()}`;
         await rest.bulkWrite("items", Array.from({ length: 12 }, (_, i) => ({
             insertOne: { document: { title: marker, count: i } },
         })) as any);
 
         const pages: any[] = [];
-        for await (const page of rest.findPages("items", { $match: { title: marker } }, { batchSize: 10, withCount: false })) {
+        for await (const page of rest.findStream("items", { $match: { title: marker } }, { pageSize: 10, withCount: false })) {
             pages.push(page);
             expect("count" in page).toBe(false); // no count field
             expect(page.docs.length).toBeLessThanOrEqual(10);
@@ -242,7 +242,7 @@ describe("cursors / streaming", () => {
         await rest.db.collection("items").deleteMany({ title: marker });
     });
 
-    it("findPages map + signal", async () => {
+    it("findStream pageSize map + signal", async () => {
         const marker = `psig-${crypto.randomUUID()}`;
         await rest.bulkWrite("items", Array.from({ length: 30 }, (_, i) => ({
             insertOne: { document: { title: marker, count: i } },
@@ -250,8 +250,8 @@ describe("cursors / streaming", () => {
 
         const ac = new AbortController();
         let pages = 0;
-        for await (const page of rest.findPages("items", { $match: { title: marker } }, {
-            batchSize: 10,
+        for await (const page of rest.findStream("items", { $match: { title: marker } }, {
+            pageSize: 10,
             map: (d: any) => ({ id: d._id }),
             signal: ac.signal,
         })) {

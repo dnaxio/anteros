@@ -336,11 +336,18 @@ class MongoRest {
      *   map: (u) => ({ id: u._id, name: u.name }),
      *   signal: controller.signal,
      * })) { … }
+     * // Page mode: { pageSize } yields { count, docs, hasNext() } batches
+     * for await (const page of rest.findStream('orders', { $match: { status: 'paid' } }, { pageSize: 50 })) {
+     *   console.log(page.count, page.docs.length, page.hasNext());
+     * }
      */
     @CheckIfCollectionExists()
     async *findStream<T = any>(collection: string, params: FindOptions = {}, options: CursorOptions = {}): AsyncGenerator<any> {
+        const pageSize = options.pageSize;
+        // Page mode counts by default (opt-out with withCount: false); per-doc mode counts only when withCount: true
+        const withCount = pageSize ? options.withCount !== false : options.withCount === true;
         // Background total count (runs in parallel with the iteration)
-        const countPromise = options.withCount
+        const countPromise = withCount
             ? this.countDocuments(collection, params.$match ?? {})
             : null;
         const col = getCollection(collection, this.#tenant.id) as Collection
@@ -357,14 +364,34 @@ class MongoRest {
         // Resolve the count ONCE before iterating — the value is reused on every yield
         const count = countPromise ? await countPromise : null
         try {
-            for await (const doc of cursor) {
-                if (options.signal?.aborted) break
-                let value: any = func.toJson(doc)
-                if (options.map) value = options.map(value as T)
-                if (options.withCount) {
-                    yield { count, doc: value }
-                } else {
-                    yield value
+            if (pageSize) {
+                // ── Page mode: batches of `pageSize` → { count?, docs, hasNext() } ──
+                while (await cursor.hasNext()) {
+                    if (options.signal?.aborted) break
+                    const docs: any[] = []
+                    for (let i = 0; i < pageSize && await cursor.hasNext(); i++) {
+                        let value: any = func.toJson(await cursor.next())
+                        if (options.map) value = options.map(value as T)
+                        docs.push(value)
+                    }
+                    const hasMore = await cursor.hasNext()
+                    yield {
+                        ...(withCount ? { count } : {}),
+                        docs,
+                        hasNext: () => hasMore,
+                    }
+                }
+            } else {
+                // ── Per-doc mode: doc or { count, doc } ──
+                for await (const doc of cursor) {
+                    if (options.signal?.aborted) break
+                    let value: any = func.toJson(doc)
+                    if (options.map) value = options.map(value as T)
+                    if (options.withCount) {
+                        yield { count, doc: value }
+                    } else {
+                        yield value
+                    }
                 }
             }
         } finally {
@@ -421,64 +448,6 @@ class MongoRest {
                     yield { count, doc: value }
                 } else {
                     yield value
-                }
-            }
-        } finally {
-            await cursor.close().catch(() => {})
-        }
-    }
-
-    /**
-     * Stream results in **pages** (batches) with the total count computed in the
-     * background (parallel with the iteration). Each page yields:
-     * `{ count, docs, hasNext() }` — total matching docs, an array of up to
-     * `batchSize` JSON-converted documents, and whether more pages follow.
-     *
-     * @example
-     * for await (const page of rest.findPages('orders', { $match: { status: 'paid' } }, { batchSize: 50 })) {
-     *   console.log(page.count);        // total matching docs (e.g. 500000)
-     *   console.log(page.docs.length);  // 50 (batchSize)
-     *   console.log(page.hasNext());    // true / false
-     *   for (const doc of page.docs) { … }
-     * }
-     * // Skip the count query entirely (faster): { withCount: false } → pages have no `count`
-     * for await (const page of rest.findPages('orders', { $match: { status: 'paid' } }, { batchSize: 50, withCount: false })) { … }
-     */
-    @CheckIfCollectionExists()
-    async *findPages<T = any>(collection: string, params: FindOptions = {}, options: CursorOptions = {}): AsyncGenerator<any> {
-        const batchSize = options.batchSize ?? 100;
-        const withCount = options.withCount !== false; // default true
-        // Background total count — runs in parallel with the iteration (skipped when withCount: false)
-        const countPromise = withCount
-            ? this.countDocuments(collection, params.$match ?? {})
-            : null;
-        const col = getCollection(collection, this.#tenant.id) as Collection
-        let pipeline = func.buildPipeline({ ...params, $limit: params.$limit ?? 0 }, { col: col })
-        pipeline = await func.buildInput(pipeline, { rest: this })
-        pipeline = func.toBson(pipeline, { col })
-        const cursor = this.db.collection(collection).aggregate(pipeline, {
-            session: this.session,
-            allowDiskUse: true,
-            comment: options.comment,
-            hint: options.hint,
-        }) as AggregationCursor
-        this.#applyCursorOptions(cursor, options)
-        // Resolve the count ONCE before iterating — the value is reused on every page
-        const count = countPromise ? await countPromise : 0
-        try {
-            while (await cursor.hasNext()) {
-                if (options.signal?.aborted) break
-                const docs: any[] = []
-                for (let i = 0; i < batchSize && await cursor.hasNext(); i++) {
-                    let value: any = func.toJson(await cursor.next())
-                    if (options.map) value = options.map(value as T)
-                    docs.push(value)
-                }
-                const hasMore = await cursor.hasNext()
-                yield {
-                    ...(withCount ? { count } : {}),
-                    docs,
-                    hasNext: () => hasMore,
                 }
             }
         } finally {

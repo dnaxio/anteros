@@ -21,6 +21,8 @@ export type CursorOptions = {
     signal?: AbortSignal;
     /** Transform each document on the fly (lazy — no intermediate array). Applied before `withCount` wraps the value */
     map?: (doc: any) => any;
+    /** Page mode — when set, `findStream` yields `{ count, docs, hasNext() }` batches of this size instead of single docs */
+    pageSize?: number;
 };
 
 export type RestOptions = {
