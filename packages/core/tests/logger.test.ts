@@ -35,6 +35,7 @@ describe("logger", () => {
         expect(hello.level).toBe("info");
         expect(hello.port).toBe(4000);
         expect(typeof hello.ts).toBe("number");
+        expect(hello.date).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/); // ISO YYYY-MM-DDTHH:mm:ss
         expect(lines.find((l) => l.msg === "boom")!.level).toBe("error");
         expect(lines.find((l) => l.msg === "dbg")!.level).toBe("debug");
     });

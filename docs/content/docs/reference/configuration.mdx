@@ -299,10 +299,10 @@ When disabled, no rate limit headers are applied and all requests pass through u
 
 Anteros ships a built-in logging system (MongoDB-`mongodb.log`-style): every request, boot event and error is written to a **log file** with levels, timestamps, and rotation.
 
-By default the file is **`.logs/anteros.log`** (created automatically at boot, relative to the working directory — a hidden folder like `.cache/`). The file is **JSONL** — one JSON object per line, with a Caddy-style envelope (`ts` epoch-seconds, `level`, `msg`), ready for `jq`/grep/parsing:
+By default the file is **`.logs/anteros.log`** (created automatically at boot, relative to the working directory — a hidden folder like `.cache/`). The file is **JSONL** — one JSON object per line, with a Caddy-style envelope (`ts` epoch-seconds, `date` ISO 8601, `level`, `msg`), ready for `jq`/grep/parsing:
 
 ```json
-{"ts":1786752192.458,"level":"info","msg":"Starting Anteros server","port":4000,"tenants":["v1"]}
+{"ts":1786752192.458,"date":"2026-08-15T20:51:43.685Z","level":"info","msg":"Starting Anteros server","port":4000,"tenants":["v1"]}
 {"ts":1786752193.658,"level":"info","msg":"POST /api/v1/users/find → 200","logger":"http.log.access","status":200,"duration":12.4,"method":"POST","uri":"/api/v1/users/find","remote_ip":"127.0.0.1","bytes_read":42,"size":1024,"user_id":"","ip":"127.0.0.1","traceId":"c4645d8e-...","tenant":"v1","request":{"headers":{"accept":["*/*"],"user-agent":["Mozilla/5.0..."]},"client_ip":"127.0.0.1","host":"api.example.com","method":"POST","remote_ip":"127.0.0.1","remote_port":51324,"uri":"/api/v1/users/find"},"resp_headers":{"content-type":["application/json"]}}
 {"ts":1786752195.5,"level":"warn","msg":"Slow find (350ms)","collection":"orders","tenant":"v1","duration":350}
 {"ts":1786752197.0,"level":"error","msg":"Uncaught exception","message":"...","stack":"..."}
@@ -312,15 +312,16 @@ The console output stays human-readable (`[HH:mm:ss] LEVEL message {meta}`, colo
 
 ### Access log format
 
-Every request is logged with a **Caddy-compatible JSONL** payload — flat fields + nested `request` / `resp_headers` blocks (a `ts`/`level`/`msg` envelope is injected automatically):
+Every request is logged with a **Caddy-compatible JSONL** payload — flat fields + nested `request` / `resp_headers` blocks (a `ts`/`date`/`level`/`msg` envelope is injected automatically):
 
 ```json
-{"ts":1786752193.658,"level":"info","msg":"POST /api/v1/users/find → 200","logger":"http.log.access","status":200,"duration":12.4,"method":"POST","uri":"/api/v1/users/find","remote_ip":"127.0.0.1","bytes_read":42,"size":1024,"user_id":"","ip":"127.0.0.1","traceId":"c4645d8e-...","tenant":"v1","request":{"headers":{"accept":["*/*"],"user-agent":["Mozilla/5.0..."]},"client_ip":"127.0.0.1","host":"api.example.com","method":"POST","remote_ip":"127.0.0.1","remote_port":51324,"uri":"/api/v1/users/find"},"resp_headers":{"content-type":["application/json"]}}
+{"ts":1786752193.658,"date":"2026-08-15T20:51:43.685Z","level":"info","msg":"POST /api/v1/users/find → 200","logger":"http.log.access","status":200,"duration":12.4,"method":"POST","uri":"/api/v1/users/find","remote_ip":"127.0.0.1","bytes_read":42,"size":1024,"user_id":"","ip":"127.0.0.1","traceId":"c4645d8e-...","tenant":"v1","request":{"headers":{"accept":["*/*"],"user-agent":["Mozilla/5.0..."]},"client_ip":"127.0.0.1","host":"api.example.com","method":"POST","remote_ip":"127.0.0.1","remote_port":51324,"uri":"/api/v1/users/find"},"resp_headers":{"content-type":["application/json"]}}
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `ts` | `number` | Epoch seconds (float) — auto-injected |
+| `date` | `string` | ISO 8601 timestamp (`YYYY-MM-DDTHH:mm:ss.sssZ`) — auto-injected |
 | `level` | `string` | Log level — auto-injected |
 | `msg` | `string` | Log message — auto-injected |
 | `logger` | `string` | Log source (`http.log.access`) |
