@@ -354,13 +354,15 @@ class MongoRest {
             hint: options.hint,
         }) as AggregationCursor
         this.#applyCursorOptions(cursor, options)
+        // Resolve the count ONCE before iterating — the value is reused on every yield
+        const count = countPromise ? await countPromise : null
         try {
             for await (const doc of cursor) {
                 if (options.signal?.aborted) break
                 let value: any = func.toJson(doc)
                 if (options.map) value = options.map(value as T)
                 if (options.withCount) {
-                    yield { count: await countPromise, doc: value }
+                    yield { count, doc: value }
                 } else {
                     yield value
                 }
@@ -376,6 +378,9 @@ class MongoRest {
      *
      * @example
      * for await (const doc of rest.aggregateStream('orders', [{ $match: { status: 'paid' } }], { batchSize: 500 })) { … }
+     * for await (const d of rest.aggregateStream('orders', [{ $group: { _id: '$status', n: { $sum: 1 } } }], { withCount: true })) {
+     *   console.log(d.count, d.doc); // total pipeline results + each doc
+     * }
      */
     @CheckIfCollectionExists()
     async *aggregateStream<T = any>(collection: string, pipeline: any[] = [], options: CursorOptions = {}): AsyncGenerator<any> {
@@ -390,6 +395,14 @@ class MongoRest {
             throw isSafe.error;
         }
         pipeline = func.toBson(pipeline, { col })
+        // Background total count of the pipeline OUTPUT (via a $count stage) —
+        // parallel with the iteration; best-effort (fails silently for $out/$merge)
+        const countPromise = options.withCount
+            ? this.db.collection(collection).aggregate([...pipeline, { $count: 'count' }], {
+                session: this.session,
+                allowDiskUse: true,
+            }).toArray().then((r) => (r[0]?.count as number) ?? 0).catch(() => 0)
+            : null;
         const cursor = this.db.collection(collection).aggregate(pipeline, {
             session: this.session,
             allowDiskUse: true,
@@ -397,12 +410,18 @@ class MongoRest {
             hint: options.hint,
         }) as AggregationCursor
         this.#applyCursorOptions(cursor, options)
+        // Resolve the count ONCE before iterating — the value is reused on every yield
+        const count = countPromise ? await countPromise : null
         try {
             for await (const doc of cursor) {
                 if (options.signal?.aborted) break
                 let value: any = func.toJson(doc)
                 if (options.map) value = options.map(value as T)
-                yield value
+                if (options.withCount) {
+                    yield { count, doc: value }
+                } else {
+                    yield value
+                }
             }
         } finally {
             await cursor.close().catch(() => {})
@@ -422,12 +441,17 @@ class MongoRest {
      *   console.log(page.hasNext());    // true / false
      *   for (const doc of page.docs) { … }
      * }
+     * // Skip the count query entirely (faster): { withCount: false } → pages have no `count`
+     * for await (const page of rest.findPages('orders', { $match: { status: 'paid' } }, { batchSize: 50, withCount: false })) { … }
      */
     @CheckIfCollectionExists()
-    async *findPages<T = any>(collection: string, params: FindOptions = {}, options: CursorOptions = {}): AsyncGenerator<{ count: number; docs: any[]; hasNext: () => boolean }> {
+    async *findPages<T = any>(collection: string, params: FindOptions = {}, options: CursorOptions = {}): AsyncGenerator<any> {
         const batchSize = options.batchSize ?? 100;
-        // Background total count — runs in parallel with the iteration
-        const countPromise = this.countDocuments(collection, params.$match ?? {});
+        const withCount = options.withCount !== false; // default true
+        // Background total count — runs in parallel with the iteration (skipped when withCount: false)
+        const countPromise = withCount
+            ? this.countDocuments(collection, params.$match ?? {})
+            : null;
         const col = getCollection(collection, this.#tenant.id) as Collection
         let pipeline = func.buildPipeline({ ...params, $limit: params.$limit ?? 0 }, { col: col })
         pipeline = await func.buildInput(pipeline, { rest: this })
@@ -439,6 +463,8 @@ class MongoRest {
             hint: options.hint,
         }) as AggregationCursor
         this.#applyCursorOptions(cursor, options)
+        // Resolve the count ONCE before iterating — the value is reused on every page
+        const count = countPromise ? await countPromise : 0
         try {
             while (await cursor.hasNext()) {
                 if (options.signal?.aborted) break
@@ -450,7 +476,7 @@ class MongoRest {
                 }
                 const hasMore = await cursor.hasNext()
                 yield {
-                    count: await countPromise,
+                    ...(withCount ? { count } : {}),
                     docs,
                     hasNext: () => hasMore,
                 }

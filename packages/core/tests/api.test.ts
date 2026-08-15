@@ -189,6 +189,26 @@ describe("cursors / streaming", () => {
         await rest.db.collection("items").deleteMany({ title: { $in: [marker, "other"] } });
     });
 
+    it("findPages withCount: false skips the count query", async () => {
+        const marker = `nocount-${crypto.randomUUID()}`;
+        await rest.bulkWrite("items", Array.from({ length: 12 }, (_, i) => ({
+            insertOne: { document: { title: marker, count: i } },
+        })) as any);
+
+        const pages: any[] = [];
+        for await (const page of rest.findPages("items", { $match: { title: marker } }, { batchSize: 10, withCount: false })) {
+            pages.push(page);
+            expect("count" in page).toBe(false); // no count field
+            expect(page.docs.length).toBeLessThanOrEqual(10);
+            expect(typeof page.hasNext).toBe("function");
+        }
+        expect(pages.length).toBe(2); // 10 + 2
+        expect(pages[0]!.hasNext()).toBe(true);
+        expect(pages[1]!.hasNext()).toBe(false);
+
+        await rest.db.collection("items").deleteMany({ title: marker });
+    });
+
     it("findStream map transforms each doc on the fly", async () => {
         const marker = `map-${crypto.randomUUID()}`;
         await rest.insertMany("items", [{ title: marker, count: 1 }, { title: marker, count: 2 }]);
@@ -240,6 +260,24 @@ describe("cursors / streaming", () => {
             if (pages === 2) ac.abort();
         }
         expect(pages).toBe(2); // stopped after 2 pages
+
+        await rest.db.collection("items").deleteMany({ title: marker });
+    });
+
+    it("aggregateStream withCount counts the pipeline output", async () => {
+        const marker = `acount-${crypto.randomUUID()}`;
+        await rest.insertMany("items", [
+            { title: marker, count: 1 },
+            { title: marker, count: 2 },
+            { title: marker, count: 3 },
+        ]);
+
+        const out: any[] = [];
+        for await (const d of rest.aggregateStream("items", [{ $match: { title: marker } }], { withCount: true })) {
+            expect(d.count).toBe(3);
+            out.push(d.doc);
+        }
+        expect(out.length).toBe(3);
 
         await rest.db.collection("items").deleteMany({ title: marker });
     });

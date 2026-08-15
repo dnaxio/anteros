@@ -162,7 +162,9 @@ All accept a third `options` parameter:
 | `maxTimeMS` | `number` | Max execution time — the query aborts with a timeout if it runs longer (`cursor.maxTimeMS(n)`) |
 | `comment` | `string` | Comment attached to the query — visible in MongoDB profiling / slow query logs (passed via `aggregate()` options) |
 | `hint` | `string \| object` | Force a specific index: name (`'email_1'`) or key pattern (`{ email: 1 }`) (passed via `aggregate()` options) |
-| `withCount` | `boolean` | **`findStream` only** — runs a background `countDocuments` (parallel with the iteration); each yielded item becomes `{ count, doc }` (total + document) |
+| `withCount` | `boolean` | Runs a background count — **`findStream`/`aggregateStream`**: opt-in (default `false`); **`findPages`**: default `true`, set `false` to skip the count query (pages then have no `count` field). `findStream` counts docs matching `$match`; `aggregateStream` counts the pipeline **output** (via `$count`) — each yielded item becomes `{ count, doc }` |
+| `signal` | `AbortSignal` | Abort the stream — iteration stops and the cursor is closed cleanly (useful when the HTTP client disconnects) |
+| `map` | `(doc) => any` | Transform each document on the fly (lazy — no intermediate array). Applied before `withCount` wraps the value |
 
 > ⚠️ Streaming methods do **not** run collection hooks (`beforeOperation` / `afterOperation`) — documents stream lazily as you iterate.
 
