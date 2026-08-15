@@ -303,7 +303,7 @@ By default the file is **`.logs/anteros.log`** (created automatically at boot, r
 
 ```json
 {"ts":1786752192.458,"level":"info","msg":"Starting Anteros server","port":4000,"tenants":["v1"]}
-{"ts":1786752193.658,"level":"info","msg":"POST /api/v1/users/find → 200","status":200,"duration":12.4,"method":"POST","uri":"/api/v1/users/find","host":"api.example.com","ip":"127.0.0.1","remoteIp":"127.0.0.1","remotePort":51324,"bytesRead":42,"bytesSent":1024,"headers":{"accept":["*/*"],"user-agent":["Mozilla/5.0..."]},"respHeaders":{"content-type":["application/json"]},"user":"","traceId":"c4645d8e-...","tenant":"v1"}
+{"ts":1786752193.658,"level":"info","msg":"POST /api/v1/users/find → 200","logger":"http.log.access","status":200,"duration":12.4,"method":"POST","uri":"/api/v1/users/find","remote_ip":"127.0.0.1","bytes_read":42,"size":1024,"user_id":"","ip":"127.0.0.1","traceId":"c4645d8e-...","tenant":"v1","request":{"headers":{"accept":["*/*"],"user-agent":["Mozilla/5.0..."]},"client_ip":"127.0.0.1","host":"api.example.com","method":"POST","remote_ip":"127.0.0.1","remote_port":51324,"uri":"/api/v1/users/find"},"resp_headers":{"content-type":["application/json"]}}
 {"ts":1786752195.5,"level":"warn","msg":"Slow find (350ms)","collection":"orders","tenant":"v1","duration":350}
 {"ts":1786752197.0,"level":"error","msg":"Uncaught exception","message":"...","stack":"..."}
 ```
@@ -402,6 +402,80 @@ logger.debug('detail', { raw }); // only emitted when level ≤ 'debug'
 // Write to the file only (no console output) — for events that would clutter the terminal
 logger.file('Server started', { pid: process.pid });
 ```
+
+## DB Query Cache
+
+Cache-aside caching for `find` queries: with `{ useCache: true }` the result is served from the cache (keyed by a hash of the query params), populated on miss, and **invalidated automatically on any write** (insert/update/delete/findOneAndUpdate/bulk…) — plus cross-collection invalidation when a query uses `$include` (modifying `clients` invalidates `orders` queries that embed client data). `findOne` is never cached (point queries).
+
+> ⚠️ **Opt-in**: the DB query cache is **disabled by default** — you must set `cache.enabled: true` in `server.cache` for `useCache` to have any effect. The default driver is **`memory`** (fastest, but lost on restart) — use `driver: 'filesystem'` for persistence or `'redis'` for multi-process sharing.
+
+> ℹ️ **Large results**: every cached entry is tagged with its result `_id`s (up to `cache.maxTags`, default 50000) — a 7000-doc result is fully covered. Each tag costs ~0.18µs per cache hit, negligible vs the cost of the real query.
+
+```typescript
+const config = define.Server({
+  server: {
+    port: 4000,
+    cache: {
+      enabled: true,         // REQUIRED — the DB query cache is OFF by default (opt-in)
+      driver: 'memory',       // 'memory' (default) | 'filesystem' | 'redis'
+      directory: '.cache',      // filesystem driver directory (default: ./.cache)
+      pruneInterval: '1h',      // filesystem prune interval
+      ttl: '5m',                // default TTL for cached queries
+      // redis: { host: 'localhost', port: 6379, password: '' }, // driver: 'redis'
+    },
+  },
+  tenants: [...],
+});
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `cache.enabled` | `boolean` | `false` | **Opt-in** — the DB query cache is disabled unless set to `true` |
+| `cache.driver` | `string` | `'memory'` | Driver: `memory` (default, L1 only), `filesystem` (`.cache/` folder, L1 memory + L2 disk), `redis` |
+| `cache.directory` | `string` | `'./.cache'` | Filesystem driver directory (project root) |
+| `cache.redis` | `object` | - | Redis connection (`host`, `port`, `password`) when `driver: 'redis'` |
+| `cache.pruneInterval` | `string` | `'1h'` | Filesystem prune interval |
+| `cache.ttl` | `string \| number` | `'5m'` | Default TTL for cached queries |
+| `cache.maxTags` | `number` | `50000` | Max `_id` tags per cached entry — large results are tagged up to this count (~0.18µs per tag check on each hit) |
+
+### Per-collection TTL
+
+Set a default TTL on the collection definition (`cache: { ttl }`) — it wins over the server default:
+
+```typescript
+export default define.Collection({
+  slug: 'orders',
+  fields: [...],
+  cache: { ttl: '30s' },
+});
+```
+
+### Usage
+
+```typescript
+// internal API / actions / services
+const docs = await rest.find('orders', { $match: { status: 'paid' } }, {
+  useCache: true,
+});
+
+// REST API — pass `options` alongside `params`
+POST /api/v1/orders/find
+{ "params": { "$match": { "status": "paid" } }, "options": { "useCache": true } }
+```
+
+TTL precedence: `collection.cache.ttl` > `server.cache.ttl` > `'5m'`. (The internal `rest.find` API still accepts an `options.ttl` override for server-side code — actions, services, scripts — but HTTP/SDK clients only control `useCache`; TTL is a backend concern.) Relations (`$include`) are tracked so a write on the included collection invalidates the parent's cached queries too.
+
+### Invalidation
+
+Every cached query is **indexed by the `_id`s of its results** (including the `_id`s of `$include`d documents). Invalidation is then **targeted**:
+
+| Write | Invalidation |
+|-------|-------------|
+| `updateOne` / `updateMany` / `deleteOne` / `deleteMany` (known ids) | 🔥 **Targeted** — only the cached queries whose result contains one of those `_id`s are removed. A change on a document that is **not** part of a cached result (e.g. a January doc while the cached query returned February docs) **keeps that cache** |
+| `insertOne` / `insertMany` / `bulkWrite` / `bulkUpdate` / `findOneAndUpdate` / `dropCollection` | 🧨 **Full** — the whole collection namespace is cleared (a new document could match any cached query) |
+| Write on an `$include`d collection (`clients`) | 🔥 Targeted on the parent (`orders`) — only the queries embedding the modified client `_id` are removed |
+
+> ⚠️ Writes done **directly through the MongoDB driver** (`rest.db.collection(...)`) bypass the framework and do **not** invalidate — the cache stays until its TTL.
 
 ## Tenants Configuration
 

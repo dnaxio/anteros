@@ -188,7 +188,12 @@ class Rest {
         options?: RestRequestOptions,
     ): Promise<T[]> {
         const merged = { ...(this.#defaultParams?.find ?? {}), ...params };
-        return this.request<T[]>(collection, "find", { params: merged }, options);
+        const { useCache, ...requestOptions } = options ?? {};
+        const body: Record<string, unknown> = { params: merged };
+        if (useCache !== undefined) {
+            body.options = { useCache }; // TTL is managed server-side (collection/server config)
+        }
+        return this.request<T[]>(collection, "find", body, requestOptions);
     }
 
     async findOne<T = any>(

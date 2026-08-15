@@ -74,6 +74,27 @@ export type ServerConfig = {
             /** Log database operations slower than this many ms (default: 200) */
             slowQueryMs?: number;
         };
+        /** DB query caching (find + useCache) — driver + defaults for the query cache */
+        cache?: {
+            enabled?: boolean;
+            /** Driver: 'memory' (default), 'filesystem' (.cache/ folder), 'redis' */
+            driver?: 'memory' | 'filesystem' | 'redis';
+            /** Filesystem driver directory (default: ./.cache) */
+            directory?: string;
+            /** Redis connection (driver: 'redis') */
+            redis?: {
+                url?: string;
+                host?: string;
+                port?: number;
+                password?: string;
+            };
+            /** Filesystem prune interval (default: '1h') */
+            pruneInterval?: string;
+            /** Default TTL for cached queries — human string ('5m') or ms (default: '5m') */
+            ttl?: string | number;
+            /** Max `_id` tags per cached entry — large results are tagged up to this count (default: 50000; each tag costs ~0.18µs per cache hit) */
+            maxTags?: number;
+        };
     }
     tenants: Tenant[];
 }

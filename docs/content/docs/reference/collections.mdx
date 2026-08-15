@@ -112,6 +112,18 @@ Each field can have these options:
 **Index creation policy** — at boot, Anteros lists the indexes that already exist on each collection and **only creates the missing ones**. An index that already exists (same name or same key pattern) is never re-created or forced — even if its options (e.g. `sparse`) changed in the model, the existing definition wins. To apply new index options, drop the index first (`rest.dropIndex`). Orphan indexes (fields removed from the schema) are dropped only when `purgeOrphanIndexes` is enabled on the collection.
 </Callout>
 
+### Per-collection caching
+
+Set a default TTL for `useCache` queries on this collection (see [Configuration → DB Query Cache](/docs/reference/configuration#db-query-cache)):
+
+```typescript
+export default define.Collection({
+  slug: 'orders',
+  fields: [...],
+  cache: { ttl: '30s' },   // default TTL for useCache queries (query ttl > this > server ttl > '5m')
+});
+```
+
 ## Example: Blog Posts
 
 ```typescript

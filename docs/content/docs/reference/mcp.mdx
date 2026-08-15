@@ -283,7 +283,7 @@ MCP traffic is logged at **two levels** (see [Configuration → Logging](/docs/r
 **1. HTTP access log** — every `/mcp/:tenant_id` request, Caddy-style JSON (method, uri, host, remote ip/port, headers, bytes, traceId):
 
 ```
-INFO  POST /mcp/v1 → 200 {"status":200,"duration":19.7,"method":"POST","uri":"/mcp/v1","host":"api.example.com","ip":"1.2.3.4","headers":{...},"traceId":"...","tenant":null}
+INFO  POST /mcp/v1 → 200 {"logger":"http.log.access","status":200,"duration":19.7,"method":"POST","uri":"/mcp/v1","remote_ip":"1.2.3.4","ip":"1.2.3.4","traceId":"...","tenant":null,"request":{"headers":{...},"client_ip":"1.2.3.4","host":"api.example.com","method":"POST","remote_ip":"1.2.3.4","uri":"/mcp/v1"},"resp_headers":{...}}
 ```
 
 **2. MCP JSON-RPC log** — each protocol operation, with a dedicated `method` field (`tools/list`, `tools/call`, `resources/list`, `resources/templates/list`, `resources/read`), the tool/resource called, its arguments and the duration:

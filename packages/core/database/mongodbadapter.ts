@@ -3,13 +3,15 @@ import type { Tenant } from "../types/tenant";
 import type { MongoClientOptions, Db, ClientSession, UpdateOptions, UpdateFilter, Document, DeleteResult, ChangeStreamOptions, ChangeStream, ChangeStreamDocument, AnyBulkWriteOperation, BulkWriteOptions, BulkWriteResult, UpdateResult } from "mongodb";
 import { MongoClient, ObjectId, AggregationCursor } from "mongodb";
 import type { FindOptions, findOneOptions } from "../types/mongo";
+import type { FindCallOptions } from "../types/mongo";
+import { dbGetOrSet, dbInvalidate, getDbCache } from "./db.cache";
 import { sessionCtxStorage, asyncContextStorage, requestCtxStorage } from "../lib/asyncContextStorage";
 import * as func from "../utils/func"
 import { AppError, fn } from "../lib/error";
 import { createWorkflow } from "./workflow";
 import { getTenant } from "./tenant";
 import { getCollection, getCollectionKeys } from "./collection"
-import type { RestActions, BulkUpdateOperation, RestOptions, CursorOptions } from "../types/rest";
+import type { RestActions, BulkUpdateOperation, RestOptions, CursorOptions, TenantCache } from "../types/rest";
 import type Joi from "joi";
 import type { Collection } from "../types/collection";
 import { CheckBulkWriteOperations, CheckIfCollectionExists, CheckIfId, CheckInsertData, CheckIfArrayOfIds, CheckFilter, LogSlowQuery } from "./decorator";
@@ -214,19 +216,31 @@ class MongoRest {
         action: string,
         collection: string,
         input: any,
-        fn: () => Promise<T>
+        fn: () => Promise<T>,
+        options?: { invalidate?: boolean | string[] }
     ): Promise<T> {
         const start = Date.now()
         try {
             const result = await fn()
             const duration = Date.now() - start
             this.#logActivity({ action, collection, input, result, duration })
+            // Writes invalidate the collection's query cache (and its $include dependents).
+            // An array of ids = targeted invalidation (only queries containing those ids),
+            // `true` = clear the whole collection namespace.
+            if (options?.invalidate) {
+                await this.#invalidateCache(collection, typeof options.invalidate === 'boolean' ? undefined : options.invalidate)
+            }
             return result
         } catch (err: any) {
             const duration = Date.now() - start
             this.#logActivity({ action, collection, input, error: { message: err?.message, code: err?.code || 'INTERNAL_API_ERROR' }, duration })
             throw err instanceof AppError ? err : new AppError(err?.message || 'Internal server error', { code: 'INTERNAL_API_ERROR', status: 500 })
         }
+    }
+
+    /** Invalidate the DB query cache for a collection after a write (targeted by ids when known) */
+    #invalidateCache(collection: string, ids?: string[]) {
+        return dbInvalidate(collection, this.tenant_id, ids)
     }
 
     async connect(options?: {
@@ -457,31 +471,40 @@ class MongoRest {
 
     @LogSlowQuery()
     @CheckIfCollectionExists()
-    async find(collection: string, params: FindOptions = {}, options = {}): Promise<Document[]> {
+    async find(collection: string, params: FindOptions = {}, options: FindCallOptions = {}): Promise<Document[]> {
         const action = 'find' as ActionsApiList
         try {
-            const col = getCollection(collection, this.#tenant.id) as Collection
-            let pipeline = func.buildPipeline(params, { col: col })
-            pipeline = await func.buildInput(pipeline, { rest: this })
-            pipeline = func.toBson(pipeline, { col })
+            // Real query — hooks + pipeline + toArray
+            const run = async (): Promise<Document[]> => {
+                const col = getCollection(collection, this.#tenant.id) as Collection
+                let pipeline = func.buildPipeline(params, { col: col })
+                pipeline = await func.buildInput(pipeline, { rest: this })
+                pipeline = func.toBson(pipeline, { col })
 
-            const meta: any = { action, collection, params, options }
-            if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({ rest: this, io, action, meta })
+                const meta: any = { action, collection, params, options }
+                if (col.hooks?.beforeOperation) {
+                    await col.hooks.beforeOperation({ rest: this, io, action, meta })
+                }
+
+                let result = await this.db.collection(collection).aggregate(pipeline, {
+                    session: this.session,
+                    allowDiskUse: true
+                }).toArray()
+                result = func.toJson(result)
+                meta.result = result
+
+                if (col.hooks?.afterOperation) {
+                    await col.hooks.afterOperation({ rest: this, io, action, meta })
+                }
+
+                return result as any[]
             }
 
-            let result = await this.db.collection(collection).aggregate(pipeline, {
-                session: this.session,
-                allowDiskUse: true
-            }).toArray()
-            result = func.toJson(result)
-            meta.result = result
-
-            if (col.hooks?.afterOperation) {
-                await col.hooks.afterOperation({ rest: this, io, action, meta })
+            // Cache-first when `useCache: true` — served from the query cache, populated on miss
+            if (options.useCache === true) {
+                return await dbGetOrSet(collection, this.tenant_id, params, options, run)
             }
-
-            return result as any[]
+            return await run()
         } catch (err: any) {
             throw err instanceof AppError ? err : new AppError(err?.message || 'Internal server error', { code: 'INTERNAL_API_ERROR', status: 500 })
         }
@@ -553,7 +576,7 @@ class MongoRest {
             }
 
             return result
-        })
+        }, { invalidate: true })
     }
 
     @LogSlowQuery()
@@ -593,7 +616,7 @@ class MongoRest {
             }
 
             return result as (T & { _id: string })[]
-        })
+        }, { invalidate: true })
     }
 
     @LogSlowQuery()
@@ -631,7 +654,7 @@ class MongoRest {
             }
 
             return result
-        })
+        }, { invalidate: [_id] })
     }
 
     @LogSlowQuery()
@@ -699,7 +722,7 @@ class MongoRest {
             }
 
             return result as Document | null
-        })
+        }, { invalidate: true })
     }
 
     @LogSlowQuery()
@@ -734,7 +757,7 @@ class MongoRest {
             }
 
             return result as UpdateResult
-        })
+        }, { invalidate: _ids })
     }
 
     @LogSlowQuery()
@@ -762,7 +785,7 @@ class MongoRest {
             }
 
             return result
-        })
+        }, { invalidate: [_id] })
     }
 
 
@@ -791,7 +814,7 @@ class MongoRest {
             }
 
             return result
-        })
+        }, { invalidate: _ids })
     }
 
 
@@ -858,7 +881,7 @@ class MongoRest {
             })
 
             return result
-        })
+        }, { invalidate: true })
     }
 
 
@@ -892,7 +915,7 @@ class MongoRest {
             })
 
             return result
-        })
+        }, { invalidate: true })
     }
 
 
@@ -912,7 +935,7 @@ class MongoRest {
         const action = 'dropCollection' as ActionsApiList
         return this.#executeWithAudit(action, collection, undefined, async () => {
             return await this.db.collection(collection).drop()
-        })
+        }, { invalidate: true })
     }
 
     @CheckIfCollectionExists()
@@ -1076,6 +1099,38 @@ class MongoRest {
                 return await this.db.collection('_activities_').aggregate(pipeline).toArray()
             }
         }
+    }
+
+    /**
+     * Tenant-scoped cache — `rest.cache.*` stores under the `app:{tenant_id}`
+     * namespace, so keys never collide across tenants. Uses the configured
+     * cache driver (server.cache — default filesystem ./.cache).
+     *
+     * @example
+     * await rest.cache.set('price:42', { total: 99 }, '5m');
+     * const v = await rest.cache.getOrSet('stats', () => rest.aggregate('orders', [...]), '1h');
+     * await rest.cache.delete('price:42');
+     * await rest.cache.clear();
+     */
+    get cache(): TenantCache {
+        const tenantId = this.tenant_id;
+        const cache = getDbCache();
+        const ns = () => cache.namespace(`app:${tenantId}`);
+        return {
+            set: (key, value, ttl = '5m') => ns().set({ key, value, ttl }),
+            setForever: (key, value) => ns().setForever({ key, value }),
+            get: (key) => ns().get({ key }),
+            getOrSet: (key, factory, ttl = '5m') => ns().getOrSet({ key, factory, ttl }),
+            getOrSetForever: (key, factory) => ns().getOrSetForever({ key, factory }),
+            has: (key) => ns().has({ key }),
+            missing: (key) => ns().missing({ key }),
+            delete: (key) => ns().delete({ key }),
+            deleteMany: (keys) => ns().deleteMany({ keys }),
+            pull: (key) => ns().pull(key),
+            expire: (key, ttl) => ns().expire({ key, ttl }),
+            clear: () => ns().clear(),
+            namespace: (name) => cache.namespace(`app:${tenantId}:${name}`),
+        };
     }
 
     /**

@@ -174,7 +174,7 @@ type CrudHandler = (rest: InstanceType<typeof useRest>, collection: string, body
 
 const crudHandlers: Record<string, CrudHandler> = {
     aggregate:       (rest, collection, body) => rest.aggregate(collection, body?.pipeline || []),
-    find:            (rest, collection, body) => rest.find(collection, body?.params || {}),
+    find:            (rest, collection, body) => rest.find(collection, body?.params || {}, { useCache: body?.options?.useCache }),
     findOne:         (rest, collection, body) => rest.findOne(collection, body?.id, body?.params || {}),
     insertOne:       (rest, collection, body) => rest.insertOne(collection, body?.data),
     insertMany:      (rest, collection, body) => rest.insertMany(collection, body?.data),

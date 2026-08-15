@@ -689,6 +689,9 @@ function buildPipeline(p: FindOptions, options?: {
     col: Collection
 }) {
 
+    // Never mutate the caller's params (buildPipeline fills defaults like $limit)
+    p = { ...p }
+
     let pipeline = []
     // $Match
     if (p?.$match) {

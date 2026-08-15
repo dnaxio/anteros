@@ -33,8 +33,8 @@ class Cache {
 
         if (driver == 'filesystem') {
             store = store.useL2Layer(fileDriver({
-                directory: path.join(process.cwd(), '.cache'),
-                pruneInterval: '1h'
+                directory: options?.filesystem?.directory ?? path.join(process.cwd(), '.cache'),
+                pruneInterval: options?.pruneInterval ?? '1h'
             }))
         }
 

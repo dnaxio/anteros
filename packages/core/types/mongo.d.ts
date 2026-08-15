@@ -50,6 +50,16 @@ export type findOneOptions = {
     $project?: Record<string, unknown>;
 }
 
+/** Third parameter of `find`/`findOne` — query options */
+export type FindCallOptions = {
+    /** Serve from the DB query cache — cache-first, populated on miss, invalidated on any write */
+    useCache?: boolean;
+    /** TTL override for this query — human string ('5m', '2h') or ms (default: collection/server config, else '5m') */
+    ttl?: string | number;
+    /** Clean undefined/null/empty values from the result (SDK parity) */
+    cleanDeep?: boolean;
+}
+
 export type LookupOptions = {
     from: string;
     localField: string;

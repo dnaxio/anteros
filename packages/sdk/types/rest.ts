@@ -29,6 +29,8 @@ export type RestRequestOptions = {
      * Si true, nettoie le body avant envoi (supprime null, undefined, tableaux vides, objets vides).
      */
     cleanDeep?: boolean;
+    /** Serve `find` from the server-side DB query cache (invalidated on writes). TTL is managed server-side (collection/server config). `findOne` is never cached */
+    useCache?: boolean;
 };
 
 export type RestClientOptions = {

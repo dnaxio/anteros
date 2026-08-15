@@ -79,6 +79,12 @@ export type Collection = {
     actions?: {
         [key: string]: CollectionAction;
     };
+    /** Per-collection query caching — default TTL for `useCache` queries on this collection */
+    cache?: {
+        enabled?: boolean;
+        /** Default TTL for cached queries — human string ('5m', '2h') or ms */
+        ttl?: string | number;
+    };
     /**
      * The tenant id of the collection
      * @type {string}

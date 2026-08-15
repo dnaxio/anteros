@@ -25,6 +25,23 @@ export type CursorOptions = {
     pageSize?: number;
 };
 
+/** Tenant-scoped cache API — `rest.cache.*` (namespace `app:{tenant_id}`) */
+export type TenantCache = {
+    set(key: string, value: any, ttl?: string | number): Promise<boolean>;
+    setForever(key: string, value: any): Promise<boolean>;
+    get<T = any>(key: string): Promise<T | undefined>;
+    getOrSet<T = any>(key: string, factory: () => Promise<T> | T, ttl?: string | number): Promise<T>;
+    getOrSetForever<T = any>(key: string, factory: () => Promise<T> | T): Promise<T>;
+    has(key: string): Promise<boolean>;
+    missing(key: string): Promise<boolean>;
+    delete(key: string): Promise<boolean>;
+    deleteMany(keys: string[]): Promise<boolean>;
+    pull<T = any>(key: string): Promise<T | undefined>;
+    expire(key: string, ttl: string | number): Promise<boolean>;
+    clear(): Promise<void>;
+    namespace(name: string): any;
+};
+
 export type RestOptions = {
     internal?: boolean;
     tenant_id?: string;

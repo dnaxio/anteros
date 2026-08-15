@@ -40,6 +40,8 @@ Retrieve multiple documents with pipeline support.
 
 > `$limit` semantics: `0` = **no limit** (the stage is omitted), any non-negative integer is accepted (no cap).
 
+> **Query caching** (see [Configuration → DB Query Cache](/docs/reference/configuration#db-query-cache)): pass `{ useCache: true }` as the third argument to serve from the server-side cache (populated on miss, invalidated on writes, targeted by `_id` tags). `findOne`/streams are never cached — `find` only.
+
 ```typescript
 const users = await rest.find('users', {
   $match: { status: 'active' },
@@ -674,6 +676,49 @@ Drop the entire collection.
 ```typescript
 await rest.dropCollection('users');
 ```
+
+---
+
+## Tenant Cache (`rest.cache`)
+
+Tenant-scoped cache — every key lives under the `app:{tenant_id}` namespace, so keys never collide across tenants. Uses the configured cache driver (`server.cache`, default filesystem `./.cache`). **Works independently of `cache.enabled`** (that flag only gates the `useCache` query cache).
+
+```typescript
+// Set / get / delete
+await rest.cache.set('price:42', { total: 99 }, '5m');
+const v = await rest.cache.get('price:42');
+await rest.cache.delete('price:42');
+
+// Read-through (factory runs on miss, result cached)
+const stats = await rest.cache.getOrSet('orders:stats', () => rest.aggregate('orders', [...]), '1h');
+
+// Introspection / batch
+await rest.cache.has('price:42');
+await rest.cache.missing('price:42');
+await rest.cache.deleteMany(['a', 'b']);
+await rest.cache.pull('price:42'); // get + delete
+await rest.cache.expire('key', '30s');
+await rest.cache.clear();
+
+// Sub-namespace (grouped invalidation)
+const usersNs = rest.cache.namespace('users');
+await usersNs.set({ key: '1', value: { name: 'John' }, ttl: '5m' });
+await usersNs.clear();
+```
+
+| Method | Description |
+|--------|-------------|
+| `set(key, value, ttl?)` | Store a value (default TTL `'5m'`) |
+| `setForever(key, value)` | Store without expiry |
+| `get<T>(key)` | Read a value (`undefined` on miss) |
+| `getOrSet<T>(key, factory, ttl?)` | Read-through — factory on miss, cached |
+| `getOrSetForever(key, factory)` | Read-through, no expiry |
+| `has` / `missing` | Key existence check |
+| `delete(key)` / `deleteMany(keys)` | Remove one / several keys |
+| `pull<T>(key)` | Read + remove |
+| `expire(key, ttl)` | Extend / set a TTL |
+| `clear()` | Empty the tenant namespace |
+| `namespace(name)` | Sub-namespace (`app:{tenant}:{name}`) |
 
 ---
 

@@ -421,6 +421,7 @@ type RestRequestOptions = {
   signal?: AbortSignal;
   query?: RestQueryOptions;
   cleanDeep?: boolean;
+  useCache?: boolean; // find only — server-side DB query cache (TTL is managed server-side)
 };
 ```
 
@@ -430,6 +431,12 @@ type RestRequestOptions = {
 | `signal` | `AbortSignal` | Abort signal to cancel the request |
 | `query` | `RestQueryOptions` | URL query parameters |
 | `cleanDeep` | `boolean` | Strip `null`, `undefined`, empty arrays, and empty objects from the body before sending |
+| `useCache` | `boolean` | **`find` only** — serve from the server-side DB query cache (populated on miss, invalidated on any write). Requires `cache.enabled: true` on the server. **TTL is managed server-side** (collection/server config). `findOne` is never cached |
+
+```typescript
+// Server-side query caching — TTL comes from the collection/server config
+const orders = await api.find('orders', { $match: { status: 'paid' } }, { useCache: true });
+```
 
 ### AbortSignal
 

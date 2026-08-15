@@ -41,7 +41,6 @@ After login, the JSON body includes `"token"` — use that value as the Bearer t
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `cleanDeep` | `boolean` | Remove null, undefined, empty arrays |
-| `useCache` | `boolean` | Enable caching |
 
 ---
 
@@ -88,6 +87,8 @@ Content-Type: application/json
 | `$include` | `Array<string \| LookupOptions>` | Populate relationship fields via `$lookup` |
 | `$lookup` | `Array<object>` | **Internal API only** — raw `$lookup` stages, no validation |
 | `$graphLookup` | `Array<object>` | **Internal API only** — recursive graph traversal, no validation |
+
+**`options`** (third parameter): `{ useCache?: boolean }` — `useCache: true` serves the result from the DB query cache (populated on miss, invalidated on any write, cross-collection on `$include`). **TTL is managed server-side** (collection/server config) — clients cannot override it.
 
 ### findOne
 
