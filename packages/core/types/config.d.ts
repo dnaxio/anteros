@@ -95,6 +95,21 @@ export type ServerConfig = {
             /** Max `_id` tags per cached entry — large results are tagged up to this count (default: 50000; each tag costs ~0.18µs per cache hit) */
             maxTags?: number;
         };
+        /** Encryption keys — defaults used by utils.crypt.useSymCrypt() / utils.crypt.useAsymCrypt() */
+        encryption?: {
+            /** REQUIRED — encryption mode: 'symmetric' (AES-256-GCM) or 'asymmetric' (RSA-OAEP envelope) */
+            mode: 'symmetric' | 'asymmetric';
+            /** Symmetric AES-256-GCM secret (useSymCrypt) — required when mode is 'symmetric'. Falls back to env APP_SECRET */
+            secret?: string;
+            /** Version of the active secret — written into new ciphertexts (default: 1) */
+            version?: number;
+            /** Older secrets for decrypt-only — key rotation, e.g. { 1: 'v1-secret' } */
+            previousSecrets?: Record<number, string>;
+            /** Default AAD context — bound to every ciphertext when no explicit AAD is passed. Must stay stable (changing it makes old data undecryptable) */
+            aad?: string;
+            /** Asymmetric RSA-OAEP private key JWK for decryption (useAsymCrypt) — required when mode is 'asymmetric'. Object or JSON string */
+            privateKey?: JsonWebKey | string;
+        };
     }
     tenants: Tenant[];
 }

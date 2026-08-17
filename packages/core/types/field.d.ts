@@ -52,7 +52,13 @@ export type Field = {
     required?: boolean;
     enumOptions?: enumOptions;
     slugOptions?: SlugOptions;
-    unique?: boolean;
+    unique?: boolean | 1 | 0; // Mongo-style: true/1 → unique index, false/0 → non-unique
+    /** Encrypt this field's values at rest (uses server.encryption + the configured mode) */
+    encryption?: boolean;
+    /** Encrypt sub-path(s) inside a json / array-of-json field (dot notation) — e.g. { path: 'zip' } on field 'address' encrypts address.zip */
+    encryptionOptions?: {
+        path?: string | string[];
+    };
     nullable?: boolean;
     empty?: boolean;
     defaultValue?: number | string | boolean | object | array<any>;
@@ -63,9 +69,9 @@ export type Field = {
     | "2d"
     indexOptions?: {
         expireAfterSeconds?: number;
-        sparse?: boolean;
+        sparse?: boolean | 1 | 0;
         version?: number;
-        unique?: boolean;
+        unique?: boolean | 1 | 0;
     };
     relation?: {
         to: string;

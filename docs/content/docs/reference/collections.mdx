@@ -75,15 +75,17 @@ Each field can have these options:
   type: FieldType;    // Field type (required)
   description?: string;
   required?: boolean;
-  unique?: boolean;
+  unique?: boolean | 1 | 0;  // Mongo-style: true/1 → unique index, false/0 → non-unique
   nullable?: boolean;
   defaultValue?: any;
   index?: boolean;
   indexOptions?: {
     expireAfterSeconds?: number;
-    sparse?: boolean;
-    unique?: boolean;
+    sparse?: boolean | 1 | 0;
+    unique?: boolean | 1 | 0;
   };
+  encryption?: boolean; // encrypt this field at rest (requires server.encryption)
+  encryptionOptions?: { path?: string | string[] }; // encrypt sub-path(s) inside a json field (e.g. { path: 'zip' } → address.zip)
   enumOptions?: {
     items: string[];     // Allowed values
     multiple?: boolean;  // Allow multiple selections

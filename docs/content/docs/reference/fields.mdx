@@ -56,7 +56,7 @@ export default define.Collection({
   type: FieldType;
   description?: string;
   required?: boolean;
-  unique?: boolean;
+  unique?: boolean | 1 | 0;   // Mongo-style: true/1 → unique index, false/0 → non-unique
   nullable?: boolean;
   defaultValue?: any;
   validate?: {
@@ -66,8 +66,8 @@ export default define.Collection({
   indexType?: 'text' | 'hashed' | '2dsphere' | '2d';
   indexOptions?: {
     expireAfterSeconds?: number;
-    sparse?: boolean;
-    unique?: boolean;
+    sparse?: boolean | 1 | 0;
+    unique?: boolean | 1 | 0;
   };
   enumOptions?: { ... };
   relation?: { ... };
@@ -81,13 +81,47 @@ export default define.Collection({
 | `type` | `FieldType` | Field type (required) |
 | `description` | `string` | Human-readable description |
 | `required` | `boolean` | Reject the document if this field is missing |
-| `unique` | `boolean` | Create a unique MongoDB index |
+| `unique` | `boolean \| 1 \| 0` | Create a unique MongoDB index (`true`/`1` = unique, `false`/`0` = not) |
 | `nullable` | `boolean` | Allow `null` as a value |
 | `defaultValue` | `any` | Value applied automatically on insert when absent |
 | `validate` | `{ schema: Joi.Schema }` | Custom Joi validation schema (overrides the default) |
 | `index` | `boolean` | Create a MongoDB index on this field |
 | `indexType` | `string` | Index type: `text`, `hashed`, `2dsphere`, or `2d` |
-| `indexOptions` | `object` | Additional MongoDB index options |
+| `indexOptions` | `object` | Additional MongoDB index options — `unique`/`sparse` are coerced to real booleans (`1`→`true`, `0`→`false`) and `null`/`undefined` values are dropped (Mongo rejects `sparse: null`) |
+| `encryption` | `boolean` | Encrypt this field's values at rest — uses `server.encryption` (mode + keys). Encrypted on insert/update, decrypted manually on reads |
+| `encryptionOptions` | `{ path: string \| string[] }` | Encrypt only sub-path(s) inside a `json` / array-of-json field (dot notation) — e.g. `{ path: 'zip' }` on `address` encrypts `address.zip` |
+
+## Field Encryption
+
+Set `encryption: true` on a field to store its values encrypted at rest, or `encryptionOptions: { path }` to encrypt only a sub-path inside a json field:
+
+```typescript
+{ name: 'ssn', type: 'string', encryption: true }         // whole value encrypted
+{ name: 'profile', type: 'json', encryption: true }        // whole json object encrypted
+{ name: 'address', type: 'json', encryptionOptions: { path: 'zip' } }        // only address.zip
+{ name: 'contacts', type: 'json', encryptionOptions: { path: ['phone', 'email'] } } // multiple paths
+{ name: 'addresses', type: 'json', encryptionOptions: { path: 'zip' } }      // array of json → each element's zip
+```
+
+Requirements and behavior:
+
+- **Server config required** — `server.encryption` (mode + keys) must be configured; otherwise writes throw `ENCRYPTION_NOT_CONFIGURED`.
+- **Mode-driven** — encryption uses `utils.crypt.resolve()` (symmetric AES-256-GCM or asymmetric RSA-OAEP envelope, per `server.encryption.mode`).
+- **Writes**: `insertOne`, `insertMany`, `updateOne`/`updateMany`/`findOneAndUpdate` (`$set`/`$setOnInsert`), `bulkWrite`, `bulkUpdate` — the field value is encrypted before storage. API responses return the **plaintext**.
+- **Reads: NO automatic decryption** — `find`, `findOne`, `aggregate`, streams return the **ciphertext** as stored. Decrypt explicitly when needed:
+
+```typescript
+import { utils } from '@anteros/core';
+
+const cipher = utils.crypt.resolve(); // même mode / clés que server.encryption
+const ssn = await cipher.decrypt(doc.ssn, true); // champ chiffré → valeur d'origine
+
+// json avec sous-chemins chiffrés → passe les champs en 3e paramètre
+const address = await cipher.decrypt(doc.address, true, ['zip']);
+// → { street: 'Rue X', city: 'Paris', zip: '75000' } (zip décrypté, le reste tel quel)
+```
+- **Round-trips any JSON value** (string, number, object, array) — internally `JSON.stringify` + `encrypt`, decrypted with `parseJson`.
+- ⚠️ **Opaque in Mongo** — encrypted fields store ciphertext: don't use them in `$match`/`$sort`/`$group` (they'd match ciphertext). Operators like `$inc`/`$push`/`$addToSet` on an encrypted field are rejected (`ENCRYPTED_FIELD_OPERATOR`); only `$set`/`$setOnInsert` can write them. Don't mark `relationship` fields (breaks `$include`).
 
 ## Custom Validation
 

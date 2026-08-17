@@ -4,11 +4,11 @@ description: Encryption utilities for anteros Framework.
 icon: Key
 ---
 
-anteros Framework provides built-in encryption utilities to protect sensitive data, available through the `crypto` export.
+anteros Framework provides built-in encryption utilities to protect sensitive data, available through `utils.crypt`.
 
 ## Overview
 
-The crypto module exposes two high-level APIs:
+The crypto module exposes two high-level APIs, available through `utils.crypt`:
 
 | Utility | Algorithm | Use case |
 |---------|-----------|----------|
@@ -17,14 +17,169 @@ The crypto module exposes two high-level APIs:
 
 Both utilities are fully async and rely on the standard Web Crypto API under the hood.
 
+> ⚠️ The factories live under `utils.crypt` (like `utils.password`) — there is **no top-level `crypto` export**, so the global Web Crypto (`crypto.randomUUID()`, `crypto.subtle`) is never shadowed.
+
+## Server configuration
+
+Keys can be centralized in the server config (`server.encryption`) — then `useSymCrypt()`, `useAsymCrypt()` and `resolve()` work **without arguments**. The **`mode` is mandatory**: it declares the encryption mode and validates that the matching key is configured.
+
+```typescript
+import { define } from '@anteros/core';
+
+// Symmetric mode (AES-256-GCM)
+export default define.Server({
+  server: {
+    port: 4000,
+    encryption: {
+      mode: 'symmetric',                  // REQUIRED — 'symmetric' | 'asymmetric'
+      secret: process.env.APP_SECRET!,    // required when mode: 'symmetric'
+      aad: 'myapp:prod',                  // optional default AAD
+    },
+  },
+  tenants: [...],
+});
+```
+
+```typescript
+// Asymmetric mode (RSA-OAEP envelope)
+encryption: {
+  mode: 'asymmetric',                    // REQUIRED
+  privateKey: process.env.ASYM_PRIVATE_KEY, // required when mode: 'asymmetric' — JWK or JSON string
+},
+```
+
+| Option | Type | Used by | Resolution order |
+|--------|------|---------|------------------|
+| `encryption.mode` | `'symmetric' \| 'asymmetric'` | `resolve()` | **Required** — validated at boot (symmetric → `secret`, asymmetric → `privateKey`) |
+| `encryption.secret` | `string` | `useSymCrypt()` | explicit `{ secret }` → `server.encryption.secret` → env `APP_SECRET` |
+| `encryption.version` | `number` | `useSymCrypt()` | Version tag written into new ciphertexts (default `1`) — explicit `{ version }` wins |
+| `encryption.previousSecrets` | `Record<number, string>` | `useSymCrypt()` | Decrypt-only older keys for rotation — explicit `{ previousSecrets }` wins |
+| `encryption.aad` | `string` | `useSymCrypt()` | **Default AAD context** — bound to every ciphertext when no explicit AAD is passed (explicit `{ aad }`/call arg wins) |
+| `encryption.privateKey` | `JsonWebKey \| string` | `useAsymCrypt()` | explicit `{ privateKey }` → `server.encryption.privateKey` (JSON string parsed) |
+
+### Mode-driven access
+
+`utils.crypt.resolve()` returns the instance matching the configured mode — no need to know which one in your code:
+
+```typescript
+import { utils } from '@anteros/core';
+
+const cipher = utils.crypt.resolve(); // mode 'symmetric' → useSymCrypt, 'asymmetric' → useAsymCrypt
+const encrypted = await cipher.encrypt({ apiKey: 'sk-xxx' });
+```
+
+Calling `useSymCrypt()` (without explicit options) while the mode is `'asymmetric'` throws a clear error, and vice versa — the mode is the app-wide contract. Explicit options (`useSymCrypt({ secret })`) always work regardless of the mode.
+
+### Default AAD
+
+Setting `encryption.aad` binds every ciphertext to that context **even when the caller forgets to pass one** — a ciphertext copied to another environment/tenant fails to decrypt. Recommended value: an app + environment string (e.g. `myapp:prod`).
+
+```typescript
+server: {
+  encryption: {
+    secret: process.env.APP_SECRET!,
+    aad: `${process.env.APP_NAME ?? 'app'}:${process.env.NODE_ENV ?? 'dev'}`, // ex: myapp:prod
+  },
+}
+```
+
+Rules:
+- **Explicit AAD wins** — `encrypt(data, 'record:42')` / `decrypt(cipher, true, 'record:42')` overrides the default.
+- **Legacy safe** — ciphertexts encrypted *without* any AAD (before this option) still decrypt (the default is tried first, then no-AAD).
+- ⚠️ **Stable value** — changing `encryption.aad` makes previously encrypted data undecryptable (same rule as `secret`).
+
+```typescript
+// No args needed — keys come from the server config
+import { utils } from '@anteros/core';
+
+const cipher = utils.crypt.useSymCrypt();
+const asym   = utils.crypt.useAsymCrypt();
+```
+
+`useSymCrypt()` throws a clear error if no secret is found anywhere.
+
+## Algorithms
+
+The algorithms are **fixed** (no configuration) — they are the current best-practice defaults. Changing them would break previously encrypted data, because the ciphertext format is tied to the algorithm.
+
+### Symmetric — `useSymCrypt`
+
+| Aspect | Value |
+|--------|-------|
+| Algorithm | **AES-256-GCM** (AEAD — authenticated encryption) |
+| Key derivation | SHA-256 of the secret → 256-bit key (`crypto.subtle.importKey`, raw) |
+| IV | 12 random bytes (`crypto.getRandomValues`) per encryption |
+| Auth tag | 128-bit (16 bytes), verified on decrypt (tamper-proof) |
+| AAD | Optional context bound to the ciphertext (anti-substitution) |
+| Ciphertext format | `base64( version (1 byte) ‖ IV ‖ ciphertext )` — the version byte tags the key used |
+
+### Asymmetric — `useAsymCrypt`
+
+| Aspect | Value |
+|--------|-------|
+| Key pair | **RSA-OAEP**, 2048-bit, SHA-256 (`modulusLength: 2048`, `publicExponent: 0x10001`) |
+| Data encryption | Random **AES-256-GCM** key, generated per encryption |
+| Key wrapping | The AES key is wrapped with **RSA-OAEP** (public key) |
+| IV | 12 random bytes |
+| Auth tag | 128-bit (16 bytes) |
+| Ciphertext format | `base64( wrappedKey (256 bytes) ‖ IV ‖ ciphertext )` |
+
+> ⚠️ **Stability**: algorithms are frozen at boot. Keep `secret` / `privateKey` stable for the lifetime of the encrypted data — ciphertexts cannot be migrated to another algorithm.
+
+## Key rotation
+
+The symmetric secret supports **rotation without breaking existing data**: each ciphertext carries a **key version byte** (first byte), and `useSymCrypt()` keeps a keyring of older secrets for **decrypt-only**.
+
+```typescript
+// Avant rotation — version 1
+server: {
+  encryption: {
+    secret: process.env.APP_SECRET_V1, // version implicite 1
+  },
+}
+
+// Après rotation — nouvelle clé active, l'ancienne conservée pour déchiffrer
+server: {
+  encryption: {
+    secret: process.env.APP_SECRET_V2,         // nouvelle clé active (chiffre + déchiffre)
+    version: 2,                                 // tag des nouveaux ciphertexts
+    previousSecrets: { 1: process.env.APP_SECRET_V1 }, // ancienne clé — déchiffre seulement
+  },
+}
+```
+
+| Option | Type | Rôle |
+|--------|------|------|
+| `encryption.version` | `number` | Version de la clé active, écrite dans les nouveaux ciphertexts (défaut `1`) |
+| `encryption.previousSecrets` | `Record<number, string>` | Anciennes clés, **déchiffrage seul** — `{ version: secret }` |
+
+Le même keyring peut être passé par instance : `useSymCrypt({ secret, version, previousSecrets })` (les options explicites gagnent sur la config).
+
+Au décryptage : la version est lue dans le ciphertext → la bonne clé est choisie. Les **ciphertexts legacy** (produits avant la rotation, sans octet de version) restent déchiffrables avec la clé active. Le tag GCM garantit qu'une mauvaise clé échoue proprement.
+
+```typescript
+const old = utils.crypt.useSymCrypt({ secret: 'v1-secret' });
+const enc = await old.encrypt({ apiKey: 'sk-1' });
+
+// Après rotation : le nouveau chiffreur déchiffre l'ancien ciphertext
+const rotated = utils.crypt.useSymCrypt({
+  secret: 'v2-secret',
+  version: 2,
+  previousSecrets: { 1: 'v1-secret' },
+});
+const data = await rotated.decrypt(enc, true); // { apiKey: 'sk-1' } ✓
+```
+
+> ⚠️ Garde `previousSecrets` tant que des données chiffrées avec l'ancienne clé existent. Une ancienne clé ne peut **pas** déchiffrer les nouveaux ciphertexts (autre clé → tag GCM invalide).
+
 ## Symmetric encryption
 
 Use `useSymCrypt` when you have a single secret known by both the encryptor and decryptor.
 
 ```typescript
-import { crypto } from '@anteros/core';
+import { utils } from '@anteros/core';
 
-const cipher = crypto.useSymCrypt({ secret: process.env.APP_SECRET! });
+const cipher = utils.crypt.useSymCrypt({ secret: process.env.APP_SECRET! });
 
 // Encrypt
 const encrypted = await cipher.encrypt({ apiKey: 'sk-xxx' });
@@ -37,8 +192,31 @@ const data = await cipher.decrypt(encrypted, true); // true = parse JSON
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `encrypt(data: string \| object)` | `Promise<string>` | Encrypts and returns a base64 ciphertext |
-| `decrypt<T>(cipher: string, parseJson?: boolean)` | `Promise<T>` | Decrypts base64 ciphertext back to plaintext or JSON |
+| `encrypt(data: string \| object, aad?)` | `Promise<string>` | Encrypts and returns a base64 ciphertext. `aad` = context bound to the ciphertext (GCM) |
+| `decrypt<T>(cipher: string \| object, parseJson?: boolean, fieldsOrAad?: string \| string[])` | `Promise<T>` | Decrypts base64 ciphertext (or decrypts sub-fields of a plaintext JSON object). `parseJson: true` → JSON-parses the result. 3rd param: `string` = AAD context, `string[]` = fields (dot-paths) to decrypt inside the JSON |
+
+### Decrypting JSON sub-fields
+
+When the decrypted content is a JSON object containing **encrypted sub-fields** (e.g. a `json` field with `encryptionOptions.path`), pass the fields to decrypt as the 3rd parameter — the JSON is returned with those fields decrypted:
+
+```typescript
+// 1. ciphertext whose plaintext is a JSON with encrypted sub-fields
+const dec = await cipher.decrypt(cipher, true, ['zip', 'contact.phone']);
+// → { city: 'Paris', zip: '75000', contact: { phone: '0600000000' } }  (zip/phone décryptés, le reste tel quel)
+
+// 2. plaintext JSON container returned by a query (doc.address) — same call
+const address = await cipher.decrypt(doc.address, true, ['zip']);
+// → { street: 'Rue X', city: 'Paris', zip: '75000' }
+
+// 3. ARRAY of json objects (e.g. doc.addresses) — each element is processed
+const addresses = await cipher.decrypt(doc.addresses, true, ['zip']);
+// → [{ zip: '69001', city: 'Lyon' }, { zip: '69002', city: 'Villeurbanne' }]
+```
+
+- `string[]` = champs à décrypter (dot-notation : `'contact.phone'`, `'tags.0.code'`) ; `string` = AAD (rétro-compatible).
+- **Arrays de json supportés** : chaque élément est traité récursivement (conteneur direct ou ciphertext dont le plaintext est un array).
+- Les valeurs non-chiffrées (texte en clair) sont laissées telles quelles ; l'input n'est jamais muté (copie).
+- Convention field-level : les sous-valeurs sont JSON-wrappées (`JSON.stringify`) → round-trip de tout type.
 
 The symmetric implementation derives a 256-bit key from your secret using SHA-256, then encrypts with AES-GCM (random 12-byte IV, 16-byte auth tag).
 
@@ -47,9 +225,9 @@ The symmetric implementation derives a 256-bit key from your secret using SHA-25
 Use `useAsymCrypt` when you need to encrypt with a public key and decrypt with a private key, or when parties do not share a common secret.
 
 ```typescript
-import { crypto } from '@anteros/core';
+import { utils } from '@anteros/core';
 
-const cipher = crypto.useAsymCrypt();
+const cipher = utils.crypt.useAsymCrypt();
 
 // Encrypt
 const encrypted = await cipher.encrypt({ password: 'hunter2' });
@@ -62,14 +240,14 @@ const publicJwk  = await cipher.exportPublicKey();
 ### Reuse an existing key pair
 
 ```typescript
-const cipher = crypto.useAsymCrypt({ privateKey: storedJwk });
+const cipher = utils.crypt.useAsymCrypt({ privateKey: storedJwk });
 const data   = await cipher.decrypt(encrypted, true);
 ```
 
 ### Encrypt with an external public key
 
 ```typescript
-const cipher   = crypto.useAsymCrypt();
+const cipher   = utils.crypt.useAsymCrypt();
 const publicKey = await cipher.importPublicKey(externalPublicJwk);
 const encrypted = await cipher.encrypt('sensitive data', publicKey);
 ```

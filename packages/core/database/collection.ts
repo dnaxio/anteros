@@ -8,6 +8,22 @@ import type { Field } from "../types/field"
 import { getTenant } from "./tenant"
 import { buildSchema } from "./schema"
 import type { FileCollection } from "../types/file"
+
+/**
+ * Mongo index options must be real booleans: `unique`/`sparse`/… accept
+ * `1`/`0`/`true`/`false` but NEVER `null`/`undefined` (otherwise the server
+ * throws `The field 'sparse' has value null, which is not convertible to bool`).
+ * Coerce truthiness (`1` → `true`, `0` → `false`) and drop nullish values entirely.
+ */
+const BOOLEAN_INDEX_OPTIONS = ['unique', 'sparse', 'background', 'hidden'];
+function applyIndexOptions(spec: IndexDescription, options?: Field['indexOptions']): IndexDescription {
+    for (const [k, v] of Object.entries(options ?? {})) {
+        if (v === undefined || v === null) continue; // never send null/undefined on the wire
+        (spec as unknown as Record<string, unknown>)[k] = BOOLEAN_INDEX_OPTIONS.includes(k) ? !!v : v;
+    }
+    return spec;
+}
+
 async function syncCollections() {
     try {
 
@@ -115,17 +131,17 @@ async function initializeOnDatabase(collections: Collection[]) {
                             }
                         }
 
-                        let isSparse = field.type === 'random'
-                            || (field.unique && field.required !== true);
+                        // !! : field.unique peut être 1/0 (Mongo-style) → coercer en vrai booléen
+                        let isSparse = !!(field.type === 'random'
+                            || (field.unique && field.required !== true));
 
-                        specsFieldsIndexes.push({
+                        specsFieldsIndexes.push(applyIndexOptions({
                             key: {
                                 [field.name]: indexValue as any
                             },
-                            unique: field.unique ?? false,
+                            unique: !!field.unique, // 1/0/true/false → real boolean
                             sparse: isSparse,
-                            ...field.indexOptions,  // explicit overrides win
-                        })
+                        }, field.indexOptions)) // explicit overrides win — sanitized
 
                     }
 

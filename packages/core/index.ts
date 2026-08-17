@@ -6,7 +6,6 @@ import { useRest } from "./database/rest";
 import { AppError } from "./lib/error";
 import * as v from "joi";
 import utils from "./utils";
-import * as crypto from "./utils/crypto";
 
 
 
@@ -31,6 +30,5 @@ export {
     v,
     utils,
     cache,
-    crypto,
     logger,
 }

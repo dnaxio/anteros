@@ -38,7 +38,8 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
 
         // Logging: configure from cfg.server.logging (console + file, e.g. logs/anteros.log)
         logger.configure(cfg.server.logging);
-        logger.info('Starting Anteros server', {
+        // File-only: the boxen banner already shows name / PID / URL / env on the console
+        logger.file('Starting Anteros server', {
             name: cfg.server.name ?? process.env.APP_NAME ?? 'SERVER',
             port: cfg.server.port ?? 4000,
             env: process.env.NODE_ENV || Bun.env.NODE_ENV || 'dev',
@@ -245,6 +246,21 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
         box += `${NAME}`.gray.underline + ` (PID: ${process.pid}) — ${role}\n\n`
         box += `Env: ${env || 'dev'}`.green.bold + '\n'
         box += `reusePort: ${(reusePort || isWorker) ? 'On'.green.bold : 'Off'.red.bold}\n`.gray.bold
+
+        // DB query cache status (server.cache) — driver: memory | filesystem | redis
+        const cacheCfg = cfg.server.cache;
+        // any: @colors/colors type les styles chaînés (.red.bold) comme des fonctions Color
+        let cacheInfo: any = 'Off'.red.bold;
+        if (cacheCfg?.enabled) {
+            const driver = cacheCfg.driver ?? 'memory';
+            const detail = driver === 'filesystem'
+                ? ` ${cacheCfg.directory ?? './.cache'}`
+                : driver === 'redis'
+                    ? ` ${cacheCfg.redis?.host ?? 'localhost'}${cacheCfg.redis?.port ? `:${cacheCfg.redis.port}` : ''}`
+                    : '';
+            cacheInfo = `On`.green.bold + ` (${driver}${detail})`;
+        }
+        box += `Cache: ${cacheInfo}`.gray.bold + '\n'
         box += `Url: http://localhost:${PORT}`.gray.bold;
         box += '\n\n';
         box += `Last boot: 🔄 ${dayjs().format('YYYY-MM-DD HH:mm:ss')}`.gray;

@@ -11,6 +11,7 @@ import { AppError, fn } from "../lib/error";
 import { createWorkflow } from "./workflow";
 import { getTenant } from "./tenant";
 import { getCollection, getCollectionKeys } from "./collection"
+import { encryptFields, encryptUpdate } from "./field.crypto"
 import type { RestActions, BulkUpdateOperation, RestOptions, CursorOptions, TenantCache } from "../types/rest";
 import type Joi from "joi";
 import type { Collection } from "../types/collection";
@@ -565,11 +566,15 @@ class MongoRest {
             // Validate AFTER hooks (they may fill required fields or apply Joi defaults)
             meta.data = this._validate({ collection, action: action, data: meta.data })
 
-            await this.db.collection(collection).insertOne(func.toBson(meta.data, { col }) as any, {
+            // Field-level encryption: store ciphertext, keep plaintext for the response
+            const stored = await encryptFields(col, meta.data)
+            // ⚠️ toBson returns a copy — the driver's _id mutation never reaches meta.data,
+            // so the generated _id is taken from the InsertOneResult instead
+            const inserted = await this.db.collection(collection).insertOne(func.toBson(stored, { col }) as any, {
                 session: this.session,
             })
 
-            const result: T & { _id: string } = func.toJson(meta.data as T & { _id: string })
+            const result: T & { _id: string } = { ...func.toJson(meta.data as any), _id: (inserted.insertedId as ObjectId).toHexString() }
             meta.result = result
             if (col?.hooks?.afterOperation) {
                 await col.hooks.afterOperation({ rest: this, io, action, meta })
@@ -604,11 +609,17 @@ class MongoRest {
             // Validate AFTER hooks (they may fill required fields or apply Joi defaults)
             meta.data = this._validate({ collection, action: action, data: meta.data })
 
-            await this.db.collection(collection).insertMany(func.toBson(meta.data, { col }) as any, {
+            // Field-level encryption: store ciphertext, keep plaintext for the response
+            const stored = await encryptFields(col, meta.data)
+            const inserted = await this.db.collection(collection).insertMany(func.toBson(stored, { col }) as any, {
                 session: this.session,
             })
 
-            const result: (T & { _id: string })[] = func.toJson(meta.data as (T & { _id: string })[])
+            const json = func.toJson(meta.data) as any[]
+            const result: (T & { _id: string })[] = json.map((d, i) => ({
+                _id: (inserted.insertedIds[i] as ObjectId | undefined)?.toHexString() ?? d._id,
+                ...d,
+            }))
             meta.result = result
 
             if (col.hooks?.afterOperation) {
@@ -633,6 +644,8 @@ class MongoRest {
 
             update = await func.buildInput(update)
             this._validate({ collection, action: action, update: update })
+            // Field-level encryption: encrypt $set/$setOnInsert values for encrypted fields
+            update = await encryptUpdate(col, update)
             update = func.toBson(update, { col })
 
             const meta: any = { action, collection, update, id: _id }
@@ -697,6 +710,8 @@ class MongoRest {
 
             this._validate({ collection, action: action, update: update.$set })
             this._validate({ collection, action: action, update: update.$setOnInsert })
+            // Field-level encryption: encrypt $set/$setOnInsert values for encrypted fields
+            update = await encryptUpdate(col, update)
             update = func.toBson(update, { col })
             filter = func.toBson(filter, { col })
 
@@ -738,6 +753,8 @@ class MongoRest {
             }
             update = await func.buildInput(update)
             this._validate({ collection, action: action, update: update })
+            // Field-level encryption: encrypt $set/$setOnInsert values for encrypted fields
+            update = await encryptUpdate(col, update)
             update = func.toBson(update, { col })
 
             const meta: any = { action, collection, update, ids: _ids }
@@ -829,7 +846,7 @@ class MongoRest {
 
                 if ('insertOne' in operation) {
                     operation.insertOne.document = func.toBson(
-                        await func.buildInput(operation.insertOne.document, { action: 'insertOne', col }),
+                        await encryptFields(col, await func.buildInput(operation.insertOne.document, { action: 'insertOne', col })),
                         { col },
                     )
                 }
@@ -842,7 +859,7 @@ class MongoRest {
                     if (updateOneDoc.$set) {
                         updateOneDoc.$set = await func.buildInput(updateOneDoc.$set, { action: 'updateOne', col })
                     }
-                    operation.updateOne.update = func.toBson(operation.updateOne.update, { col })
+                    operation.updateOne.update = func.toBson(await encryptUpdate(col, operation.updateOne.update), { col })
                 }
                 if ('updateMany' in operation) {
                     operation.updateMany.filter = func.toBson(
@@ -853,11 +870,11 @@ class MongoRest {
                     if (updateManyDoc.$set) {
                         updateManyDoc.$set = await func.buildInput(updateManyDoc.$set, { action: 'updateMany', col })
                     }
-                    operation.updateMany.update = func.toBson(operation.updateMany.update, { col })
+                    operation.updateMany.update = func.toBson(await encryptUpdate(col, operation.updateMany.update), { col })
                 }
                 if ('replaceOne' in operation) {
                     operation.replaceOne.replacement = func.toBson(
-                        await func.buildInput(operation.replaceOne.replacement, { action: 'replaceOne', col }),
+                        await encryptFields(col, await func.buildInput(operation.replaceOne.replacement, { action: 'replaceOne', col })),
                         { col },
                     )
                 }
@@ -898,14 +915,14 @@ class MongoRest {
                     if (update.$set) {
                         update.$set = await func.buildInput(update.$set, { action: 'updateOne', col })
                     }
-                    operation.updateOne.update = func.toBson(operation.updateOne.update, { col })
+                    operation.updateOne.update = func.toBson(await encryptUpdate(col, operation.updateOne.update), { col })
                 }
                 if ('updateMany' in operation) {
                     const update = operation.updateMany.update as UpdateFilter<Document>
                     if (update.$set) {
                         update.$set = await func.buildInput(update.$set, { action: 'updateMany', col })
                     }
-                    operation.updateMany.update = func.toBson(operation.updateMany.update, { col })
+                    operation.updateMany.update = func.toBson(await encryptUpdate(col, operation.updateMany.update), { col })
                 }
             }
 

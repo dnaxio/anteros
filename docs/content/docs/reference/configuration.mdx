@@ -43,6 +43,7 @@ await app.boot(config);
 | `server.body.maxSize` | `number` | `104857600` (100MB) | Maximum request body size in bytes |
 | `server.reusePort` | `boolean` | `false` | Bun's `SO_REUSEPORT` — allow multiple processes to bind the same port |
 | `server.trustProxy` | `boolean` | `false` | Trust proxy headers (`CF-Connecting-IP` / `X-Forwarded-For`) as the client IP |
+| `server.encryption` | `object` | - | Encryption: `{ mode (required: 'symmetric' \| 'asymmetric'), secret, version?, previousSecrets?, aad?, privateKey }` — defaults for `utils.crypt.useSymCrypt()` / `useAsymCrypt()` / `resolve()`. `version`/`previousSecrets` = key rotation, `aad` = default context (see [Crypto](/docs/reference/crypto)) |
 
 ## Health & Metrics
 

@@ -21,6 +21,19 @@ function formatConfig(config: ServerConfig) { // format the config
     }
     cfg.version = config.version;
     cfg.tenants = config.tenants ?? [];
+
+    // Encryption mode validation — fail fast at boot: the declared mode
+    // must have its key configured (symmetric → secret, asymmetric → privateKey)
+    const enc = cfg.server.encryption;
+    if (enc) {
+        if (enc.mode === 'symmetric' && !enc.secret && !Bun.env.APP_SECRET) {
+            throw new Error(`server.encryption: mode 'symmetric' requires a secret — set encryption.secret or APP_SECRET env`);
+        }
+        if (enc.mode === 'asymmetric' && !enc.privateKey) {
+            throw new Error(`server.encryption: mode 'asymmetric' requires a privateKey — set encryption.privateKey (JWK or JSON string)`);
+        }
+    }
+
     return cfg;
 }
 
