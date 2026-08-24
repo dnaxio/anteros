@@ -50,6 +50,7 @@ class MongoRest {
         if (!tenantId) {
             tenantId = requestCtxStorage.get<string>('tenant_id');
         }
+        if (!tenantId) throw new Error('tenant_id not found');
         let tenant = getTenant(tenantId ?? '-')
         if (tenant) {
             this.#tenant = tenant;

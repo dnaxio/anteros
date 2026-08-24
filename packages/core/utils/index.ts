@@ -6,6 +6,7 @@ const utils = {
     $: Bun.$,
     secrets: Bun.secrets,
     deepEquals: Bun.deepEquals,
+    cron:Bun.cron,
     cleanDeep,
     clone,
     deepCopy,
@@ -13,6 +14,7 @@ const utils = {
     pick,
     jose,
     isSlug,
+    sleep:Bun.sleep,
     // Encryption — AES-256-GCM sym + RSA-OAEP asym (never shadow the Web Crypto global)
     crypt: { useSymCrypt, useAsymCrypt, resolve },
 }

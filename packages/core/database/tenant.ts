@@ -4,8 +4,9 @@ import { useRest } from "./rest";
 async function syncTenants() {
     try {
         for await (let tenant of cfg.tenants ?? []) {
-            let rest = new useRest({
-                database: {
+          let rest = new useRest({
+            tenant_id: tenant.id,
+            database: {
                     uri: tenant.database.uri,
                     options: {
                         timeoutMS: 2000,
