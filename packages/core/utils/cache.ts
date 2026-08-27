@@ -3,11 +3,9 @@ import { memoryDriver } from "bentocache/drivers/memory";
 import { redisDriver } from "bentocache/drivers/redis";
 import { fileDriver } from "bentocache/drivers/file";
 import path from "path";
-const drivers = {
-    memoryDriver,
-    redisDriver,
-    fileDriver,
-}
+
+/** The underlying BentoCache instance — full provider API, with autocompletion */
+export type Cache = InstanceType<typeof BentoCache>;
 
 type Driver = 'memory' | 'redis' | 'filesystem';
 
@@ -25,50 +23,27 @@ type CacheOptions = {
     pruneInterval?: string;
 }
 
-class Cache {
-    #cache: InstanceType<typeof BentoCache>;
-    constructor(driver: Driver, options?: CacheOptions) {
-        let store = bentostore().useL1Layer(memoryDriver({
+function createCache(driver: Driver, options?: CacheOptions): Cache {
+    let store = bentostore().useL1Layer(memoryDriver({}))
+
+    if (driver == 'filesystem') {
+        store = store.useL2Layer(fileDriver({
+            directory: options?.filesystem?.directory ?? path.join(process.cwd(), '.cache'),
+            pruneInterval: options?.pruneInterval ?? '1h'
         }))
-
-        if (driver == 'filesystem') {
-            store = store.useL2Layer(fileDriver({
-                directory: options?.filesystem?.directory ?? path.join(process.cwd(), '.cache'),
-                pruneInterval: options?.pruneInterval ?? '1h'
-            }))
-        }
-
-        if (driver == 'redis' && options?.redis?.connection) {
-            store = store.useL2Layer(redisDriver({
-                connection: options.redis.connection
-            }))
-        }
-        this.#cache = new BentoCache({
-            default: driver,
-            stores: {
-                [driver]: store,
-            }
-        })
     }
 
-    // ─── BentoCache provider API (delegated to the underlying instance) ───
-
-    set(options: any): Promise<boolean> { return this.#cache.set(options); }
-    setForever(options: any): Promise<boolean> { return this.#cache.setForever(options); }
-    get(options: any): Promise<unknown> { return this.#cache.get(options); }
-    getOrSet(options: any): Promise<unknown> { return this.#cache.getOrSet(options); }
-    getOrSetForever(options: any): Promise<unknown> { return this.#cache.getOrSetForever(options); }
-    has(options: any): Promise<boolean> { return this.#cache.has(options); }
-    missing(options: any): Promise<boolean> { return this.#cache.missing(options); }
-    pull(key: string): Promise<unknown> { return this.#cache.pull(key); }
-    delete(options: any): Promise<boolean> { return this.#cache.delete(options); }
-    deleteMany(options: any): Promise<boolean> { return this.#cache.deleteMany(options); }
-    deleteByTag(options: any): Promise<boolean> { return this.#cache.deleteByTag(options); }
-    expire(options: any): Promise<boolean> { return this.#cache.expire(options); }
-    clear(options?: any): Promise<void> { return this.#cache.clear(options); }
-    prune(): Promise<void> { return this.#cache.prune(); }
-    namespace(namespace: string): any { return this.#cache.namespace(namespace); }
-    disconnect(): Promise<void> { return this.#cache.disconnect(); }
+    if (driver == 'redis' && options?.redis?.connection) {
+        store = store.useL2Layer(redisDriver({
+            connection: options.redis.connection
+        }))
+    }
+    return new BentoCache({
+        default: driver,
+        stores: {
+            [driver]: store,
+        }
+    })
 }
 
 
@@ -79,8 +54,8 @@ function useRedisCache(options: {
         password: string;
     };
     pruneInterval?: string;
-}) {
-    return new Cache('redis', {
+}): Cache {
+    return createCache('redis', {
         redis: {
             connection: options.connection,
         },
@@ -88,15 +63,15 @@ function useRedisCache(options: {
     });
 }
 
-function useMemoryCache() {
-    return new Cache('memory');
+function useMemoryCache(): Cache {
+    return createCache('memory');
 }
 
 function useFilesystemCache(options: {
     directory: string;
     pruneInterval?: string;
-}) {
-    return new Cache('filesystem', {
+}): Cache {
+    return createCache('filesystem', {
         filesystem: {
             directory: options.directory,
         },
@@ -106,9 +81,8 @@ function useFilesystemCache(options: {
 
 
 
-export default Cache;
 export {
-    Cache,
+
     useFilesystemCache,
     useMemoryCache,
     useRedisCache

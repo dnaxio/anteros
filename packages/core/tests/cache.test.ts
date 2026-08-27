@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "bun:test";
-import { Cache, useMemoryCache, useFilesystemCache } from "../utils/cache";
+import { type Cache, useMemoryCache, useFilesystemCache } from "../utils/cache";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -12,16 +12,19 @@ describe("Cache (memory)", () => {
 
     it("set + get round-trip", async () => {
         await c.set({ key: "k", value: { id: 1 }, ttl: "5m" });
-        expect(await c.get({ key: "k" })).toEqual({ id: 1 });
+        const v = await c.get({ key: "k" });
+        expect(v).toEqual({ id: 1 });
     });
 
     it("setForever never expires", async () => {
         await c.setForever({ key: "cfg", value: { theme: "dark" } });
-        expect(await c.get({ key: "cfg" })).toEqual({ theme: "dark" });
+        const v = await c.get({ key: "cfg" });
+        expect(v).toEqual({ theme: "dark" });
     });
 
-    it("get returns null on miss", async () => {
-        expect(await c.get({ key: "nope" })).toBeUndefined();
+    it("get returns undefined on miss", async () => {
+        const v = await c.get({ key: "nope" });
+        expect(v).toBeUndefined();
     });
 
     it("has / missing", async () => {
@@ -33,9 +36,11 @@ describe("Cache (memory)", () => {
 
     it("ttl expiry (ms)", async () => {
         await c.set({ key: "x", value: 1, ttl: 50 });
-        expect(await c.get({ key: "x" })).toBe(1);
+        const v1 = await c.get({ key: "x" });
+        expect(v1).toBe(1);
         await sleep(80);
-        expect(await c.get({ key: "x" })).toBeUndefined();
+        const v2 = await c.get({ key: "x" });
+        expect(v2).toBeUndefined();
     });
 
     it("getOrSet uses factory and caches", async () => {
@@ -44,21 +49,25 @@ describe("Cache (memory)", () => {
             calls++;
             return { n: calls };
         };
-        expect(await c.getOrSet({ key: "g", factory })).toEqual({ n: 1 });
-        expect(await c.getOrSet({ key: "g", factory })).toEqual({ n: 1 });
+        const a = await c.getOrSet({ key: "g", factory });
+        expect(a).toEqual({ n: 1 });
+        const b = await c.getOrSet({ key: "g", factory });
+        expect(b).toEqual({ n: 1 });
         expect(calls).toBe(1);
     });
 
     it("getOrSetForever", async () => {
         const value = await c.getOrSetForever({ key: "f", factory: () => 42 });
         expect(value).toBe(42);
-        expect(await c.get({ key: "f" })).toBe(42);
+        const v = await c.get({ key: "f" });
+        expect(v).toBe(42);
     });
 
     it("delete removes entry", async () => {
         await c.set({ key: "d", value: 1 });
         await c.delete({ key: "d" });
-        expect(await c.get({ key: "d" })).toBeUndefined();
+        const v = await c.get({ key: "d" });
+        expect(v).toBeUndefined();
     });
 
     it("deleteMany removes several keys", async () => {
@@ -71,16 +80,20 @@ describe("Cache (memory)", () => {
 
     it("pull returns and removes", async () => {
         await c.set({ key: "p", value: 7 });
-        expect(await c.pull("p")).toBe(7);
-        expect(await c.get({ key: "p" })).toBeUndefined();
+        const p = await c.pull("p");
+        expect(p).toBe(7);
+        const v = await c.get({ key: "p" });
+        expect(v).toBeUndefined();
     });
 
     it("clear empties everything", async () => {
         await c.set({ key: "a", value: 1 });
         await c.set({ key: "b", value: 2 });
         await c.clear();
-        expect(await c.get({ key: "a" })).toBeUndefined();
-        expect(await c.get({ key: "b" })).toBeUndefined();
+        const va = await c.get({ key: "a" });
+        const vb = await c.get({ key: "b" });
+        expect(va).toBeUndefined();
+        expect(vb).toBeUndefined();
     });
 
     it("getOrSet recovers after ttl expiry (grace accepted)", async () => {
@@ -89,19 +102,22 @@ describe("Cache (memory)", () => {
         expect(v1).toBe("fresh");
 
         await sleep(60); // past ttl
-        expect(await c.get({ key: "e" })).toBeUndefined(); // expired
+        const v2 = await c.get({ key: "e" });
+        expect(v2).toBeUndefined(); // expired
 
         // getOrSet re-runs the factory after expiry
-        const v2 = await c.getOrSet({ key: "e", factory: () => "fresh2" });
-        expect(v2).toBe("fresh2");
+        const v3 = await c.getOrSet({ key: "e", factory: () => "fresh2" });
+        expect(v3).toBe("fresh2");
     });
 
     it("namespace groups keys", async () => {
         const users = c.namespace("users");
         await users.set({ key: "1", value: { name: "John" }, ttl: "5m" });
         await users.set({ key: "2", value: { name: "Jane" } });
-        expect(await users.get({ key: "1" })).toEqual({ name: "John" });
-        expect(await c.get({ key: "1" })).toBeUndefined(); // not in root
+        const u1 = await users.get({ key: "1" });
+        expect(u1).toEqual({ name: "John" });
+        const root = await c.get({ key: "1" });
+        expect(root).toBeUndefined(); // not in root
         await users.clear();
         expect(await users.missing({ key: "1" })).toBe(true);
         expect(await users.missing({ key: "2" })).toBe(true);
@@ -116,9 +132,11 @@ describe("Cache (filesystem)", () => {
         await a.disconnect();
 
         const b = useFilesystemCache({ directory: dir });
-        expect(await b.get({ key: "persist" })).toEqual({ ok: true });
+        const v = await b.get({ key: "persist" });
+        expect(v).toEqual({ ok: true });
         await b.delete({ key: "persist" });
-        expect(await b.get({ key: "persist" })).toBeUndefined();
+        const gone = await b.get({ key: "persist" });
+        expect(gone).toBeUndefined();
         await b.disconnect();
     });
 });

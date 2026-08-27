@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import type { FindOptions, FindCallOptions } from "../types/mongo";
-import { Cache, useFilesystemCache, useMemoryCache, useRedisCache } from "../utils/cache";
+import { type Cache, useFilesystemCache, useMemoryCache, useRedisCache } from "../utils/cache";
 import { cfg } from "../server/config";
 
 /**

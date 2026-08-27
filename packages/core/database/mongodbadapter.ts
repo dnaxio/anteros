@@ -1144,8 +1144,8 @@ class MongoRest {
             missing: (key) => ns().missing({ key }),
             delete: (key) => ns().delete({ key }),
             deleteMany: (keys) => ns().deleteMany({ keys }),
-            pull: (key) => ns().pull(key),
-            expire: (key, ttl) => ns().expire({ key, ttl }),
+            pull: (key) => ns().pull(key) as Promise<any>, // bentocache types are stricter than the TenantCache contract
+            expire: (key) => ns().expire({ key }), // bentocache soft-expire takes { key } only (grace is a getOrSet option)
             clear: () => ns().clear(),
             namespace: (name) => cache.namespace(`app:${tenantId}:${name}`),
         };

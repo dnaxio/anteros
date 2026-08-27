@@ -1,9 +1,9 @@
-import { Cache } from "./utils/cache";
+import { useMemoryCache } from "./utils/cache";
 
 async function probe() {
-    const c = new Cache("memory");
+    const c = useMemoryCache();
     const v = await c.get({ key: "k" });
-    const p = await c.pull({ key: "p" });
+    const p = await c.pull("p");
     const g = await c.getOrSet({ key: "g", factory: () => 42 });
     const s = await c.set({ key: "a", value: 1 });
     const h = await c.has({ key: "a" });
