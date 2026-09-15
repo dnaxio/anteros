@@ -128,7 +128,7 @@ export async function encryptUpdate(col: Collection | null, update: Record<strin
         const pf = pathFields.find((p) => k === p.name || k.startsWith(p.name + "."));
         if (pf) {
             const sub = k === pf.name ? null : k.slice(pf.name.length + 1);
-            // chemin exact, descendant ('zip.sub') ou à travers un index de array ('0.zip')
+            // exact path, descendant ('zip.sub') or through an array index ('0.zip')
             if (sub === null || pf.paths.some((p) => sub === p || sub.startsWith(p + ".") || sub.endsWith("." + p))) {
                 return { kind: "path", field: pf.name, sub, paths: pf.paths };
             }

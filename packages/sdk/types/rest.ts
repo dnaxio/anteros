@@ -26,7 +26,7 @@ export type RestRequestOptions = {
     signal?: AbortSignal;
     query?: RestQueryOptions;
     /**
-     * Si true, nettoie le body avant envoi (supprime null, undefined, tableaux vides, objets vides).
+     * If true, cleans the body before sending (removes null, undefined, empty arrays, empty objects).
      */
     cleanDeep?: boolean;
     /** Serve `find` from the server-side DB query cache (invalidated on writes). TTL is managed server-side (collection/server config). `findOne` is never cached */

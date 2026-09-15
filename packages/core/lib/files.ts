@@ -54,7 +54,7 @@ export function createDiskStorage(baseDir?: string): FileStorage {
       const filename = `${meta.id}${ext}`;
       const filepath = path.join(dir, filename);
       const buffer = await file.arrayBuffer();
-      // Faille 17: 'wx' — fail if file already exists (no silent overwrite)
+      // Flaw 17: 'wx' — fail if file already exists (no silent overwrite)
       await fs.writeFile(filepath, new Uint8Array(buffer), { flag: 'wx' });
       const outPath = subpath ? `${subpath}/${filename}` : `${tenant_id}/${collection}/${filename}`;
       return { path: outPath, size: buffer.byteLength };
@@ -135,7 +135,7 @@ async function transformImage(
   const format = options.format || 'webp';
   const quality = options.quality ?? 80;
 
-  // Faille 20: validate params (reject NaN / out-of-range)
+  // Flaw 20: validate params (reject NaN / out-of-range)
   if (!Number.isFinite(quality) || quality < 1 || quality > 100) {
     throw new AppError('Invalid quality parameter', { code: 'INVALID_TRANSFORM', status: 400 });
   }
@@ -144,7 +144,7 @@ async function transformImage(
     throw new AppError('Invalid width/height parameter', { code: 'INVALID_TRANSFORM', status: 400 });
   }
 
-  // Convertir ReadableStream en Uint8Array si nécessaire
+  // Convert a ReadableStream to a Uint8Array if needed
   let buffer: Uint8Array;
   if (input instanceof Uint8Array) {
     buffer = input;
@@ -165,13 +165,13 @@ async function transformImage(
     }
   }
 
-  // Faille 20: only transform real images (magic bytes check)
+  // Flaw 20: only transform real images (magic bytes check)
   const detected = detectMimeFromBuffer(buffer);
   if (!detected || !detected.startsWith('image/')) {
     throw new AppError('Not an image file', { code: 'NOT_AN_IMAGE', status: 400 });
   }
 
-  // Utiliser Bun.Image (natif, zéro dépendance)
+  // Use Bun.Image (native, zero dependencies)
   const img = new Bun.Image(buffer);
 
   if (options.width || options.height) {
@@ -181,7 +181,7 @@ async function transformImage(
     });
   }
 
-  // Encoder dans le format demandé
+  // Encode in the requested format
   let out: Blob;
   switch (format) {
     case 'jpeg':
@@ -253,7 +253,7 @@ export async function handleUpload(options: UploadOptions): Promise<FileResult> 
     });
   }
 
-  // Faille 4: validate magic bytes — don't trust client-declared Content-Type
+  // Flaw 4: validate magic bytes — don't trust client-declared Content-Type
   const fullBuffer = new Uint8Array(await file.arrayBuffer());
   const probe = fullBuffer.subarray(0, 4096);
   const detected = detectMimeFromBuffer(probe);
@@ -391,7 +391,7 @@ export async function handleServe(
   const stream = await storage.getStream(tenant_id, collection, fileId, filename, subpath);
   if (!stream) return null;
 
-  // Faille 10: serve the MIME validated at upload time (content-checked),
+  // Flaw 10: serve the MIME validated at upload time (content-checked),
   // not re-derived from the extension.
   let mimetype: string | undefined;
   try {
@@ -412,7 +412,7 @@ export async function handleServe(
     return { stream: new ReadableStream({ start(controller) { controller.enqueue(data); controller.close(); } }), mimetype: newMime, size: data.length };
   }
 
-  // Faille 4: SVG is served as an attachment (never inline) to prevent stored XSS
+  // Flaw 4: SVG is served as an attachment (never inline) to prevent stored XSS
   if (isSvg) {
     return { stream, mimetype, attachment: true };
   }

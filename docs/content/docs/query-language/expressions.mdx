@@ -25,7 +25,7 @@ import { useRest } from '@anteros/core';
 
 const rest = new useRest({ tenant_id: 'v1' });
 
-// Projeter le total TTC et la remise
+// Project the total including tax and the discount
 const orders = await rest.find('orders', {
   $project: {
     total: 1,
@@ -36,7 +36,7 @@ const orders = await rest.find('orders', {
 ```
 
 ```typescript
-// Via aggregate —  plus lisible pour des pipelines longs
+// Via aggregate —  more readable for long pipelines
 const enriched = await rest.aggregate('orders', [
   { $match: { status: 'paid' } },
   {
@@ -64,7 +64,7 @@ const enriched = await rest.aggregate('orders', [
 | `$split` | Split string into an array |
 
 ```typescript
-// Construire le nom complet et normaliser l'email
+// Build the full name and normalize the email
 const users = await rest.find('users', {
   $project: {
     fullName:  { $concat: ['$firstName', ' ', '$lastName'] },
@@ -86,7 +86,7 @@ const users = await rest.find('users', {
 | `$lt` / `$lte` | Less than (or equal) |
 
 ```typescript
-// Ajouter un booléen "budget dépassé"
+// Add an "over budget" boolean
 const projects = await rest.find('projects', {
   $project: {
     name: 1,
@@ -107,7 +107,7 @@ const projects = await rest.find('projects', {
 | `$switch` | Multi-branch switch |
 
 ```typescript
-// Label lisible + fallback pour l'affichage
+// Readable label + fallback for display
 const profiles = await rest.find('users', {
   $project: {
     name: 1,
@@ -127,7 +127,7 @@ const profiles = await rest.find('users', {
 ```
 
 ```typescript
-// Booléen calculé avec $cond
+// Boolean computed with $cond
 const results = await rest.find('candidates', {
   $project: {
     name: 1,
@@ -153,7 +153,7 @@ const results = await rest.find('candidates', {
 | `$dateToString` | Format date to string |
 
 ```typescript
-// Extraire année/mois, calculer l'ancienneté, formater
+// Extract year/month, compute tenure, format
 const users = await rest.find('users', {
   $project: {
     name: 1,
@@ -174,7 +174,7 @@ const users = await rest.find('users', {
 ```
 
 ```typescript
-// Utilisateurs créés il y a plus de 90 jours
+// Users created more than 90 days ago
 const inactive = await rest.find('users', {
   $match: {
     $expr: {
@@ -207,7 +207,7 @@ const inactive = await rest.find('users', {
 | `$range` | Generate numeric array |
 
 ```typescript
-// Compter, tronquer et cumuler sur les tableaux
+// Count, slice and accumulate over arrays
 const orders = await rest.find('orders', {
   $project: {
     itemCount:   { $size: '$items' },
@@ -225,7 +225,7 @@ const orders = await rest.find('orders', {
 ```
 
 ```typescript
-// Filtrer uniquement les items en stock
+// Keep only items in stock
 const withStock = await rest.find('orders', {
   $project: {
     availableItems: {
@@ -257,7 +257,7 @@ const withStock = await rest.find('orders', {
 | `$type` | Return BSON type name |
 
 ```typescript
-// Convertir un champ string en date
+// Convert a string field to a date
 const orders = await rest.find('orders', {
   $addFields: {
     parsedDate: { $toDate: '$dateString' }

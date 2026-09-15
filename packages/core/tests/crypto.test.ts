@@ -62,7 +62,7 @@ describe("crypto — symmetric AES-256-GCM", () => {
 
     it("decrypt(cipher, true, fields) decrypts the listed sub-fields inside the JSON", async () => {
         const c = useSymCrypt({ secret: "s" });
-        // json contenant des sous-champs chiffrés (convention field-level : JSON.stringify)
+        // json containing encrypted sub-fields (field-level convention: JSON.stringify)
         const encZip = await c.encrypt(JSON.stringify("75000"));
         const encPhone = await c.encrypt(JSON.stringify("0600000000"));
         const container = await c.encrypt({ city: "Paris", zip: encZip, contact: { phone: encPhone } });
@@ -72,7 +72,7 @@ describe("crypto — symmetric AES-256-GCM", () => {
         expect(dec.zip).toBe("75000");
         expect(dec.contact.phone).toBe("0600000000");
 
-        // sans les champs → sous-champs toujours chiffrés
+        // without the fields → sub-fields stay encrypted
         const raw = await c.decrypt<any>(container, true);
         expect(raw.zip).toMatch(/^[A-Za-z0-9+/=]+$/);
         expect(raw.city).toBe("Paris");
@@ -94,7 +94,7 @@ describe("crypto — symmetric AES-256-GCM", () => {
         const json = { city: "Paris", note: "plain text", zip: await c.encrypt(JSON.stringify("75000")) };
         const dec = await c.decrypt<any>(json, true, ["zip", "note", "missing"]);
         expect(dec.city).toBe("Paris");
-        expect(dec.note).toBe("plain text"); // pas un ciphertext → inchangé
+        expect(dec.note).toBe("plain text"); // not a ciphertext → kept as-is
         expect(dec.zip).toBe("75000");
     });
 
@@ -103,7 +103,7 @@ describe("crypto — symmetric AES-256-GCM", () => {
         const encZip = await c.encrypt(JSON.stringify("69001"));
         const encOther = await c.encrypt(JSON.stringify("69002"));
 
-        // array conteneur direct (ex: doc.addresses renvoyé par une requête)
+        // direct array container (e.g. doc.addresses returned by a query)
         const arr = [
             { city: "Lyon", zip: encZip },
             { city: "Villeurbanne", zip: encOther },
@@ -111,11 +111,11 @@ describe("crypto — symmetric AES-256-GCM", () => {
         const dec = await c.decrypt<any>(arr, true, ["zip"]);
         expect(dec[0].zip).toBe("69001");
         expect(dec[1].zip).toBe("69002");
-        expect(dec[0].city).toBe("Lyon"); // non-chiffré conservé
-        expect(dec).not.toBe(arr); // copie, pas de mutation
+        expect(dec[0].city).toBe("Lyon"); // non-encrypted value kept
+        expect(dec).not.toBe(arr); // copy, no mutation
         expect(arr[0]!.zip).toMatch(/^[A-Za-z0-9+/=]+$/); // input intact
 
-        // ciphertext dont le plaintext est un array de json
+        // ciphertext whose plaintext is an array of json
         const encContainer = await c.encrypt([{ zip: encZip }, { zip: encOther }]);
         const dec2 = await c.decrypt<any>(encContainer, true, ["zip"]);
         expect(dec2[0].zip).toBe("69001");
@@ -125,10 +125,10 @@ describe("crypto — symmetric AES-256-GCM", () => {
 
 describe("crypto — key rotation (versioned secrets)", () => {
     it("decrypts old ciphertexts after rotating the secret", async () => {
-        const old = useSymCrypt({ secret: "v1-secret" }); // version 1 par défaut
+        const old = useSymCrypt({ secret: "v1-secret" }); // version 1 by default
         const enc = await old.encrypt({ apiKey: "sk-rot" });
 
-        // Rotation : nouvelle clé active v2, l'ancienne conservée en decrypt-only
+        // Rotation: new active key v2, the old one kept for decrypt-only
         const rotated = useSymCrypt({ secret: "v2-secret", version: 2, previousSecrets: { 1: "v1-secret" } });
         const dec = await rotated.decrypt<{ apiKey: string }>(enc, true);
         expect(dec.apiKey).toBe("sk-rot");
@@ -139,7 +139,7 @@ describe("crypto — key rotation (versioned secrets)", () => {
         const enc = await c.encrypt("data");
         const buf = Buffer.from(enc, "base64");
         expect(buf[0]).toBe(2);
-        // round-trip avec la même instance
+        // round-trip with the same instance
         const dec = await c.decrypt(enc);
         expect(dec).toBe("data");
     });
@@ -147,7 +147,7 @@ describe("crypto — key rotation (versioned secrets)", () => {
     it("still decrypts legacy ciphertexts (no version byte)", async () => {
         const c = useSymCrypt({ secret: "s" });
         const enc = await c.encrypt("legacy");
-        // Simule un ciphertext produit AVANT la rotation (format sans octet de version)
+        // Simulates a ciphertext produced BEFORE the rotation (format without a version byte)
         const legacy = Buffer.from(Buffer.from(enc, "base64").subarray(1)).toString("base64");
         const dec = await c.decrypt(legacy);
         expect(dec).toBe("legacy");
@@ -164,11 +164,11 @@ describe("crypto — key rotation (versioned secrets)", () => {
         const c = useSymCrypt({ secret: "s", aad: "myapp:prod" });
         const enc = await c.encrypt({ apiKey: "sk-aad" });
 
-        // même instance → OK (défaut appliqué au decrypt aussi)
+        // same instance → OK (default applied on decrypt too)
         const dec = await c.decrypt<{ apiKey: string }>(enc, true);
         expect(dec.apiKey).toBe("sk-aad");
 
-        // sans l'AAD config → échec (tag invalide)
+        // without the config AAD → fails (invalid tag)
         const other = useSymCrypt({ secret: "s" });
         await expect(other.decrypt(enc, true)).rejects.toThrow();
     });
@@ -178,15 +178,15 @@ describe("crypto — key rotation (versioned secrets)", () => {
         const enc = await c.encrypt("x", "explicit:ctx");
         const dec = await c.decrypt(enc, false, "explicit:ctx");
         expect(dec).toBe("x");
-        // le défaut ne déchiffre pas le chiffré lié à l'explicite
+        // the default cannot decrypt the ciphertext bound to the explicit AAD
         await expect(c.decrypt(enc, false, "default:ctx")).rejects.toThrow();
     });
 
     it("legacy ciphertexts (no AAD) still decrypt after a default AAD is configured", async () => {
-        const legacy = useSymCrypt({ secret: "s" }); // chiffré SANS AAD (ancien comportement)
+        const legacy = useSymCrypt({ secret: "s" }); // encrypted WITHOUT AAD (legacy behavior)
         const enc = await legacy.encrypt("old-data");
 
-        const c = useSymCrypt({ secret: "s", aad: "myapp:prod" }); // config avec AAD par défaut
+        const c = useSymCrypt({ secret: "s", aad: "myapp:prod" }); // config with a default AAD
         const dec = await c.decrypt(enc);
         expect(dec).toBe("old-data");
     });
@@ -223,7 +223,7 @@ describe("crypto — encryption mode (server.encryption.mode)", () => {
     it("resolve() returns the instance matching the configured mode", async () => {
         delete (cfg.server as any).encryption;
         formatConfig({ server: { port: 4000 }, tenants: [] });
-        const priv = await useAsymCrypt().exportPrivateKey(); // pair fraîche, pas de mode config
+        const priv = await useAsymCrypt().exportPrivateKey(); // fresh pair, no configured mode
 
         delete (cfg.server as any).encryption;
         formatConfig({ server: { port: 4000, encryption: { mode: "symmetric", secret: "cfg" } }, tenants: [] });

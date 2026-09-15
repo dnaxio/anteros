@@ -131,7 +131,7 @@ const store = createStore({
       this.state.total += price
     },
     checkout() {
-      // this.patch() pour mise à jour partielle
+      // this.patch() for partial updates
       this.patch({ items: [], total: 0 })
     },
     log() {
@@ -160,10 +160,10 @@ Contexte `this` disponible dans les actions :
 Met à jour partiellement le state, soit par objet partiel, soit par callback mutateur :
 
 ```ts
-// Objet partiel
+// Partial object
 store.patch({ name: 'Jean', age: 30 })
 
-// Callback mutateur
+// Mutator callback
 store.patch((state) => {
   state.count++
   state.items.push('nouveau')
@@ -179,8 +179,8 @@ const store = createStore({
   state: { theme: 'light' },
   persist: true,
 })
-// Sauvegarde automatique dans localStorage
-// Clé : "default:store" (namespace:key)
+// Automatic save to localStorage
+// Key: "default:store" (namespace:key)
 ```
 
 ### `persist: "session"` — sessionStorage
@@ -190,7 +190,7 @@ const store = createStore({
   state: { draft: '' },
   persist: 'session',
 })
-// Sauvegarde dans sessionStorage (effacé à la fermeture de l'onglet)
+// Saved to sessionStorage (cleared when the tab is closed)
 ```
 
 ### `StorageAdapter` — Stockage personnalisé
@@ -264,19 +264,19 @@ Accès complet avec cleanup automatique. Les watchers sont arrêtés à la destr
 import { useStore } from '@anteros/store/vue'
 
 const {
-  state,          // État mutable
-  snap,           // Snapshot readonly
-  getters,        // Getters réactifs
-  actions,        // Actions bindées
-  patch,          // Mise à jour partielle
+  state,          // Mutable state
+  snap,           // Readonly snapshot
+  getters,        // Reactive getters
+  actions,        // Bound actions
+  patch,          // Partial update
   on,             // Listener "change"
-  off,            // Supprimer les listeners
-  reset,          // Réinitialiser
-  clearStorage,   // Effacer le storage
-  key,            // Clé de stockage
+  off,            // Remove listeners
+  reset,          // Reset
+  clearStorage,   // Clear storage
+  key,            // Storage key
   namespace,      // Namespace
-  isPersisted,    // Persistance active ?
-  storageType,    // Type de stockage
+  isPersisted,    // Persistence active?
+  storageType,    // Storage type
 } = useStore(store)
 </script>
 ```
@@ -289,7 +289,7 @@ Retourne uniquement le snapshot readonly réactif. Idéal pour la lecture seule.
 import { useSnapshot } from '@anteros/store/vue'
 
 const snap = useSnapshot(store)
-// snap.count est réactif
+// snap.count is reactive
 ```
 
 ### `useWatch(store, callback)`
@@ -303,7 +303,7 @@ const stop = useWatch(store, (newState, oldState) => {
   console.log('State changé :', newState)
 })
 
-// Plus tard
+// Later
 stop()
 ```
 
@@ -379,7 +379,7 @@ store.on('change', (newState, oldState) => {
   console.log('State modifié :', newState)
 })
 
-// Supprimer tous les listeners
+// Remove all listeners
 store.off()
 ```
 
@@ -388,12 +388,12 @@ store.off()
 ```ts
 const store = createStore({ state: { x: 0 }, persist: true })
 
-// Utilisation...
+// Usage...
 store.actions.doSomething()
 
-// Nettoyage
-store.dispose()      // Arrête tous les watchers
-store.clearStorage() // Efface le localStorage
+// Cleanup
+store.dispose()      // Stops all watchers
+store.clearStorage() // Clears localStorage
 ```
 
 ## Exemple complet
@@ -401,10 +401,10 @@ store.clearStorage() // Efface le localStorage
 ```ts
 import { createStore, setStoragePrefix } from '@anteros/store/vue'
 
-// Préfixe global
+// Global prefix
 setStoragePrefix('myapp')
 
-// Création
+// Creation
 const userStore = createStore({
   namespace: 'user',
   state: {
@@ -436,7 +436,7 @@ userStore.actions.login('Alice', 'alice@test.com', 30)
 userStore.patch({ age: 31 })
 userStore.actions.setTheme('dark')
 
-// Lecture
+// Read
 console.log(userStore.getters.isAdult)     // true
 console.log(userStore.getters.displayName) // "Alice"
 console.log(userStore.key)                 // "myapp:user:user"

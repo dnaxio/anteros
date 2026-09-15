@@ -210,7 +210,7 @@ const dashboard = await rest.aggregate('orders', [
 Deconstructs an array field — each array element becomes its own document.
 
 ```typescript
-// Compter les tags toutes catégories confondues
+// Count tags across all categories combined
 const tagCounts = await rest.aggregate('articles', [
   { $unwind: '$tags' },
   { $group: { _id: '$tags', count: { $sum: 1 } } },
@@ -237,7 +237,7 @@ Options :
 Left outer join with another collection.
 
 ```typescript
-// Utilisateurs avec leurs commandes
+// Users with their orders
 const usersWithOrders = await rest.aggregate('users', [
   {
     $lookup: {
@@ -277,7 +277,7 @@ const usersWithRecent = await rest.aggregate('users', [
 Recursive graph traversal — ideal for hierarchies, org charts, categories.
 
 ```typescript
-// Remonter toute la chaîne hiérarchique d'un employé
+// Walk up the full reporting chain of an employee
 const hierarchy = await rest.aggregate('users', [
   {
     $graphLookup: {

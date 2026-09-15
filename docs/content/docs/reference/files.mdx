@@ -62,14 +62,14 @@ export default define.FileCollection({
 
 | Method | Route | Description |
 |---------|-------|-------------|
-| `POST` | `/upload/:tenant_id/:slug` | Upload a file |
+| `POST` | `/upload/:tenant_id/:slug` | Upload **one or several files** |
 | `GET` | `/files/:tenant_id/:slug/:filename` | Serve / download a file |
 | `DELETE` | `/files/:tenant_id/:slug/:fileId` | Delete a file (by `_id`) |
 
 ### Upload
 
 ```bash
-# Simple upload
+# Single file
 curl -X POST /upload/v1/photos \
   -F "file=@photo.jpg"
 
@@ -79,9 +79,17 @@ curl -X POST /upload/v1/photos \
   -F "description=Profile photo" \
   -F "alt=My avatar" \
   -F "author=64f1a2b3..."
+
+# Several files in ONE request (same field name, repeated)
+curl -X POST /upload/v1/photos \
+  -F "file=@a.jpg" \
+  -F "file=@b.jpg" \
+  -F "file=@c.jpg" \
+  -F "album=Summer"
 ```
 
-Response:
+Response — **one file → a single object**, **several files → an array** (one document per file):
+
 ```json
 {
   "_id": "507f1f77bcf86cd799439011",
@@ -97,6 +105,21 @@ Response:
 }
 ```
 
+```json
+[
+  { "_id": "...011", "_file": { "name": "a.jpg", "url": "/files/v1/photos/...011.jpg" }, "album": "Summer" },
+  { "_id": "...012", "_file": { "name": "b.jpg", "url": "/files/v1/photos/...012.jpg" }, "album": "Summer" }
+]
+```
+
+The form field must be named `file` or `upload` (repeated for multiple files). All other fields are stored in the document(s) alongside `_file`.
+
+Rules for multiple uploads:
+
+- **One document per file** — each file gets its own `_id`, `_file` block, storage and replication.
+- **Validation is per file** — MIME type and size (`upload.maxSize`) are checked for each file; one invalid file rejects the whole request (`MIMETYPE_NOT_ALLOWED` / `FILE_TOO_LARGE`).
+- **Metadata is shared** — non-file fields apply to every uploaded document.
+- `upload.maxSize` also caps the **total request** size, so the sum of all files must fit within it.
 The form field must be named `file` or `upload`. All other fields are stored in the document alongside `_file`.
 
 ### Serve a file

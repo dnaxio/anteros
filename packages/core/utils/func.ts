@@ -159,14 +159,14 @@ function pick<T extends DeepRecord>(data: T | T[], keys: string[]): Partial<T> |
 }
 
 /**
- * Convertit la dot-notation MongoDB en structure imbriquée pour la validation Joi.
+ * Converts MongoDB dot-notation into a nested structure for Joi validation.
  * Ex: { "address.zip": "BP28", "items.0.name": "x" } → { address: { zip }, items: [{ name }] }
- * Les clés opérateurs ($inc, $push…) sont laissées telles quelles.
+ * Operator keys ($inc, $push…) are left as-is.
  */
 function unflattenKeys(input: Record<string, unknown>): Record<string, unknown> {
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(input)) {
-        // Opérateurs Mongo → laisser tel quel (interdits dans $set de toute façon)
+        // Mongo operators → leave as-is (forbidden in $set anyway)
         if (key.startsWith('$')) {
             result[key] = value;
             continue;
@@ -183,7 +183,7 @@ function unflattenKeys(input: Record<string, unknown>): Record<string, unknown> 
             target = target[part];
         }
         const last = parts[parts.length - 1]!;
-        // Fusion si les deux côtés sont des objets (ex. "a.b" + a: { c })
+        // Merge when both sides are objects (e.g. "a.b" + a: { c })
         if (
             target[last] &&
             typeof target[last] === 'object' &&
@@ -257,15 +257,15 @@ function cleanDeep<T extends DeepRecord | DeepRecord[]>(data: T): Partial<T> {
 }
 
 /**
- * Vérifie si une string est une date ISO 8601 valide.
- * Les timestamps numériques (ex: "1704067200") ne sont PAS convertis ici —
- * ils passent par `isEpochNumber` quand la valeur est un `number`.
+ * Checks whether a string is a valid ISO 8601 date.
+ * Numeric timestamps (e.g. "1704067200") are NOT converted here —
+ * they go through `isEpochNumber` when the value is a `number`.
  */
 function isDate(value: string): boolean {
     if (!value || typeof value !== 'string') return false;
     const trimmed = value.trim();
 
-    // ISO 8601 : YYYY-MM-DD avec heure optionnelle
+    // ISO 8601: YYYY-MM-DD with optional time
     if (!/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})?)?$/.test(trimmed)) {
         return false;
     }
@@ -274,14 +274,14 @@ function isDate(value: string): boolean {
     return !isNaN(date.getTime());
 }
 
-/** Convertit une string ISO 8601 en Date. */
+/** Converts an ISO 8601 string to a Date. */
 function stringToDate(value: string): Date {
     return new Date(value.trim());
 }
 
 /**
- * Nombre entier type timestamp UNIX (s ou ms).
- * Restreint à ≥ an 2000 pour éviter les faux positifs (ex: numéros de téléphone).
+ * Integer number of UNIX timestamp type (s or ms).
+ * Restricted to ≥ year 2000 to avoid false positives (e.g. phone numbers).
  */
 function isEpochNumber(value: number): boolean {
     if (typeof value !== 'number' || !Number.isFinite(value)) return false;
@@ -289,12 +289,12 @@ function isEpochNumber(value: number): boolean {
     if (int !== value) return false;
     const s = String(Math.abs(int));
     if (s.length === 10) {
-        // Secondes UNIX : ≥ 2000-01-01
+        // UNIX seconds: ≥ 2000-01-01
         if (int < 946684800) return false;
         return !isNaN(new Date(int * 1000).getTime());
     }
     if (s.length === 13) {
-        // Millisecondes UNIX : ≥ 2000-01-01
+        // UNIX milliseconds: ≥ 2000-01-01
         if (int < 946684800000) return false;
         return !isNaN(new Date(int).getTime());
     }
@@ -320,11 +320,11 @@ type FormatToDateResult<T> = T extends string
     ? { [K in keyof T]: FormatToDateResult<T[K]> }
     : T;
 
-/** Options pour filtrer les chemins ; sans options, tout ce qui passe `isDate` est converti en `Date`. */
+/** Options to filter paths; without options, everything that passes `isDate` is converted to `Date`. */
 type FormatToDateOptions = {
-    /** Noms de champs (notation pointée) à ne pas convertir ; correspondance exacte ou suffixe (ex. `$set.createdAt`). */
+    /** Field names (dot notation) not to convert; exact match or suffix (e.g. `$set.createdAt`). */
     omitKeys?: string[];
-    /** Si défini et non vide : seuls ces champs sont convertis (équivalent à « tout sauf les non-date »). Correspondance exacte ou suffixe de chemin. */
+    /** If set and non-empty: only these fields are converted (equivalent to "everything except the non-dates"). Exact match or path suffix. */
     includeKeys?: string[];
 };
 
@@ -334,9 +334,9 @@ function joinFormatToDatePath(parent: string, segment: string | number): string 
 }
 
 /**
- * Correspond à un nom de champ schéma (`createdAt`, `user.birthDate`)
- * y compris en profondeur (`$set.createdAt`) ou derrière un opérateur
- * MongoDB (`createdAt.$lte`, `$match.createdAt.$gte`).
+ * Matches a schema field name (`createdAt`, `user.birthDate`)
+ * including at depth (`$set.createdAt`) or behind a MongoDB
+ * operator (`createdAt.$lte`, `$match.createdAt.$gte`).
  */
 function pathMatchesFieldKey(path: string, key: string): boolean {
     // Strip trailing MongoDB operator segments: createdAt.$lte → createdAt
@@ -345,16 +345,16 @@ function pathMatchesFieldKey(path: string, key: string): boolean {
 }
 
 function shouldFormatDateAtPath(path: string, options?: FormatToDateOptions): boolean {
-    // Aucune option → convertir partout où `isDate` est vrai
+    // No options → convert everywhere `isDate` is true
     if (!options) return true;
 
-    // Contexte d'opérateur MongoDB ($lte, $gte, $eq, $in, $nin, $exists, etc.)
-    // → toujours convertir : un opérateur sur une date n'a de sens qu'avec un vrai Date
-    // On vérifie si un segment du chemin commence par '$' (ex: createdAt.$lte, $in.0)
+    // MongoDB operator context ($lte, $gte, $eq, $in, $nin, $exists, etc.)
+    // → always convert: an operator on a date only makes sense with a real Date
+    // We check whether a path segment starts with '$' (e.g. createdAt.$lte, $in.0)
     if (path.split('.').some((seg) => /^\$[a-z]+$/i.test(seg))) return true;
 
     if (options.omitKeys?.some((k) => pathMatchesFieldKey(path, k))) return false;
-    // Whitelist seulement si includeKeys est un tableau non vide
+    // Whitelist only if includeKeys is a non-empty array
     if (options.includeKeys && options.includeKeys.length > 0) {
         return options.includeKeys.some((k) => pathMatchesFieldKey(path, k));
     }
@@ -366,7 +366,7 @@ function formatToDate(data: any, options?: FormatToDateOptions, path = ''): any 
     if (data instanceof Date) return data;
     if (data instanceof ObjectId) return data;
 
-    // String racine (ex: item de tableau $in) — vérifier avant la branche objet
+    // Root string (e.g. $in array item) — check before the object branch
     if (typeof data === 'string' && isDate(data)) {
         return shouldFormatDateAtPath(path, options) ? stringToDate(data) : data;
     }
@@ -391,7 +391,7 @@ function formatToDate(data: any, options?: FormatToDateOptions, path = ''): any 
                 }
             } else if (typeof value === 'number' && isEpochNumber(value)) {
                 if (shouldFormatDateAtPath(p, options)) {
-                    // 10 chiffres = secondes (×1000), 13 chiffres = millisecondes (déjà en ms)
+                    // 10 digits = seconds (×1000), 13 digits = milliseconds (already in ms)
                     const absVal = Math.abs(Math.trunc(value));
                     const asMs = String(absVal).length === 10 ? value * 1000 : value;
                     result[key] = new Date(asMs);
@@ -467,9 +467,9 @@ export type GenerateRandomOptions = {
     useNumbers?: boolean;
     includeSymbols?: string;
     excludeSymbols?: string;
-    /** Préfixe (string fixe ou fonction qui reçoit la valeur générée). Ex: `(v) => 'BP-' + v` */
+    /** Prefix (fixed string or function that receives the generated value). Ex: `(v) => 'BP-' + v` */
     startWith?: string | ((value: string) => string);
-    /** Suffixe (string fixe ou fonction qui reçoit la valeur générée). Ex: `(v) => v + '-X'` */
+    /** Suffix (fixed string or function that receives the generated value). Ex: `(v) => v + '-X'` */
     endWith?: string | ((value: string) => string);
     toLowerCase?: boolean;
     toUpperCase?: boolean;
@@ -523,8 +523,8 @@ async function generateRandom(options: GenerateRandomOptions, ctx: {
         result += charset[randomIndex];
     }
 
-    // String → préfixe/suffixe classique. Fonction → elle reçoit la valeur
-    // et retourne le résultat final (pas de re-concaténation pour éviter la duplication).
+    // String → classic prefix/suffix. Function → it receives the value
+    // and returns the final result (no re-concatenation to avoid duplication).
     if (typeof startWith === 'function') {
         result = startWith(result);
     } else {
@@ -703,14 +703,14 @@ function buildPipeline(p: FindOptions, options?: {
                 status: 400
             });
         }
-        // Faille 13: bound $regex (ReDoS) and $in/$nin (memory DoS)
+        // Flaw 13: bound $regex (ReDoS) and $in/$nin (memory DoS)
         boundMatchOperators(p.$match);
         pipeline.push({
             $match: p.$match
         })
     }
 
-    // $sort — Faille 14: values must be 1 or -1
+    // $sort — Flaw 14: values must be 1 or -1
     if (p?.$sort) {
         for (const [key, dir] of Object.entries(p.$sort)) {
             if (dir !== 1 && dir !== -1) {
@@ -722,7 +722,7 @@ function buildPipeline(p: FindOptions, options?: {
         }
     }
 
-    // $skip — Faille 14: must be a safe non-negative integer
+    // $skip — Flaw 14: must be a safe non-negative integer
     if (p?.$skip !== undefined && p?.$skip !== null) {
         if (!Number.isSafeInteger(p.$skip) || p.$skip < 0) {
             throw new AppError('Invalid $skip (expected a non-negative integer)', {
@@ -829,7 +829,7 @@ function buildPipeline(p: FindOptions, options?: {
 
                 let as = include.as || include.localField
 
-                // Faille 3: never trust client-supplied $lookup sub-pipeline — scan it
+                // Flaw 3: never trust client-supplied $lookup sub-pipeline — scan it
                 if (include.pipeline && Array.isArray(include.pipeline)) {
                     const check = isSafeAggregatePipeline(include.pipeline as Array<Record<string, unknown>>)
                     if (!check.isSafe) {
@@ -906,7 +906,7 @@ function clone<T>(data: T): T {
 }
 
 /**
- * Faille 13: bounds dangerous $match operators to prevent ReDoS ($regex) and memory DoS ($in).
+ * Flaw 13: bounds dangerous $match operators to prevent ReDoS ($regex) and memory DoS ($in).
  * Walks nested objects/arrays ($and, $or, $nor, dotted fields).
  */
 const MAX_REGEX_LENGTH = 1000;
@@ -960,19 +960,19 @@ function boundMatchOperators(node: unknown): void {
 	        .replace(/^-|-$/g, '');
 	}
 
-	/** Vérifie qu'une chaîne est un slug valide (lettres minuscules, chiffres, tirets simples) */
+	/** Checks that a string is a valid slug (lowercase letters, digits, single hyphens) */
 	function isSlug(value: string): boolean {
 	    return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value);
 	}
 
 
 /**
- * Parcourt récursivement `data` (objet ou tableau, profondeur quelconque)
- * et retourne les clés de `keys` qui apparaissent au moins une fois comme
- * nom de propriété propre (own key) d'un objet.
- * @param data - L'objet ou le tableau à inspecter.
- * @param keys - Les clés prohibées à rechercher.
- * @returns Un tableau des clés prohibées trouvées.
+ * Recursively walks `data` (object or array, any depth)
+ * and returns the keys from `keys` that appear at least once as an
+ * own property name of an object.
+ * @param data - The object or array to inspect.
+ * @param keys - The forbidden keys to look for.
+ * @returns An array of the forbidden keys found.
  */
 function hasUnauthorizedKeys(data: unknown, keys: string[]): string[] {
     const found = new Set<string>();
@@ -1041,7 +1041,7 @@ function isAggregationFieldPathRef(value: unknown): value is string {
     return typeof value === 'string' && value.startsWith('$') && !value.startsWith('$$');
 }
 
-/** Carte des clés de sortie → ref source pour tout renommage illicite (`out !==` dernier segment du chemin). */
+/** Map of output keys → source ref for any illicit rename (`out !==` last path segment). */
 function getProjectFieldRenames(project: unknown): Record<string, string> {
     const renames: Record<string, string> = {};
     if (!project || typeof project !== 'object' || Array.isArray(project)) {
@@ -1063,12 +1063,12 @@ function getProjectFieldRenames(project: unknown): Record<string, string> {
 }
 
 /**
- * Vérifie les entrées `$project` qui renomment un champ via une référence de chemin
- * Mongo (valeur string `"$..."`), ex. `{ pw: "$password" }`.
+ * Checks `$project` entries that rename a field through a Mongo path
+ * reference (string value `"$..."`), e.g. `{ pw: "$password" }`.
  *
- * On considère qu'il y a « renommage » lorsque la clé de sortie diffère du dernier
- * segment du chemin source (`password` pour `$password`, `email` pour `user.email`).
- * @throws AppError 400 `UNAUTHORIZED_PROJECT_FIELD_RENAME` si un renommage est détecté
+ * A "rename" is considered to occur when the output key differs from the last
+ * segment of the source path (`password` for `$password`, `email` for `user.email`).
+ * @throws AppError 400 `UNAUTHORIZED_PROJECT_FIELD_RENAME` if a rename is detected
  */
 function protectFieldRenameOnProject(project: unknown): Record<string, unknown> {
     if (!project || typeof project !== 'object' || Array.isArray(project)) {
@@ -1087,7 +1087,7 @@ function protectFieldRenameOnProject(project: unknown): Record<string, unknown> 
 
 
 /**
- * Parcourt récursivement un pipeline d'agrégation MongoDB (stages `$facet`,
+ * Recursively walks a MongoDB aggregation pipeline (stages `$facet`,
  * `$lookup.pipeline`, `$unionWith.pipeline`, `$graphLookup.pipeline`).
  */
 function walkAggregatePipeline(
@@ -1151,7 +1151,7 @@ function isSafeAggregatePipeline(pipeline: Array<Record<string, unknown>>, allow
     error: AppError | null;
 } {
 
-    // Unauthorized pipeline keys — Faille 12: include cross-collection exfiltration stages
+    // Unauthorized pipeline keys — Flaw 12: include cross-collection exfiltration stages
     const UNAUTHORIZED_PIPELINE_KEYS = [
         '$out', '$merge', '$function', '$where', '$accumulator',
         '$unionWith', '$collStats', '$indexStats', '$planCacheStats',
@@ -1166,7 +1166,7 @@ function isSafeAggregatePipeline(pipeline: Array<Record<string, unknown>>, allow
         }
     }
 
-    // Faille 12: restrict $lookup / $graphLookup targets to declared tenant collections
+    // Flaw 12: restrict $lookup / $graphLookup targets to declared tenant collections
     if (allowedCollections && allowedCollections.length > 0) {
         const badTargets: string[] = [];
         walkAggregatePipeline(pipeline, (stage) => {
@@ -1188,7 +1188,7 @@ function isSafeAggregatePipeline(pipeline: Array<Record<string, unknown>>, allow
         }
     }
 
-    // $project avec renommage : racine + imbriqué ($facet, $lookup.pipeline, …)
+    // $project with rename: root + nested ($facet, $lookup.pipeline, …)
     let renameForbiddenKeys: string[] = [];
     let renameError: AppError | null = null;
     walkAggregatePipeline(pipeline, (stage) => {

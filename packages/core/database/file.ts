@@ -75,14 +75,14 @@ async function initializeFileCollectionsOnDatabase(files: FileCollection[]) {
             const db = tenant?.database?.db
             if (!db) continue;
 
-            // Créer la collection si elle n'existe pas
+            // Create the collection if it does not exist
             const collections = await db.listCollections({ name: fileCollection.slug }).toArray()
             if (collections.length === 0) {
                 await db.createCollection(fileCollection.slug)
             }
 
-            // Créer les indexes par défaut (uniquement ceux qui manquent —
-            // ne jamais forcer la recréation d'un index déjà existant)
+            // Create the default indexes (only the missing ones —
+            // never force the re-creation of an already existing index)
             const col = db.collection(fileCollection.slug)
             const existingIndexes = await col.listIndexes().toArray()
             const existingNames = new Set(existingIndexes.map((idx) => idx.name))

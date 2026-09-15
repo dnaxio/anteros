@@ -15,7 +15,7 @@ import { getTenantMiddlewares } from "../lib/middleware";
 import type { ActivityInput } from "../types/activity";
 import * as os from 'node:os';
 import { basename } from 'node:path';
-import { handleUpload, handleServe, handleDelete } from "../lib/files";
+import { handleUpload, handleServe, handleDelete, type FileResult } from "../lib/files";
 const API_PREFIX = '/api/:tenant_id/:collection/:action';
 const SERVICE_PREFIX = '/services/:tenant_id/:service/:action';
 const UPLOAD_PREFIX = '/upload/:tenant_id/:collection';
@@ -346,7 +346,7 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
             }
 
             // ── Access control ──
-            // Faille 7: single implementation via evaluateAccess (checks expired/forged tokens)
+            // Flaw 7: single implementation via evaluateAccess (checks expired/forged tokens)
             await evaluateAccess(col?.api?.access as any, action, rest, 'Action', c);
 
             // ── Execute action ──
@@ -457,7 +457,9 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
                 throw new AppError('Content-Type must be multipart/form-data', { code: 'INVALID_CONTENT_TYPE', status: 400 });
             }
 
-            // Faille 11: reject oversized bodies BEFORE parseBody buffers them in memory
+            // Security: reject oversized bodies BEFORE parseBody buffers them in memory.
+            // `maxSize` doubles as the TOTAL request allowance → a multi-file upload must
+            // fit within it (each file is also validated individually in handleUpload).
             const contentLength = Number(c.req.header('Content-Length') ?? 0);
             const maxUploadSize = colUpload.upload?.maxSize ?? 10 * 1024 * 1024; // 10MB default
             // multipart overhead (boundaries/headers) ≈ 64KB max
@@ -467,21 +469,36 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
                 });
             }
 
-            const formData = await c.req.parseBody();
-            const fileField = formData['file'] || formData['upload'];
-            if (!fileField || !(fileField instanceof File)) {
+            const formData = await c.req.parseBody({ all: true }); // all: true → every value is an array (several files can share the same field name)
+
+            // Collect files from both accepted field names (single or multiple)
+            const files: File[] = [];
+            for (const key of ['file', 'upload']) {
+                for (const value of formData[key] ?? []) {
+                    if (value instanceof File) files.push(value);
+                }
+            }
+            if (!files.length) {
                 throw new AppError('No file provided. Use field name "file" or "upload".', { code: 'FILE_REQUIRED', status: 400 });
             }
 
+            // Metadata: non-file fields. Single value → scalar (unchanged contract),
+            // repeated under the same name → array.
             const data: Record<string, any> = {};
             for (const [key, value] of Object.entries(formData)) {
-                if (key !== 'file' && key !== 'upload' && !(value instanceof File)) {
-                    data[key] = value;
-                }
+                if (key === 'file' || key === 'upload') continue;
+                const list = (Array.isArray(value) ? value : [value]) as any[];
+                if (list.some((v) => v instanceof File)) continue;
+                data[key] = list.length === 1 ? list[0] : list;
             }
 
-            const result = await handleUpload({ collection, tenant_id, file: fileField, data });
-            return c.json(result);
+            // One document per file (per-file validation: MIME, size, storage, replication).
+            // 1 file → single object (backward compatible), N files → array (SDK contract).
+            const results: FileResult[] = [];
+            for (const file of files) {
+                results.push(await handleUpload({ collection, tenant_id, file, data }));
+            }
+            return c.json(results.length === 1 ? results[0] : results);
         } catch (err: any) {
             if (cfg?.debug) console.error(err)
             return errorResponse(c, err);
@@ -504,7 +521,7 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
             }
             await checkFileAccess(colServe?.api?.access as any, 'read', tenant_id, c);
 
-            // Faille 18: validate the RAW path before basename (checks were dead code)
+            // Flaw 18: validate the RAW path before basename (checks were dead code)
             const rawFile = c.req.param('file') as string;
             if (!rawFile || rawFile.startsWith('.') || rawFile.includes('..') || rawFile.includes('/') || rawFile.includes('\\')) {
                 throw new AppError('Invalid filename', { status: 400, code: 'INVALID_FILENAME' });
@@ -530,7 +547,7 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
             c.header('Content-Type', result.mimetype);
             if (result.size) c.header('Content-Length', String(result.size));
             c.header('Cache-Control', 'public, max-age=31536000, immutable');
-            // Faille 4: SVG served as attachment (no inline execution)
+            // Flaw 4: SVG served as attachment (no inline execution)
             if (result.attachment) {
                 c.header('Content-Disposition', `attachment; filename="${filename}"`);
             }
@@ -573,7 +590,7 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
     // ─── Public config ──────────────────────────────────────────────────
     app.get('/_dnax/config/:tenant_id', (c) => {
         const t = c.get('token');
-        // Faille 6: require a VERIFIED, non-expired token (not just any provided value)
+        // Flaw 6: require a VERIFIED, non-expired token (not just any provided value)
         if (!t?.decoded || t?.expired || !t?.provided) {
             return c.json({ message: 'Authentication required', code: 'AUTH_REQUIRED' }, 401);
         }

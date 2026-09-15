@@ -1,8 +1,8 @@
 import { define } from "../../../../index";
 
 // Reproduces the Mongo error `sparse: null is not convertible to bool`:
-// `indexOptions.sparse` explicit à null doit être ignoré (jamais envoyé à Mongo),
-// et `unique` accepte le style Mongo 1/0 (coercé en vrai booléen).
+// an explicit `indexOptions.sparse: null` must be ignored (never sent to Mongo),
+// and `unique` accepts the Mongo 1/0 style (coerced to a real boolean).
 export default define.Collection({
     slug: "variants",
     fields: [

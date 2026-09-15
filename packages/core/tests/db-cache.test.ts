@@ -152,10 +152,10 @@ describe("DB query cache (useCache)", () => {
         const r1: any = await rest.find("items", params, { useCache: true });
         expect(r1[0]!.count).toBe(1);
 
-        // update avec un ObjectId NATIF (pas un string) — la normalisation String(id) doit matcher l'index
+        // update with a NATIVE ObjectId (not a string) — String(id) normalization must match the index
         await rest.updateOne("items", new ObjectId(a._id), { $set: { count: 77 } });
         const r2: any = await rest.find("items", params, { useCache: true });
-        expect(r2[0]!.count).toBe(77); // invalidé + refetch
+        expect(r2[0]!.count).toBe(77); // invalidated + refetch
 
         await rest.db.collection("items").deleteMany({ title: marker });
     });
@@ -168,15 +168,15 @@ describe("DB query cache (useCache)", () => {
         const b = await rest.insertOne("items", { title: marker, count: 2 });
         const c = await rest.insertOne("items", { title: marker, count: 3 });
 
-        const params = { $match: { title: marker }, $sort: { count: 1 } }; // ordre garanti: a(1), b(2), c(3)
-        await rest.find("items", params, { useCache: true }); // cache peuplé (3 docs)
+        const params = { $match: { title: marker }, $sort: { count: 1 } }; // guaranteed order: a(1), b(2), c(3)
+        await rest.find("items", params, { useCache: true }); // cache populated (3 docs)
 
-        // le 3e id (c) n'est PAS taggé (maxTags: 2) → pas d'invalidation ciblée
+        // the 3rd id (c) is NOT tagged (maxTags: 2) → no targeted invalidation
         await rest.updateOne("items", c._id, { $set: { count: 33 } });
         const r1: any = await rest.find("items", params, { useCache: true });
-        expect(r1.find((d: any) => d._id === c._id)!.count).toBe(3); // cache conservé
+        expect(r1.find((d: any) => d._id === c._id)!.count).toBe(3); // cache kept
 
-        // le 1er id (a) est taggé → invalidation ciblée
+        // the 1st id (a) is tagged → targeted invalidation
         await rest.updateOne("items", a._id, { $set: { count: 11 } });
         const r2: any = await rest.find("items", params, { useCache: true });
         expect(r2.find((d: any) => d._id === a._id)!.count).toBe(11); // refetch

@@ -113,12 +113,12 @@ Requirements and behavior:
 ```typescript
 import { utils } from '@anteros/core';
 
-const cipher = utils.crypt.resolve(); // même mode / clés que server.encryption
-const ssn = await cipher.decrypt(doc.ssn, true); // champ chiffré → valeur d'origine
+const cipher = utils.crypt.resolve(); // same mode / keys as server.encryption
+const ssn = await cipher.decrypt(doc.ssn, true); // encrypted field → original value
 
-// json avec sous-chemins chiffrés → passe les champs en 3e paramètre
+// json with encrypted sub-paths → pass the fields as the 3rd parameter
 const address = await cipher.decrypt(doc.address, true, ['zip']);
-// → { street: 'Rue X', city: 'Paris', zip: '75000' } (zip décrypté, le reste tel quel)
+// → { street: 'Rue X', city: 'Paris', zip: '75000' } (zip decrypted, the rest untouched)
 ```
 - **Round-trips any JSON value** (string, number, object, array) — internally `JSON.stringify` + `encrypt`, decrypted with `parseJson`.
 - ⚠️ **Opaque in Mongo** — encrypted fields store ciphertext: don't use them in `$match`/`$sort`/`$group` (they'd match ciphertext). Operators like `$inc`/`$push`/`$addToSet` on an encrypted field are rejected (`ENCRYPTED_FIELD_OPERATOR`); only `$set`/`$setOnInsert` can write them. Don't mark `relationship` fields (breaks `$include`).

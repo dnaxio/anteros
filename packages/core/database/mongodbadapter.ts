@@ -126,7 +126,7 @@ class MongoRest {
                     validationResult = partialSchema.validate(options.update.$setOnInsert, { allowUnknown: false })
                 }
 
-                // Faille 9: updateOne/updateMany — unflatten dot-notation ("address.zip") before Joi validation
+                // Flaw 9: updateOne/updateMany — unflatten dot-notation ("address.zip") before Joi validation
                 if ((options.action == 'updateOne' || options.action == 'updateMany') && options.update?.$set) {
                     const unflattened = func.unflattenKeys(options.update.$set)
                     validationResult = partialSchema.validate(unflattened, { allowUnknown: false })
@@ -292,7 +292,7 @@ class MongoRest {
         try {
 
             const col = getCollection(collection, this.#tenant.id) as Collection
-            // Faille 12: restrict $lookup targets to this tenant's declared collections
+            // Flaw 12: restrict $lookup targets to this tenant's declared collections
             const allowedCollections = [
                 ...(cfg.collections ?? [])
                     .filter(c => c._tenant_ === this.tenant_id)

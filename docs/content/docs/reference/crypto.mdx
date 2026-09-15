@@ -131,21 +131,20 @@ The algorithms are **fixed** (no configuration) — they are the current best-pr
 The symmetric secret supports **rotation without breaking existing data**: each ciphertext carries a **key version byte** (first byte), and `useSymCrypt()` keeps a keyring of older secrets for **decrypt-only**.
 
 ```typescript
-// Avant rotation — version 1
+// Before rotation — version 1
 server: {
   encryption: {
-    secret: process.env.APP_SECRET_V1, // version implicite 1
+    secret: process.env.APP_SECRET_V1, // implicit version 1
   },
 }
 
-// Après rotation — nouvelle clé active, l'ancienne conservée pour déchiffrer
+// After rotation — new active key, the old one kept for decryption
 server: {
   encryption: {
-    secret: process.env.APP_SECRET_V2,         // nouvelle clé active (chiffre + déchiffre)
-    version: 2,                                 // tag des nouveaux ciphertexts
-    previousSecrets: { 1: process.env.APP_SECRET_V1 }, // ancienne clé — déchiffre seulement
+    secret: process.env.APP_SECRET_V2,         // new active key (encrypts + decrypts)
+    version: 2,                                 // tags the new ciphertexts
+    previousSecrets: { 1: process.env.APP_SECRET_V1 }, // old key — decrypt only
   },
-}
 ```
 
 | Option | Type | Rôle |
@@ -161,7 +160,7 @@ Au décryptage : la version est lue dans le ciphertext → la bonne clé est cho
 const old = utils.crypt.useSymCrypt({ secret: 'v1-secret' });
 const enc = await old.encrypt({ apiKey: 'sk-1' });
 
-// Après rotation : le nouveau chiffreur déchiffre l'ancien ciphertext
+// After rotation: the new cipher instance decrypts the old ciphertext
 const rotated = utils.crypt.useSymCrypt({
   secret: 'v2-secret',
   version: 2,
@@ -202,7 +201,7 @@ When the decrypted content is a JSON object containing **encrypted sub-fields** 
 ```typescript
 // 1. ciphertext whose plaintext is a JSON with encrypted sub-fields
 const dec = await cipher.decrypt(cipher, true, ['zip', 'contact.phone']);
-// → { city: 'Paris', zip: '75000', contact: { phone: '0600000000' } }  (zip/phone décryptés, le reste tel quel)
+// → { city: 'Paris', zip: '75000', contact: { phone: '0600000000' } }  (zip/phone decrypted, the rest untouched)
 
 // 2. plaintext JSON container returned by a query (doc.address) — same call
 const address = await cipher.decrypt(doc.address, true, ['zip']);

@@ -787,7 +787,7 @@ Coordinate tasks across nodes in a cluster. Uses an atomic `findOneAndUpdate` on
 ```typescript
 try {
   await rest.lock('backup', 600_000); // 10 min TTL
-  // seul ce nœud exécute le backup ici
+  // Only this node runs the backup here
 } catch (err) {
   console.log('Backup already running on another node');
   return;

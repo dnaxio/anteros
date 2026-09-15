@@ -49,7 +49,7 @@ async function syncCollections() {
             }
         }
 
-        // construction des schema arktype pour les collections
+        // build the arktype schemas for the collections
         for (let collection of collections) {
             collection._schema_ = buildSchema(collection)
             collection._schemaPartial_ = buildSchema(collection, { partial: true })
@@ -102,7 +102,7 @@ async function initializeOnDatabase(collections: Collection[]) {
 
 
 
-                // creation d'index sur les champs
+                // create index on the fields
                 let specsFieldsIndexes: IndexDescription[] = []
                 for (let field of collection?.fields || []) {
                     field.indexOptions = field.indexOptions ?? {}
@@ -131,7 +131,7 @@ async function initializeOnDatabase(collections: Collection[]) {
                             }
                         }
 
-                        // !! : field.unique peut être 1/0 (Mongo-style) → coercer en vrai booléen
+                        // !! : field.unique may be 1/0 (Mongo-style) → coerce to a real boolean
                         let isSparse = !!(field.type === 'random'
                             || (field.unique && field.required !== true));
 
@@ -190,7 +190,7 @@ function getCollection(collectionName: string, tenantId: string): Collection | n
         return col
     }
 
-    // Chercher aussi dans les file collections
+    // Also look in the file collections
     let fileCol = cfg.fileCollections?.find(fc => fc.slug == collectionName && fc._tenant_ == tenantId)
     if (fileCol) {
         return {

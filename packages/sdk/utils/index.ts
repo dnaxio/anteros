@@ -10,11 +10,11 @@ const shouldRemove = (v: unknown): boolean =>
     isEmptyObject(v);
 
 /**
- * Nettoie récursivement un objet ou un tableau en supprimant :
- * - les valeurs `null` et `undefined`
- * - les chaînes vides `''`
- * - les tableaux vides `[]`
- * - les objets vides `{}`
+ * Recursively cleans an object or array by removing:
+ * - `null` and `undefined` values
+ * - empty strings `''`
+ * - empty arrays `[]`
+ * - empty objects `{}`
  *
  * @example
  * cleanDeep({ a: 1, b: null, c: [], e: { f: null } })

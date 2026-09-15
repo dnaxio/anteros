@@ -21,7 +21,7 @@ class Rest {
         this.#tokenStorageKey = options.token?.storageKey ?? "dnax_token";
         this.#defaultParams = options.defaultParams ?? {};
 
-        // Récupération éventuelle d'un token déjà stocké côté client
+        // Retrieve any token already stored client-side
         if (this.#persistToken && typeof globalThis !== "undefined" && "localStorage" in globalThis) {
             const storedToken = globalThis.localStorage.getItem(this.#tokenStorageKey);
             if (storedToken) {
@@ -80,7 +80,7 @@ class Rest {
         return withQuery(base, query as Record<string, string | number | boolean | null | undefined>);
     }
 
-    /** `POST /services/:tenant/:service/:action` (voir `SERVICE_PREFIX` côté serveur). */
+    /** `POST /services/:tenant/:service/:action` (see `SERVICE_PREFIX` server-side). */
     private buildUploadUrl(collection: string): string {
         return joinURL(this.#server, "upload", this.#tenant, collection);
     }
@@ -281,9 +281,9 @@ class Rest {
     }
 
     /**
-     * Appelle `POST /services/:tenant/:service/:action` (handler serveur : `SERVICE_PREFIX`).
-     * @param service — nom du service (config `cfg.services`)
-     * @param action — nom de l’entrée dans `service.actions`
+     * Calls `POST /services/:tenant/:service/:action` (server handler: `SERVICE_PREFIX`).
+     * @param service — service name (`cfg.services` config)
+     * @param action — name of the entry in `service.actions`
      */
     async runService<T = any>(
         service: string,
@@ -297,9 +297,9 @@ class Rest {
     }
 
     /**
-     * Upload un ou plusieurs fichiers via `POST /upload/:tenant/:collection`.
-     * Les fichiers sont envoyés en `multipart/form-data`.
-     * Utilise les champs supplémentaires pour envoyer des métadonnées.
+     * Uploads one or more files via `POST /upload/:tenant/:collection`.
+     * The files are sent as `multipart/form-data`.
+     * Uses the additional fields to send metadata.
      */
     async upload<T extends FileResult = FileResult>(
         collection: string,
@@ -337,7 +337,7 @@ class Rest {
             return this.handleResponse<T>(res);
         }
 
-        // Upload multiple
+        // Multiple upload
         const url = this.buildUploadUrl(collection);
         const formData = new FormData();
         for (let i = 0; i < files.length; i++) {
@@ -356,7 +356,7 @@ class Rest {
     }
 
     /**
-     * Retourne l'URL complète pour servir un fichier.
+     * Returns the full URL to serve a file.
      */
     getFileUrl(collection: string, filename: string, transform?: {
         width?: number;
@@ -377,7 +377,7 @@ class Rest {
     }
 
     /**
-     * Supprime un fichier via `DELETE /files/:tenant/:collection/:fileId`.
+     * Deletes a file via `DELETE /files/:tenant/:collection/:fileId`.
      * @param fileId — the `_id` of the file document (returned by `upload()`)
      */
     async deleteFile<TResponse = { message: string; ok: boolean }>(

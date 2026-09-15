@@ -103,7 +103,7 @@ export type FileCollection = {
             /** Private key path for SSH auth */
             privateKey?: string;
         }[];
-        /** Enregistrer les métadonnées du fichier en base. Défaut: true */
+        /** Save the file metadata in the database. Default: true */
         trackMetaData?: boolean;
     api?: {
         access?: FileApiAccess;

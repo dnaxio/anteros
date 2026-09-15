@@ -28,7 +28,7 @@ async function syncWorkflows() {
             }
         }
 
-        // Créer les indexes sur _workflows_ pour les contextes définis
+        // Create the indexes on _workflows_ for the defined contexts
         for (const [key, wf] of workflows) {
           const tenantId = key.split(':')[0]
           if (!wf.context || !tenantId) continue

@@ -1,8 +1,8 @@
 /**
- * @anteros/store/vue — Store réactif natif Vue 3
+ * @anteros/store/vue — Native Vue 3 reactive store
  *
- * Utilise la réactivité native de Vue (reactive, readonly, watch).
- * Persistance via localStorage, sessionStorage, ou adapter personnalisé.
+ * Uses Vue's native reactivity (reactive, readonly, watch).
+ * Persistence via localStorage, sessionStorage, or a custom adapter.
  *
  * @example
  * ```vue
@@ -51,14 +51,14 @@ import {
 
 // ─── Storage ──────────────────────────────────────────────────
 
-/** Interface minimale pour un moteur de stockage (localStorage, sessionStorage, custom). */
+/** Minimal interface for a storage engine (localStorage, sessionStorage, custom). */
 export interface StorageAdapter {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
   removeItem(key: string): void;
 }
 
-/** Résout l'adapter de stockage pour un environnement donné. */
+/** Resolves the storage adapter for a given environment. */
 function resolveStorage(type: "local" | "session" | StorageAdapter): {
   adapter: StorageAdapter | null;
   label: string;
@@ -67,7 +67,7 @@ function resolveStorage(type: "local" | "session" | StorageAdapter): {
     return { adapter: type, label: "custom" };
   }
 
-  // SSR / environnements sans window
+  // SSR / environments without window
   if (typeof globalThis === "undefined") {
     return { adapter: null, label: "none (SSR)" };
   }
@@ -78,13 +78,13 @@ function resolveStorage(type: "local" | "session" | StorageAdapter): {
 }
 
 /**
- * Préfixe global optionnel appliqué à toutes les clés de stockage.
+ * Optional global prefix applied to all storage keys.
  *
  * @example
  * ```ts
  * import { setStoragePrefix } from '@anteros/store/vue'
  * setStoragePrefix('myapp')
- * // clé finale : myapp:cart:items
+ * // final key: myapp:cart:items
  * const store = createStore({ namespace: 'cart', key: 'items', persist: true })
  * console.log(store.key) // "myapp:cart:items"
  * ```
@@ -102,15 +102,15 @@ export function getStoragePrefix(): string {
 // ─── Types ───────────────────────────────────────────────────
 
 /**
- * Extrait le type de retour de chaque fonction d'un record.
+ * Extracts the return type of each function in a record.
  * Ex: { double: (s: any) => number } → { double: number }
- * Un objet vide `{}` (keyof = never) produit `{}`.
+ * An empty object `{}` (keyof = never) produces `{}`.
  */
 type ReturnTypes<T extends Record<string, (...args: any[]) => any>> =
   keyof T extends never ? {} : { [K in keyof T]: ReturnType<T[K]> };
 
 /**
- * Contexte `this` disponible dans les actions.
+ * `this` context available in actions.
  */
 type ActionCtx<T extends object, G extends Record<string, (...args: any[]) => any>> = {
   state: UnwrapNestedRefs<T>;
@@ -119,51 +119,51 @@ type ActionCtx<T extends object, G extends Record<string, (...args: any[]) => an
   patch: (partial: Partial<T> | ((state: UnwrapNestedRefs<T>) => void)) => void;
 };
 
-// ─── StoreOptions (inférence friendly) ────────────────────────
+// ─── StoreOptions (inference friendly) ────────────────────────
 
 /**
- * Options pour la création d'un store.
+ * Options for creating a store.
  *
- * Les champs `getters` et `actions` utilisent des types concrets (non génériques)
- * pour que TypeScript puisse fournir du **contextual typing** sur les paramètres
- * des fonctions (`state` dans les getters, `this` dans les actions).
+ * The `getters` and `actions` fields use concrete (non-generic) types
+ * so TypeScript can provide **contextual typing** on the function
+ * parameters (`state` in getters, `this` in actions).
  */
 export interface StoreOptions<T extends object> {
-  /** Clé unique pour le storage (défaut: namespace).
-   * Ex: `'cart'` → clé finale `prefix:namespace:cart` */
+  /** Unique key for storage (default: namespace).
+   * Ex: `'cart'` → final key `prefix:namespace:cart` */
   key?: string;
-  /** Namespace pour isoler le storage (défaut: `'default'`).
-   * Sert aussi de clé par défaut si `key` n'est pas fournie. */
+  /** Namespace to isolate storage (default: `'default'`).
+   * Also used as the default key if `key` is not provided. */
   namespace?: string;
-  /** État initial du store */
+  /** Initial store state */
   state: T;
-  /** Getters : fonctions dérivées du state (réactives via computed) */
+  /** Getters: functions derived from state (reactive via computed) */
   getters?: Record<string, (state: T) => any>;
-  /** Actions : méthodes mutatrices */
+  /** Actions: mutating methods */
   actions?: Record<
     string,
     (this: ActionCtx<T, Record<string, (...args: any[]) => any>>, ...args: any[]) => any
   >;
   /**
-   * Persister l'état dans le stockage.
+   * Persist the state to storage.
    * - `true` → localStorage
    * - `'session'` → sessionStorage
-   * - `StorageAdapter` → moteur personnalisé
-   * - `false` → pas de persistance (défaut)
+   * - `StorageAdapter` → custom engine
+   * - `false` → no persistence (default)
    */
   persist?: boolean | "session" | StorageAdapter;
 }
 
-/** Extrait le type précis des getters d'un objet d'options. */
+/** Extracts the exact type of the getters of an options object. */
 type ExtractGetters<O extends StoreOptions<any>> =
   O extends { getters: infer G } ? G : {};
 
-/** Extrait le type précis des actions d'un objet d'options. */
+/** Extracts the exact type of the actions of an options object. */
 type ExtractActions<O extends StoreOptions<any>> =
   O extends { actions: infer A } ? A : {};
 
 /**
- * Callback pour les événements du store
+ * Callback for store events
  */
 type StoreCallback<T extends object> = (
   state: UnwrapNestedRefs<T>,
@@ -171,7 +171,7 @@ type StoreCallback<T extends object> = (
 ) => void;
 
 /**
- * Événement enregistré dans le store
+ * Event registered in the store
  */
 interface StoreEvent<T extends object> {
   event: string;
@@ -181,7 +181,7 @@ interface StoreEvent<T extends object> {
 // ─── Store ───────────────────────────────────────────────────
 
 /**
- * Store réactif natif Vue 3
+ * Native Vue 3 reactive store
  *
  * @example
  * ```ts
@@ -219,16 +219,16 @@ class Store<
   private _namespace: string;
   private _initialState: T;
 
-  /** État réactif (Vue reactive) — mutable */
+  /** Reactive state (Vue reactive) — mutable */
   readonly state: UnwrapNestedRefs<T>;
 
-  /** Snapshot readonly de l'état */
+  /** Readonly snapshot of the state */
   readonly snap: DeepReadonly<UnwrapNestedRefs<T>>;
 
-  /** Getters réactifs (computed) — auto-unwrapped */
+  /** Reactive getters (computed) — auto-unwrapped */
   readonly getters: ReturnTypes<G>;
 
-  /** Actions bindées */
+  /** Bound actions */
   readonly actions: {
     [K in keyof A]: (...args: Parameters<A[K]>) => ReturnType<A[K]>;
   };
@@ -238,7 +238,7 @@ class Store<
     this._namespace = options.namespace ?? "default";
     this._key = this.buildKey(options.key ?? options.namespace);
 
-    // Résoudre l'adapter de stockage
+    // Resolve the storage adapter
     if (this._persist) {
       const resolved = resolveStorage(
         typeof this._persist === "boolean" ? "local" : this._persist
@@ -246,46 +246,46 @@ class Store<
       this._adapter = resolved.adapter;
     }
 
-    // Restaurer ou initialiser l'état
+    // Restore or initialize the state
     const initialState = this.initializeState(options.state);
     this._initialState = structuredClone(options.state);
 
-    // Créer l'état réactif Vue
+    // Create the Vue reactive state
     this.state = reactive(initialState) as UnwrapNestedRefs<T>;
     this.snap = readonly(this.state) as DeepReadonly<UnwrapNestedRefs<T>>;
 
-    // Construire les getters (computed → reactive pour auto-unwrap)
+    // Build the getters (computed → reactive for auto-unwrap)
     this.getters = this.buildGetters(
       (options.getters ?? {}) as unknown as G
     );
 
-    // Construire les actions
+    // Build the actions
     this.actions = this.buildActions(
       (options.actions ?? {}) as unknown as A
     );
 
-    // Configurer la persistance et les listeners
+    // Set up persistence and listeners
     this.setupWatcher();
   }
 
-  // ── Propriétés publiques ──────────────────────────────────
+  // ── Public properties ────────────────────────────────────
 
-  /** Clé de stockage complète. Format : `[globalPrefix:]namespace:key` */
+  /** Full storage key. Format: `[globalPrefix:]namespace:key` */
   get key(): string {
     return this._key;
   }
 
-  /** Namespace du store. */
+  /** Store namespace. */
   get namespace(): string {
     return this._namespace;
   }
 
-  /** Indique si la persistance est activée. */
+  /** Indicates whether persistence is enabled. */
   get isPersisted(): boolean {
     return !!this._persist && this._adapter !== null;
   }
 
-  /** Type de stockage utilisé (`'local'`, `'session'`, `'custom'`, ou `'none'`). */
+  /** Storage type in use (`'local'`, `'session'`, `'custom'`, or `'none'`). */
   get storageType(): string {
     if (!this._persist) return "none";
     if (typeof this._persist === "object") return "custom";
@@ -303,7 +303,7 @@ class Store<
       computedGetters[key] = computed(() => fn(this.state as unknown as T));
     }
 
-    // reactive() auto-déballe les ComputedRef — pas besoin de .value
+    // reactive() auto-unwraps ComputedRef — no need for .value
     return reactive(computedGetters) as unknown as ReturnTypes<G>;
   }
 
@@ -325,7 +325,7 @@ class Store<
       bound[key] = fn.bind(context);
     }
 
-    // Lien circulaire pour que les actions puissent s'appeler entre elles
+    // Circular link so actions can call each other
     context.actions = bound;
 
     return bound as typeof this.actions;
@@ -334,12 +334,12 @@ class Store<
   // ── Patch ────────────────────────────────────────────────
 
   /**
-   * Met à jour partiellement le state.
+   * Partially updates the state.
    *
    * @example
    * ```ts
-   * store.patch({ name: 'Jean', age: 30 })          // objet partiel
-   * store.patch((state) => { state.count++ })       // callback mutateur
+   * store.patch({ name: 'Jean', age: 30 })          // partial object
+   * store.patch((state) => { state.count++ })       // mutator callback
    * ```
    */
   patch(partial: Partial<T> | ((state: UnwrapNestedRefs<T>) => void)): void {
@@ -383,7 +383,7 @@ class Store<
     const handle = watch(
       () => this.state,
       (newState, oldState) => {
-        // Persister (immédiatement, pas de defer)
+        // Persist (immediately, no defer)
         if (this._adapter) {
           try {
             this._adapter.setItem(this._key, JSON.stringify(newState));
@@ -395,7 +395,7 @@ class Store<
           }
         }
 
-        // Notifier les listeners
+        // Notify the listeners
         this.notifyListeners(newState, oldState);
       },
       { deep: true, flush: "sync" }
@@ -419,27 +419,27 @@ class Store<
     }
   }
 
-  // ── Événements ───────────────────────────────────────────
+  // ── Events ───────────────────────────────────────────────
 
-  /** Enregistrer un listener sur le changement d'état. */
+  /** Register a listener on state change. */
   on(event: "change", callback: StoreCallback<T>): void {
     this.events.push({ event, callback });
   }
 
-  /** Supprimer tous les listeners. */
+  /** Remove all listeners. */
   off(): void {
     this.events = [];
   }
 
   // ── Reset ────────────────────────────────────────────────
 
-  /** Réinitialiser l'état (deep clone de l'état initial). */
+  /** Reset the state (deep clone of the initial state). */
   reset(): void {
     const clone = structuredClone(this._initialState);
     Object.assign(this.state as Record<string, unknown>, clone);
   }
 
-  /** Effacer le storage persisté. */
+  /** Clear the persisted storage. */
   clearStorage(): void {
     if (!this._adapter) return;
     try {
@@ -452,7 +452,7 @@ class Store<
     }
   }
 
-  /** Arrêter tous les watchers (cleanup). */
+  /** Stop all watchers (cleanup). */
   dispose(): void {
     for (const stop of this.watchers) stop();
     this.watchers = [];
@@ -463,10 +463,10 @@ class Store<
 // ─── Factory ─────────────────────────────────────────────────
 
 /**
- * Crée un store réactif natif Vue 3.
+ * Creates a native Vue 3 reactive store.
  *
- * Les types des getters et actions sont inférés automatiquement
- * depuis l'objet d'options, avec contextual typing sur `state` et `this`.
+ * The getters and actions types are inferred automatically
+ * from the options object, with contextual typing on `state` and `this`.
  */
 export function createStore<
   T extends object,
@@ -478,7 +478,7 @@ export function createStore<
 // ─── Composables ─────────────────────────────────────────────
 
 /**
- * Composable Vue : accès complet au store avec cleanup automatique.
+ * Vue composable: full store access with automatic cleanup.
  *
  * @example
  * ```ts
@@ -493,49 +493,49 @@ export function useStore<
   onScopeDispose(() => store.dispose());
 
   return {
-    /** État réactif mutable */
+    /** Mutable reactive state */
     state: store.state,
 
-    /** Snapshot readonly (réactif) */
+    /** Readonly snapshot (reactive) */
     snap: store.snap,
 
-    /** Getters réactifs (computed, auto-unwrapped) */
+    /** Reactive getters (computed, auto-unwrapped) */
     getters: store.getters,
 
-    /** Actions bindées */
+    /** Bound actions */
     actions: store.actions,
 
-    /** Mise à jour partielle du state */
+    /** Partial state update */
     patch: store.patch.bind(store),
 
-    /** Enregistrer un listener */
+    /** Register a listener */
     on: store.on.bind(store),
 
-    /** Supprimer tous les listeners */
+    /** Remove all listeners */
     off: store.off.bind(store),
 
-    /** Réinitialiser le state */
+    /** Reset the state */
     reset: store.reset.bind(store),
 
-    /** Effacer le storage */
+    /** Clear the storage */
     clearStorage: store.clearStorage.bind(store),
 
-    /** Clé de stockage */
+    /** Storage key */
     key: store.key,
 
-    /** Namespace du store */
+    /** Store namespace */
     namespace: store.namespace,
 
-    /** La persistance est-elle active ? */
+    /** Is persistence active? */
     isPersisted: store.isPersisted,
 
-    /** Type de stockage */
+    /** Storage type */
     storageType: store.storageType,
   };
 }
 
 /**
- * Composable Vue : retourne uniquement le snapshot readonly réactif.
+ * Vue composable: returns only the reactive readonly snapshot.
  */
 export function useSnapshot<T extends object>(
   store: Store<T>
@@ -544,8 +544,8 @@ export function useSnapshot<T extends object>(
 }
 
 /**
- * Composable Vue : crée un watcher sur le state du store.
- * Retourne la fonction d'arrêt.
+ * Vue composable: creates a watcher on the store state.
+ * Returns the stop function.
  */
 export function useWatch<T extends object>(
   store: Store<T>,
@@ -557,7 +557,7 @@ export function useWatch<T extends object>(
 }
 
 /**
- * Composable Vue : crée un computed basé sur le state du store.
+ * Vue composable: creates a computed based on the store state.
  */
 export function useComputed<T extends object, R>(
   store: Store<T>,

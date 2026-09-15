@@ -1,8 +1,8 @@
 /**
- * @anteros/store — Store réactif avec persistance (Vue 3)
+ * @anteros/store — Reactive store with persistence (Vue 3)
  *
- * Utilise la réactivité native de Vue (reactive, readonly, watch).
- * Persistance via localStorage, sessionStorage, ou adapter personnalisé.
+ * Uses Vue's native reactivity (reactive, readonly, watch).
+ * Persistence via localStorage, sessionStorage, or a custom adapter.
  *
  * @example
  * ```vue

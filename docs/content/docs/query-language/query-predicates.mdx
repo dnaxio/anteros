@@ -26,7 +26,7 @@ import { useRest } from '@anteros/core';
 
 const rest = new useRest({ tenant_id: 'v1' });
 
-// Produits entre 10€ et 100€, publiés, en stock
+// Products between 10€ and 100€, published, in stock
 const products = await rest.find('products', {
   $match: {
     price:  { $gte: 10, $lte: 100 },
@@ -37,7 +37,7 @@ const products = await rest.find('products', {
 ```
 
 ```typescript
-// Utilisateurs sauf admins et modérateurs
+// Users except admins and moderators
 const regularUsers = await rest.find('users', {
   $match: {
     role: { $nin: ['admin', 'moderator'] }
@@ -57,7 +57,7 @@ const regularUsers = await rest.find('users', {
 | `$not` | Inverts the condition that follows |
 
 ```typescript
-// Admins OU utilisateurs avec la permission manage_users
+// Admins OR users with the manage_users permission
 const privileged = await rest.find('users', {
   $match: {
     $or: [
@@ -70,7 +70,7 @@ const privileged = await rest.find('users', {
 ```
 
 ```typescript
-// Utilisateurs majeurs ET soit premium soit vérifiés
+// Users of legal age AND either premium or verified
 const eligible = await rest.find('users', {
   $match: {
     $and: [
@@ -96,12 +96,12 @@ const eligible = await rest.find('users', {
 | `$type` | Field matches the given BSON type |
 
 ```typescript
-// Utilisateurs qui ont un téléphone renseigné
+// Users with a phone number set
 const withPhone = await rest.find('users', {
   $match: { phone: { $exists: true } }
 });
 
-// Documents dont le champ discount est un nombre
+// Documents whose discount field is a number
 const numericDiscount = await rest.find('products', {
   $match: { discount: { $type: ['int', 'double', 'decimal'] } }
 });
@@ -118,19 +118,19 @@ const numericDiscount = await rest.find('products', {
 | `$size` | Array field has exactly N elements |
 
 ```typescript
-// Utilisateurs possédant AU MOINS les permissions read ET write
+// Users having AT LEAST the read AND write permissions
 const withRw = await rest.find('users', {
   $match: { permissions: { $all: ['read', 'write'] } }
 });
 
-// Commandes contenant au moins un article à plus de 100€
+// Orders containing at least one item over 100€
 const bigOrders = await rest.find('orders', {
   $match: {
     items: { $elemMatch: { price: { $gt: 100 } } }
   }
 });
 
-// Utilisateurs avec exactement 3 rôles
+// Users with exactly 3 roles
 const threeRoles = await rest.find('users', {
   $match: { roles: { $size: 3 } }
 });
@@ -148,7 +148,7 @@ const threeRoles = await rest.find('users', {
 | `$text` | Full-text search on a text index |
 
 ```typescript
-// Tous les emails en @gmail.com (insensible à la casse)
+// All emails at @gmail.com (case-insensitive)
 const gmailUsers = await rest.find('users', {
   $match: {
     email: { $regex: /@gmail\.com$/, $options: 'i' }
@@ -157,7 +157,7 @@ const gmailUsers = await rest.find('users', {
 ```
 
 ```typescript
-// Utilisateurs dont les dépenses ≥ leur limite de crédit
+// Users whose spending ≥ their credit limit
 const overLimit = await rest.find('users', {
   $match: {
     $expr: { $gte: ['$spent', '$creditLimit'] }
@@ -166,7 +166,7 @@ const overLimit = await rest.find('users', {
 ```
 
 ```typescript
-// Documents où quantity est un multiple de 4
+// Documents where quantity is a multiple of 4
 const multiples = await rest.find('items', {
   $match: { quantity: { $mod: [4, 0] } }
 });
@@ -184,7 +184,7 @@ const multiples = await rest.find('items', {
 | `$nearSphere` | Points near a point (spherical geometry) |
 
 ```typescript
-// Boutiques dans un rayon de 5 km autour de Paris (2.35, 48.85)
+// Shops within a 5 km radius around Paris (2.35, 48.85)
 const nearbyShops = await rest.find('shops', {
   $match: {
     location: {
@@ -209,7 +209,7 @@ const nearbyShops = await rest.find('shops', {
 | `$bitsAnyClear` | At least one of the specified bits is clear |
 
 ```typescript
-// Documents avec le bit 3 (valeur 8) activé dans le champ flags
+// Documents with bit 3 (value 8) set in the flags field
 const withFlag = await rest.find('configs', {
   $match: { flags: { $bitsAllSet: 8 } }
 });

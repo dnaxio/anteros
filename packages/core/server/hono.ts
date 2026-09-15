@@ -345,7 +345,7 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
 
 
             const requestCtx: Record<string, string> = c.req.header();
-            // Faille 1: never log sensitive headers (JWT, cookies)
+            // Flaw 1: never log sensitive headers (JWT, cookies)
             delete requestCtx.authorization;
             delete requestCtx.cookie;
             requestCtxStorage.set('meta', {

@@ -249,7 +249,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
 
         // DB query cache status (server.cache) — driver: memory | filesystem | redis
         const cacheCfg = cfg.server.cache;
-        // any: @colors/colors type les styles chaînés (.red.bold) comme des fonctions Color
+        // any: @colors/colors types chained styles (.red.bold) as Color functions
         let cacheInfo: any = 'Off'.red.bold;
         if (cacheCfg?.enabled) {
             const driver = cacheCfg.driver ?? 'memory';

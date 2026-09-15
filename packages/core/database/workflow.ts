@@ -89,7 +89,7 @@ class Workflow {
       try {
         const prevOutput = i > 0 ? run.steps[i - 1]?.output ?? null : null;
 
-        // Vérifier la condition du step
+        // Check the step condition
         if (stepDef.condition) {
           const shouldRun = await stepDef.condition({ data, prevOutput });
           if (!shouldRun) {
@@ -100,7 +100,7 @@ class Workflow {
             run.progress = Math.round(((i + 1) / wf.steps.length) * 100);
             run.updatedAt = new Date();
             await this.saveRun(run);
-            continue; // saute ce step
+            continue; // skip this step
           }
         }
 
@@ -122,7 +122,7 @@ class Workflow {
         run.updatedAt = new Date();
         await this.saveRun(run);
 
-        // Exécuter les compensations (steps réussis en ordre inverse)
+        // Run the compensations (successful steps in reverse order)
         if (wf.compensations?.length) {
           const failedIndex = run.steps.findIndex(s => s.status === 'failed');
           const stepsToCompensate = run.steps.slice(0, failedIndex).filter(s => s.status === 'completed').reverse();
@@ -216,7 +216,7 @@ class Workflow {
       try {
         const prevOutput = i > 0 ? run.steps[i - 1]?.output ?? null : null;
 
-        // Vérifier la condition du step
+        // Check the step condition
         if (stepDef.condition) {
           const shouldRun = await stepDef.condition({ data: run.data, prevOutput });
           if (!shouldRun) {
@@ -227,7 +227,7 @@ class Workflow {
             run.progress = Math.round(((i + 1) / wf.steps.length) * 100);
             run.updatedAt = new Date();
             await this.saveRun(run);
-            continue; // saute ce step
+            continue; // skip this step
           }
         }
 
@@ -249,7 +249,7 @@ class Workflow {
         run.updatedAt = new Date();
         await this.saveRun(run);
 
-        // Exécuter les compensations (steps réussis en ordre inverse)
+        // Run the compensations (successful steps in reverse order)
         if (wf.compensations?.length) {
           const failedIndex = run.steps.findIndex(s => s.status === 'failed');
           const stepsToCompensate = run.steps.slice(0, failedIndex).filter(s => s.status === 'completed').reverse();

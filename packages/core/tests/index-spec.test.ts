@@ -7,8 +7,8 @@ const TENANT = "idx-test";
 const DIR = "packages/core/tests/fixtures/index-tenant";
 const DB = "mongodb://localhost:27017/_DB_IDX_TEST";
 
-// initializeOnDatabase est fire-and-forget dans syncCollections — on attend
-// que les index existent réellement en base.
+// initializeOnDatabase is fire-and-forget inside syncCollections — wait until the
+// indexes really exist in the database.
 async function waitForIndexes(colName: string): Promise<any[]> {
     const db = cfg.tenants?.[0]?.database?.db as any;
     const col = db.collection(colName);
@@ -40,13 +40,13 @@ describe("index spec construction", () => {
     it("drops null/undefined options and coerces Mongo-style 1/0 booleans", async () => {
         const idxs = await waitForIndexes("variants");
 
-        // name : indexOptions.sparse = null → ignoré (pas de sparse:null), index créé
+        // name: indexOptions.sparse = null → ignored (no sparse:null sent), index created
         const nameIdx = idxs.find((i) => i.name === "name_1");
         expect(nameIdx).toBeDefined();
         expect(nameIdx!.sparse).not.toBe(null);
-        expect(nameIdx!.sparse).not.toBe(true); // false / undefined — jamais null
+        expect(nameIdx!.sparse).not.toBe(true); // false / undefined — never null
 
-        // sku : unique: 1 (Mongo-style) → index unique réel
+        // sku: unique: 1 (Mongo-style) → a real unique index
         const skuIdx = idxs.find((i) => i.name === "sku_1");
         expect(skuIdx).toBeDefined();
         expect(skuIdx!.unique).toBe(true);

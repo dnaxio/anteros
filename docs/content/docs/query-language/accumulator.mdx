@@ -19,7 +19,7 @@ import { useRest } from '@anteros/core';
 
 const rest = new useRest({ tenant_id: 'v1' });
 
-// Chiffre d'affaires par catégorie + nombre de commandes
+// Revenue by category + number of orders
 const byCategory = await rest.aggregate('orders', [
   {
     $group: {
@@ -37,7 +37,7 @@ const byCategory = await rest.aggregate('orders', [
 Computes the average of numeric values.
 
 ```typescript
-// Salaire moyen par département
+// Average salary per department
 const avgSalaryByDept = await rest.aggregate('employees', [
   {
     $group: {
@@ -54,7 +54,7 @@ const avgSalaryByDept = await rest.aggregate('employees', [
 Returns the minimum or maximum value in the group.
 
 ```typescript
-// Prix le plus bas et le plus haut par produit
+// Lowest and highest price per product
 const priceRange = await rest.aggregate('offers', [
   {
     $group: {
@@ -75,7 +75,7 @@ const priceRange = await rest.aggregate('offers', [
 Collects every value into an array (with duplicates).
 
 ```typescript
-// Tous les membres par équipe
+// All members per team
 const teams = await rest.aggregate('users', [
   {
     $group: {
@@ -91,7 +91,7 @@ const teams = await rest.aggregate('users', [
 Collects unique values only (no duplicates).
 
 ```typescript
-// Tags uniques par catégorie
+// Unique tags per category
 const uniqueTags = await rest.aggregate('articles', [
   {
     $group: {
@@ -107,7 +107,7 @@ const uniqueTags = await rest.aggregate('articles', [
 Returns the first or last value in a group. **Always put a `$sort` before `$group`** to control which value is taken.
 
 ```typescript
-// Utilisateur le plus récent et le plus ancien par pays
+// Most recent and oldest user per country
 const extremes = await rest.aggregate('users', [
   { $sort: { createdAt: -1 } },
   {
@@ -132,7 +132,7 @@ const extremes = await rest.aggregate('users', [
 | `$mergeObjects` | Merges multiple sub-documents into one |
 
 ```typescript
-// Écart-type des scores + fusion de métadonnées
+// Standard deviation of scores + merging metadata
 const stats = await rest.aggregate('exams', [
   {
     $group: {
@@ -152,7 +152,7 @@ const stats = await rest.aggregate('exams', [
 Pour un simple comptage avec un filtre, utilisez `countDocuments` directement :
 
 ```typescript
-// Nombre d'utilisateurs actifs
+// Number of active users
 const activeCount = await rest.countDocuments('users', { status: 'active' });
 ```
 
@@ -163,7 +163,7 @@ const activeCount = await rest.countDocuments('users', { status: 'active' });
 `$accumulator` lets you write custom JavaScript reduce logic:
 
 ```typescript
-// Moyenne personnalisée par produit
+// Custom average per product
 const customAvg = await rest.aggregate('reviews', [
   {
     $group: {
@@ -200,7 +200,7 @@ const customAvg = await rest.aggregate('reviews', [
 Window accumulators are used inside `$setWindowFields`. They compute values over a sliding window — ideal for running totals, moving averages, and rankings.
 
 ```typescript
-// Running total des ventes par produit + moyenne mobile 7 jours + classement
+// Running total of sales per product + 7-day moving average + ranking
 const windowed = await rest.aggregate('sales', [
   {
     $setWindowFields: {
