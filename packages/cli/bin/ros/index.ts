@@ -126,8 +126,7 @@ ${c.bold("Examples:")}
   ros proxy diff --env production
 `
 
-async function main() {
-  const argv = process.argv.slice(2)
+export async function main(argv: string[] = process.argv.slice(2)) {
   const parsed = parseArgs(argv)
 
   if (parsed.version) {
@@ -161,10 +160,12 @@ async function main() {
   await entry.run(ctx)
 }
 
-main().catch((e) => {
-  error((e as Error).message)
-  if (process.argv.includes("--verbose") || process.argv.includes("-v")) {
-    console.error(e)
-  }
-  process.exit(1)
-})
+if (import.meta.main) {
+  main().catch((e) => {
+    error((e as Error).message)
+    if (process.argv.includes("--verbose") || process.argv.includes("-v")) {
+      console.error(e)
+    }
+    process.exit(1)
+  })
+}

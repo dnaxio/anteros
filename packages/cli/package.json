@@ -1,0 +1,29 @@
+{
+  "name": "@anteros/cli",
+  "version": "0.0.2",
+  "description": "@anteros/cli — framework CLI (anteros create/dev/doctor) and deployment CLI (ros)",
+  "bin": {
+    "anteros": "./bin/ant/index.ts"
+  },
+  "type": "module",
+  "private": true,
+  "files": [
+    "bin",
+    "templates",
+    "README.md",
+    "base.deploy.yaml"
+  ],
+  "scripts": {
+    "ros": "bun run bin/ros/index.ts",
+    "ant": "bun run bin/ant/index.ts",
+    "anteros": "bun run bin/ant/index.ts",
+    "create": "bun run bin/ant/index.ts create",
+    "doctor": "bun run bin/ant/index.ts doctor"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}

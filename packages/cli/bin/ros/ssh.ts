@@ -23,14 +23,22 @@ export interface SshOptions {
 // ---------------------------------------------------------------------------
 
 const CONTROL_DIR = join(homedir(), ".ssh", "ros")
-if (!existsSync(CONTROL_DIR)) {
-  mkdirSync(CONTROL_DIR, { recursive: true, mode: 0o700 })
+
+/**
+ * Create `~/.ssh/ros` on first use. Kept lazy so that importing this module
+ * (e.g. `anteros ros --help`) never touches the filesystem.
+ */
+function ensureControlDir(): string {
+  if (!existsSync(CONTROL_DIR)) {
+    mkdirSync(CONTROL_DIR, { recursive: true, mode: 0o700 })
+  }
+  return CONTROL_DIR
 }
 
 function socketPathFor(server: ServerTarget): string {
   const key = `${server.user}@${server.host}:${server.port}`
   const hash = createHash("sha256").update(key).digest("hex").slice(0, 12)
-  return join(CONTROL_DIR, `cm-${hash}.sock`)
+  return join(ensureControlDir(), `cm-${hash}.sock`)
 }
 
 function buildCommonArgs(
@@ -200,7 +208,7 @@ function registerCleanup() {
   cleanupRegistered = true
   const close = () => {
     try {
-      rmSync(CONTROL_DIR, { recursive: true, force: true })
+      if (existsSync(CONTROL_DIR)) rmSync(CONTROL_DIR, { recursive: true, force: true })
     } catch {
       // best-effort
     }

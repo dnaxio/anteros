@@ -1,0 +1,5 @@
+{
+  "name": "server",
+  "description": "Anteros server — Bun + MongoDB backend with a tenant, an example collection, a custom route and an MCP tool",
+  "tenant": "v1"
+}

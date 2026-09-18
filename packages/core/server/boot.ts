@@ -53,7 +53,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
         await syncWorkflows();
         await syncMcpTools(); // load MCP tools per tenant (mcp/**/*.tool.ts)
         await loadTenantsMiddlewares();
-        loadRoutes(); // load routes
+        await loadRoutes(); // load routes
         //******************************* */
 
 

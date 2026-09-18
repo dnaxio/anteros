@@ -1,0 +1,8 @@
+# Server port (config/app.ts falls back to {{port}} when unset)
+PORT={{port}}
+
+# MongoDB connection string
+MONGODB_URI={{databaseUri}}
+
+# JWT signing secret — generate one with: openssl rand -base64 48
+JWT_SECRET=change-me

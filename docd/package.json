@@ -1,0 +1,24 @@
+{
+  "name": "anteros-docs",
+  "private": true,
+  "description": "Anteros Framework documentation site.",
+  "type": "module",
+  "scripts": {
+    "build": "nuxt build",
+    "clean": "rm -rf .data .nuxt .output dist node_modules && bun i",
+    "dev": "nuxi dev --host",
+    "generate": "nuxt generate",
+    "prepare": "nuxt prepare",
+    "preview": "nuxt preview"
+  },
+  "dependencies": {
+    "@baybreezy/docd": "latest"
+  },
+  "devDependencies": {
+    "@antfu/ni": "latest",
+    "@types/node": "latest",
+    "nuxt": "^4.5.2",
+    "typescript": "^6.0.3",
+    "vue": "latest"
+  }
+}
