@@ -7,6 +7,8 @@ import type { Service } from "./service";
 import type { Script } from "./scripts";
 import type { FileCollection } from "./file";
 import type { McpTool, McpResource } from "./mcp";
+import type { VarDefinition } from "./vars";
+import type { AuditFileConfig } from "../lib/audit";
 export type ServerConfig = {
     debug?: boolean;
     version?: string;
@@ -21,9 +23,70 @@ export type ServerConfig = {
         metricsPort?: number;
         /** When true, trusts proxy headers (CF-Connecting-IP / X-Forwarded-For) as the client IP. Default: false. */
         trustProxy?: boolean;
+        /**
+         * Audit trail defaults for every tenant. A tenant declaring its own
+         * `tenant.audit` always wins (even `false`).
+         */
+        audit?: {
+            /**
+             * How long `_audit_` entries are kept (MongoDB TTL on `ts`).
+             * Duration string: `'90d'`, `'24h'`.
+             * `false` → explicitly disabled (drops the TTL index if one exists).
+             * Omitted → untouched: entries are kept forever.
+             */
+            retention?: string | false;
+            /**
+             * Local append-only JSONL copy of the audit trail (one file per day,
+             * rotated on size, pruned by age).
+             * `true` → defaults, `string` → directory, object → full options.
+             * `false` / omitted → disabled.
+             */
+            file?: AuditFileConfig;
+            /**
+             * Object keys whose value is replaced by `"[redacted]"` in every audit
+             * entry (`operation.input`, `operation.result` and `meta`), at any depth,
+             * case-insensitively. `false` → disabled.
+             *
+             * Default: password, passwd, pwd, token, authorization, apikey, api_key,
+             * key, secret, cookie, otp, pin.
+             */
+            redact?: string[] | false;
+            /**
+             * What an audit entry keeps of the operation's **result**
+             * (default: `'summary'`).
+             *
+             * - `'summary'` (default) → the **generated identifiers** (`_id`,
+             *   `insertedIds`) plus the operational counters (`matchedCount`,
+             *   `modifiedCount`, `deletedCount`, `nIndexesWas`…). Never a document:
+             *   the data lives in the collection (and in its replications).
+             * - `'none'`    → the generated identifiers only.
+             * - `'full'`    → the raw result, documents included.
+             *
+             * Reads (`find`, `findOne`, `aggregate`, streams, `watch`) and custom
+             * actions/services never store a result, whatever this setting.
+             */
+            results?: 'none' | 'summary' | 'full';
+        };
         body?: {
             maxSize?: number;
         };
+        /**
+         * Boot mode (default: `'full'`).
+         *
+         * - `'full'` — HTTP API **and** the replication engine.
+         * - `'replication-only'` — a process dedicated to the replication engine: no
+         *   HTTP API, no websocket handlers, no scripts, no services, no MCP tools,
+         *   no middlewares. Loaded: tenant databases, collections, file collections,
+         *   variables and lifecycle hooks (`beforeBoot` / `onDestroy`).
+         * - `'no-replication'` — a full server that never starts the replication
+         *   engine (no scheduling, no tombstones, no `_replication_` state).
+         * - `'api-only'` — the HTTP API and nothing around it: no replication, no
+         *   scripts, no sockets.
+         *
+         * Flags always win over this setting: `--replication-only`, `--no-replication`,
+         * `--api-only`, `--no-scripts`, `--no-sockets`.
+         */
+        mode?: 'full' | 'replication-only' | 'no-replication' | 'api-only';
         cors?: {
             origin: string | string[] | ((ctx: { origin: string, c: Context }) => string | string[]);
             credentials?: boolean;
@@ -123,4 +186,5 @@ export type Config = ServerConfig & {
     fileCollections?: FileCollection[]
     mcpTools?: McpTool[]
     mcpResources?: McpResource[]
+    vars?: VarDefinition[]
 }

@@ -8,6 +8,7 @@ import type { useRest } from "../database/rest";
 import type { jwt } from "../utils/func";
 import type { ActionsApiList, ApiAccess, ApiActions } from "./api";
 import type { Server as SocketIO } from "socket.io";
+import type { CollectionReplicationConfig } from "./replication";
 
 /** Context passed to a collection custom action (`define.Action`). */
 export type CollectionActionContext = {
@@ -85,6 +86,8 @@ export type Collection = {
         /** Default TTL for cached queries — human string ('5m', '2h') or ms */
         ttl?: string | number;
     };
+    /** Opt-in one-way replication to destination databases — see `ReplicationConfig`. */
+    replication?: CollectionReplicationConfig;
     /**
      * The tenant id of the collection
      * @type {string}

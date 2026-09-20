@@ -1,5 +1,7 @@
 
 import { createApp, collectHeaders } from './hono'
+import { parseBootFlags, resolveCapabilities, conflictingBootFlags, offCapabilities, capabilitiesLabel, FULL_CAPABILITIES } from './flags'
+import type { BootCapabilities } from './flags'
 import type { ServerConfig } from '../types/config'
 import dayjs from 'dayjs';
 import pkg from '../package.json';
@@ -9,6 +11,9 @@ import { cfg, formatConfig } from './config' // import the config
 import { syncTenants } from '../database/tenant'
 import { syncCollections } from '../database/collection'
 import { syncFileCollections } from '../database/file'
+import { syncVars } from '../database/vars'
+import { startReplication, stopReplication } from '../database/replication'
+import { loadLifecycles, runBeforeBoot, runAfterBoot, runOnDestroy } from '../lib/lifecycle'
 
 import { loadRoutes } from '../lib/routes'
 import { runScripts } from '../lib/scripts'
@@ -28,6 +33,80 @@ import { logger } from '../utils/logger';
 type BootAppOptions = ServerConfig & {
 
 }
+
+/**
+ * Console banner — name / PID / role, env, reusePort, cache, replication.
+ * `url` is omitted in replication-only mode (nothing is listening).
+ */
+function renderBanner(opts: {
+    name: string;
+    role: string;
+    env: string;
+    reusePort: boolean;
+    url?: string;
+    caps?: BootCapabilities;
+}): string {
+    const { name, role, env, reusePort, url } = opts;
+    const caps = opts.caps ?? FULL_CAPABILITIES;
+    const off = offCapabilities(caps);
+
+    let box = '';
+    box += `${name}`.gray.underline + ` (PID: ${process.pid}) — ${role}\n\n`
+    box += `Env: ${env || 'dev'}`.green.bold + '\n'
+    box += `reusePort: ${reusePort ? 'On'.green.bold : 'Off'.red.bold}\n`.gray.bold
+
+    // DB query cache status (server.cache) — driver: memory | filesystem | redis
+    const cacheCfg = cfg.server.cache;
+    // any: @colors/colors types chained styles (.red.bold) as Color functions
+    let cacheInfo: any = 'Off'.red.bold;
+    if (cacheCfg?.enabled) {
+        const driver = cacheCfg.driver ?? 'memory';
+        const detail = driver === 'filesystem'
+            ? ` ${cacheCfg.directory ?? './.cache'}`
+            : driver === 'redis'
+                ? ` ${cacheCfg.redis?.host ?? 'localhost'}${cacheCfg.redis?.port ? `:${cacheCfg.redis.port}` : ''}`
+                : '';
+        cacheInfo = `On`.green.bold + ` (${driver}${detail})`;
+    }
+    box += `Cache: ${cacheInfo}`.gray.bold + '\n'
+
+    // Replication status — tenants with active replication + their destinations
+    const replTenants = (cfg.tenants ?? []).filter(
+        (t) => t.replication?.enabled !== false && (t.replication?.destinations?.length ?? 0) > 0,
+    );
+    let replicationInfo: any = 'Off'.red.bold;
+    if (!caps.replication) {
+        // The engine is never started, whatever the tenants declare
+        replicationInfo = 'Off'.red.bold + ` (${capabilitiesLabel(caps)})`.gray;
+    } else if (replTenants.length) {
+        const parts = replTenants.map((t) => {
+            const dests = (t.replication?.destinations ?? []).map((d) => d.id).join(', ');
+            return `${t.id} → ${dests}`;
+        });
+        replicationInfo = `On`.green.bold + ` (${parts.join('; ')})`;
+    }
+    box += `Replication: ${replicationInfo}`.gray.bold + '\n'
+
+    // Only shown when something is disabled — the default banner stays compact
+    if (off.length) {
+        box += `Mode: ${capabilitiesLabel(caps)}`.gray.bold + ` (${off.join(', ')} off)`.yellow + '\n';
+    }
+
+    box += url ? `Url: ${url}`.gray.bold : `Url: none — no API`.yellow.bold;
+    box += '\n\n';
+    box += `Last boot: 🔄 ${dayjs().format('YYYY-MM-DD HH:mm:ss')}`.gray;
+
+    return boxen(box, {
+        title: ` @anteros/core ${pkg.version}`,
+        padding: 1,
+        float: 'left',
+        borderColor: 'gray',
+        titleAlignment: 'center',
+        borderStyle: 'double',
+        textAlignment: 'left',
+        dimBorder: true
+    })
+}
 async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
 
     try {
@@ -35,6 +114,15 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
         // Load required resources
         //******************************* */
         options = formatConfig(options);
+
+        // Boot capabilities — `--replication-only`, `--no-replication`, `--api-only`,
+        // `--no-scripts`, `--no-sockets` (CLI, wins) on top of `server.mode`.
+        const bootFlags = parseBootFlags();
+        const caps = resolveCapabilities(bootFlags, cfg.server?.mode);
+        cfg.server.mode = capabilitiesLabel(caps);
+        if (conflictingBootFlags(bootFlags)) {
+            console.log('⚠ --replication-only conflicts with --no-replication/--api-only — running replication-only'.yellow);
+        }
 
         // Logging: configure from cfg.server.logging (console + file, e.g. logs/anteros.log)
         logger.configure(cfg.server.logging);
@@ -48,13 +136,76 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
         await syncTenants(); // sync tenants and connect to database
         await syncCollections(); // sync collections and create collections on database
         await syncFileCollections(); // sync file collections
-        await loadServices(); // load services
-        await loadSockets(); // load websocket handlers
-        await syncWorkflows();
-        await syncMcpTools(); // load MCP tools per tenant (mcp/**/*.tool.ts)
-        await loadTenantsMiddlewares();
-        await loadRoutes(); // load routes
+        await syncVars(); // load define.Vars + seed default variables (`_vars_` replication filters on them)
+
+        // Loaders only needed when an API is served — skipped when the API is off
+        if (caps.api) {
+            await loadServices(); // load services
+            if (caps.sockets) await loadSockets(); // load websocket handlers
+            await syncWorkflows();
+            await syncMcpTools(); // load MCP tools per tenant (mcp/**/*.tool.ts)
+            await loadTenantsMiddlewares();
+            await loadRoutes(); // load routes
+        }
+
+        await loadLifecycles(); // load {tenant.dir}/lifecycle.ts
+        await runBeforeBoot(); // blocking lifecycle hooks (migrations, seeding…) — fail-fast
+        if (caps.replication) {
+            await startReplication(); // connect replication destinations and schedule
+        } else {
+            logger.file('Replication engine disabled', { serverMode: cfg.server.mode });
+        }
         //******************************* */
+
+        // Uncaught errors → log file (MongoDB-style), then exit
+        process.on('uncaughtException', (err) => {
+            logger.error('Uncaught exception', { message: err?.message, stack: err?.stack });
+            process.exit(1);
+        });
+        process.on('unhandledRejection', (reason: any) => {
+            logger.error('Unhandled rejection', { message: reason?.message ?? String(reason), stack: reason?.stack });
+        });
+
+        // ── NO API: replication-only process ──
+        if (!caps.api) {
+            const NAME = cfg.server.name || process.env.APP_NAME || 'SERVER';
+            const env: string = process.env.NODE_ENV || Bun.env.NODE_ENV || 'dev';
+
+            // Nothing else keeps the event loop alive — replication timers are unref'd
+            const keepAlive = setInterval(() => { }, 60 * 60 * 1000);
+
+            const shutdownReplicationOnly = async (signal: string) => {
+                console.log(`\n${signal} received — stopping replication…`.gray);
+                clearInterval(keepAlive);
+                try { await runOnDestroy(signal as 'SIGINT' | 'SIGTERM'); } catch {}
+                try { await stopReplication(); } catch {}
+                for (const tenant of cfg.tenants ?? []) {
+                    try { tenant.database?.client?.close(); } catch {}
+                }
+                process.exit(0);
+            };
+            process.once('SIGINT', () => shutdownReplicationOnly('SIGINT'));
+            process.once('SIGTERM', () => shutdownReplicationOnly('SIGTERM'));
+
+            console.log(renderBanner({
+                name: NAME,
+                role: 'replication-only',
+                env,
+                reusePort: false,
+                caps,
+            }));
+
+            logger.file('Replication-only process started', {
+                name: NAME,
+                pid: process.pid,
+                role: 'replication-only',
+                env,
+                tenants: cfg.tenants?.map((t) => t.id),
+                logFile: logger.filePath || undefined,
+            });
+
+            return null;
+        }
 
 
         // JWT_SECRET check: auto-generate if missing and auth is enabled
@@ -117,12 +268,17 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
 
             console.log(`[cluster] Aggregated /health → http://localhost:${metricsPort}/health`.gray);
 
+            // Master owns the boot: run the tenant lifecycles once here (workers skip).
+            await runAfterBoot(metricsServer, io);
+
             // Graceful shutdown: stop workers + metrics server so a restart
             // (e.g. bun --watch) never leaves the port occupied
-            const shutdownCluster = (signal: string) => {
+            const shutdownCluster = async (signal: string) => {
                 console.log(`\n${signal} received — shutting down workers…`.gray);
                 try { master.shutdown(); } catch {}
                 try { metricsServer.stop(true); } catch {}
+                try { await runOnDestroy(signal as 'SIGINT' | 'SIGTERM'); } catch {}
+                try { await stopReplication(); } catch {}
                 for (const tenant of cfg.tenants ?? []) {
                     try { tenant.database?.client?.close(); } catch {}
                 }
@@ -170,7 +326,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
                         return res;
                     });
 
-                if (url.pathname === "/socket.io/") {
+                if (caps.sockets && url.pathname === "/socket.io/") {
                     const start = performance.now();
                     return respond(engineIo.handleRequest(req, server)).then((res) => {
                         // Access log for the Socket.IO upgrade path (handled outside Hono) —
@@ -208,6 +364,8 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
                 }
                 return respond(app.fetch(req, server));
             },
+            // Sockets are disabled by not serving `/socket.io/` (below): without an
+            // explicit `server.upgrade()` call no client can ever open a websocket.
             websocket: websocket,
             maxRequestBodySize: 1024 * 1024 * 100, // 100MB
         })
@@ -215,11 +373,16 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
         // Register server for built-in metrics (GET /health)
         registerMetrics(server);
 
+        // The server is listening — run the tenant lifecycles (standalone only).
+        if (!isWorker) await runAfterBoot(server, io);
+
         // Graceful shutdown: release the port & DB connections so restarts
         // (e.g. bun --watch) never hit a zombie / EADDRINUSE
-        const shutdownServer = (signal: string) => {
+        const shutdownServer = async (signal: string) => {
             console.log(`\n${signal} received — shutting down…`.gray);
             try { server.stop(true); } catch {}
+            try { await runOnDestroy(signal as 'SIGINT' | 'SIGTERM'); } catch {}
+            try { await stopReplication(); } catch {}
             for (const tenant of cfg.tenants ?? []) {
                 try { tenant.database?.client?.close(); } catch {}
             }
@@ -241,47 +404,25 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
             }, 5000);
         }
 
-        let box = '';
         const role = isWorker ? 'worker' : (reusePort ? 'master' : 'standalone');
-        box += `${NAME}`.gray.underline + ` (PID: ${process.pid}) — ${role}\n\n`
-        box += `Env: ${env || 'dev'}`.green.bold + '\n'
-        box += `reusePort: ${(reusePort || isWorker) ? 'On'.green.bold : 'Off'.red.bold}\n`.gray.bold
 
-        // DB query cache status (server.cache) — driver: memory | filesystem | redis
-        const cacheCfg = cfg.server.cache;
-        // any: @colors/colors types chained styles (.red.bold) as Color functions
-        let cacheInfo: any = 'Off'.red.bold;
-        if (cacheCfg?.enabled) {
-            const driver = cacheCfg.driver ?? 'memory';
-            const detail = driver === 'filesystem'
-                ? ` ${cacheCfg.directory ?? './.cache'}`
-                : driver === 'redis'
-                    ? ` ${cacheCfg.redis?.host ?? 'localhost'}${cacheCfg.redis?.port ? `:${cacheCfg.redis.port}` : ''}`
-                    : '';
-            cacheInfo = `On`.green.bold + ` (${driver}${detail})`;
-        }
-        box += `Cache: ${cacheInfo}`.gray.bold + '\n'
-        box += `Url: http://localhost:${PORT}`.gray.bold;
-        box += '\n\n';
-        box += `Last boot: 🔄 ${dayjs().format('YYYY-MM-DD HH:mm:ss')}`.gray;
-
-        console.log(boxen(box, {
-            title: ` @anteros/core ${pkg.version}`,
-            padding: 1,
-            float: 'left',
-            borderColor: 'gray',
-            titleAlignment: 'center',
-            borderStyle: 'double',
-            textAlignment: 'left',
-            dimBorder: true
+        console.log(renderBanner({
+            name: NAME,
+            role,
+            env,
+            reusePort: reusePort || isWorker,
+            url: `http://localhost:${PORT}`,
+            caps,
         }))
 
 
         // After boot and App ready.
-        setTimeout(() => {
-            runScripts().catch(); // run scripts
+        if (caps.scripts) {
+            setTimeout(() => {
+                runScripts().catch(); // run scripts
 
-        }, 150);
+            }, 150);
+        }
 
         // Boot event — recorded in the log file only (the console banner already
         // shows name / PID / role / URL, so this line would be redundant on screen)
@@ -292,15 +433,6 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
             url: `http://localhost:${PORT}`,
             env: env || 'dev',
             logFile: logger.filePath || undefined,
-        });
-
-        // Uncaught errors → log file (MongoDB-style), then exit
-        process.on('uncaughtException', (err) => {
-            logger.error('Uncaught exception', { message: err?.message, stack: err?.stack });
-            process.exit(1);
-        });
-        process.on('unhandledRejection', (reason: any) => {
-            logger.error('Unhandled rejection', { message: reason?.message ?? String(reason), stack: reason?.stack });
         });
 
         return server;

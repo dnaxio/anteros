@@ -95,15 +95,6 @@ api: {
 }
 ```
 
-## Deploying
-
-`@anteros/cli` also ships the `ros` binary for multi-server deployment over SSH:
-
-```bash
-ros init               # create deploy.yaml
-ros deploy --env test
-```
-
 ## Learn more
 
 - Framework docs, reference, and query language: <https://github.com/dnaxio/anteros>

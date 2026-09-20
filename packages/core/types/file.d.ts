@@ -4,6 +4,7 @@ import type { HooksCollection } from "./hook";
 import type Joi from "joi";
 import type { useRest } from "../database/rest";
 import type { jwt } from "../utils/func";
+import type { CollectionReplicationConfig } from "./replication";
 
 type FileAccessHandler = (ctx: {
     rest: InstanceType<typeof useRest>;
@@ -42,6 +43,8 @@ export type FileCollection = {
     };
     /** Metadata fields stored alongside the file document */
     fields?: Field[];
+    /** Opt this file collection into the data replication engine (its documents). */
+    replication?: CollectionReplicationConfig;
     /** Upload validation rules */
     upload?: {
         /** Allowed MIME types for upload.

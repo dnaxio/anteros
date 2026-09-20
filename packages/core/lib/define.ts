@@ -8,6 +8,8 @@ import type { Service } from "../types/service";
 import type { WebSocketHandler } from "../types/websocket";
 import type { TenantMiddlewareConfig, GlobalMiddlewareConfig } from "../types/middleware";
 import type { McpTool, McpResource } from "../types/mcp";
+import type { Lifecycle } from "../types/lifecycle";
+import type { VarDefinition } from "../types/vars";
 import { file } from "bun";
 function Server(config: ServerConfig) {
     config.server = {
@@ -100,6 +102,21 @@ function Script(config: Script) {
     }
 }
 
+function Lifecycle(config: Lifecycle): Lifecycle {
+    return {
+        ...config,
+        enabled: config.enabled ?? true,
+        _isLifecycle_: true,
+    }
+}
+
+function Vars(config: VarDefinition): VarDefinition {
+    return {
+        ...config,
+        _isVars_: true,
+    }
+}
+
 
 function Route(route: Route): Route {
     return {
@@ -167,5 +184,7 @@ export const define = {
   Middleware,
   WebSocket,
   McpTool,
-  McpResource
+  McpResource,
+  Lifecycle,
+  Vars
 }

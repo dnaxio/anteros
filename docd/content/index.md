@@ -6,7 +6,7 @@ seo:
   description: A robust backend for building business logic — Bun runtime, MongoDB, multi-tenant architecture, real-time, caching, crypto, workflows, MCP tools, files and audit trail.
 ---
 
-::landing-hero{:siteName='"Anteros"' :badge='{"label":"v0.0.11","text":"Now available","href":"/docs/getting-started/quick-start"}' :headline='"Build backends at light speed."' :description='"A robust backend for building business logic — Bun runtime, MongoDB database, multi-tenant architecture, real-time Socket.IO, built-in caching, symmetric & asymmetric crypto, workflow engine, MCP tools for LLM agents, file management, and audit trail. All in one."' :navLinks='[{"label":"Docs","href":"/docs/getting-started/introduction"},{"label":"Quick Start","href":"/docs/getting-started/quick-start"},{"label":"CLI","href":"/docs/cli/installation"},{"label":"Reference","href":"/docs/reference/configuration"}]' :primaryCta='{"label":"Get Started","href":"/docs/getting-started/quick-start"}' :secondaryCta='{"label":"Read the docs","href":"/docs/getting-started/introduction"}' :iframe='{"src":"/docs/getting-started/quick-start","class":"border rounded-lg h-[580px] md:h-[700px]","iframeClass":"rounded-lg"}'}
+::landing-hero{:siteName='"Anteros"' :badge='{"label":"v0.0.40","text":"Now available","href":"/docs/getting-started/quick-start"}' :headline='"Build backends at light speed."' :description='"A robust backend for building business logic — Bun runtime, MongoDB database, multi-tenant architecture, real-time Socket.IO, built-in caching, symmetric & asymmetric crypto, workflow engine, MCP tools for LLM agents, file management, and audit trail. All in one."' :navLinks='[{"label":"Docs","href":"/docs/getting-started/introduction"},{"label":"Quick Start","href":"/docs/getting-started/quick-start"},{"label":"CLI","href":"/docs/cli/installation"},{"label":"Reference","href":"/docs/reference/configuration"}]' :primaryCta='{"label":"Get Started","href":"/docs/getting-started/quick-start"}' :secondaryCta='{"label":"Read the docs","href":"/docs/getting-started/introduction"}' :iframe='{"src":"/docs/getting-started/quick-start","class":"border rounded-lg h-[580px] md:h-[700px]","iframeClass":"rounded-lg"}'}
 
 ::
 
@@ -39,6 +39,14 @@ Real-time WebSocket communication with room support and built-in auth.
 In-memory, filesystem, and Redis caching with TTL, grace periods, stampede protection, and a DB query cache (`useCache`) with automatic invalidation.
 ::
 
+::prose-card{icon="lucide:git-compare" title="Replication" to="/docs/reference/replication"}
+One-way, incremental data replication from a tenant's main database to destination databases — date cursor, delete tombstones, cron scheduling.
+::
+
+::prose-card{icon="lucide:variable" title="Variables" to="/docs/reference/variables"}
+Tenant key/value store — Redis-like `rest.vars` with scopes, validated meta and TTL.
+::
+
 ::prose-card{icon="lucide:bot" title="MCP Tools & Resources" to="/docs/reference/mcp"}
 Expose tenant tools & resources to LLM agents (Claude, Cursor, VS Code) via the Model Context Protocol at `/mcp/:tenant_id`.
 ::
@@ -49,6 +57,10 @@ Disk/S3 storage, image transforms, multi-destination replication.
 
 ::prose-card{icon="lucide:webhook" title="Hooks & Actions" to="/docs/reference/hooks"}
 Lifecycle hooks, custom actions, services, before/after operations.
+::
+
+::prose-card{icon="lucide:power" title="Lifecycle" to="/docs/reference/lifecycle"}
+Per-tenant `beforeBoot` / `afterBoot` / `onDestroy` hooks — migrations, seeding, cleanup.
 ::
 
 ::prose-card{icon="lucide:workflow" title="Workflows" to="/docs/reference/workflows"}

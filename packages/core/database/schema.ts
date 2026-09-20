@@ -1,5 +1,6 @@
 
 import type { Collection as CollectionType } from "../types/collection";
+import type { Field } from "../types/field";
 import Joi, { type AnySchema } from "joi";
 
 
@@ -8,6 +9,142 @@ let s = Joi.object({
 })
 
 
+
+
+/**
+ * Build the Joi schema for a single field. Assumes `f.type` is set.
+ * Extracted so other features (e.g. `define.Vars`) can validate with the exact
+ * same rules as collections — without the `Joi.object(...).min(1)` wrapper.
+ */
+function fieldToSchema(f: Field): AnySchema | undefined {
+    let schema: AnySchema | undefined
+
+    if (f.type == 'string') {
+        schema = Joi.string()
+    }
+
+    if (f.type == 'password') {
+        schema = Joi.string()
+    }
+
+    if (f.type == 'number') {
+        schema = Joi.number()
+    }
+
+    if (f.type == 'integer') {
+        schema = Joi.number().integer()
+    }
+
+    if (f.type == 'boolean') {
+        schema = Joi.boolean()
+    }
+
+    if (f.type.match(/(date|datetime-local)/)) {
+        schema = Joi.date()
+    }
+
+    if (f.type == 'array') {
+        schema = Joi.array()
+    }
+
+    if (f.type == 'json') {
+        schema = Joi.object()
+    }
+
+    if (f.type == 'uuid') {
+        schema = Joi.string().uuid()
+    }
+    if (f.type == 'email') {
+        schema = Joi.string().email()
+    }
+
+    if (f.type == 'url') {
+        schema = Joi.string().uri()
+    }
+
+    if (f.type == 'slug') {
+        let slug = Joi.string().pattern(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+        if (f.slugOptions?.min != null) slug = slug.min(f.slugOptions.min)
+        if (f.slugOptions?.max != null) slug = slug.max(f.slugOptions.max)
+        schema = slug
+    }
+
+    if (f.type == 'ipv4') {
+        schema = Joi.string().ip({ version: 'ipv4' })
+    }
+
+    if (f.type == 'ipv6') {
+        schema = Joi.string().ip({ version: 'ipv6' })
+    }
+
+    if (f.type == 'enum' && !f.enumOptions?.multiple) {
+        schema = Joi.string().valid(...f.enumOptions?.items || [])
+    }
+
+    if (f.type == 'enum' && f.enumOptions?.multiple) {
+        schema = Joi.array().items(Joi.string().valid(...f.enumOptions?.items || []))
+    }
+
+    if (f.type == 'random') {
+        schema = Joi.string()
+    }
+
+    if (f.type == 'random' && f?.randomOptions?.toNumber) {
+        schema = Joi.number()
+    }
+
+    if (f?.type.match(/(geojson\.Point|geojson\.LineString|geojson\.Polygon)/)) {
+        schema = Joi.object({
+            type: Joi.string().valid("Point", "LineString", "Polygon", "MultiPoint").required(),
+            coordinates: Joi.alternatives().conditional("type", [
+                {
+                    is: "Point",
+                    then: Joi.array().items(Joi.number()).length(2).required(), // [lng, lat]
+                },
+                {
+                    is: Joi.string().valid("LineString", "MultiPoint"),
+                    then: Joi.array().items(Joi.array().items(Joi.number()).length(2)).required(), // [[lng, lat], ...]
+                },
+                {
+                    is: "Polygon",
+                    then: Joi.array().items(Joi.array().items(Joi.array().items(Joi.number()).length(2))).required(), // [[[lng, lat], ...]]
+                },
+            ]),
+        });
+    }
+
+    if (f?.type == 'relationship') {
+        schema = Joi.string().optional().messages({
+            'string.base': `${f.name} must be  a string (ObjectId)`,
+        })
+    }
+
+    if (f?.type == 'relationship' && f?.relation?.hasMany) {
+        schema = Joi.array().items(Joi.string().optional()).messages({
+            'string.base': `${f.name} must be  a string (ObjectId)`,
+        })
+    }
+
+    if (f.validate?.schema) {
+        schema = f.validate.schema
+    }
+
+    if (f?.required) {
+        schema = schema?.required()
+    } else {
+        schema = schema?.optional()
+    }
+
+    if (f?.nullable) {
+        schema = schema?.allow(null)
+    }
+
+    if (f?.empty) {
+        schema = schema?.allow('')
+    }
+
+    return schema
+}
 
 
 function buildSchema(col: CollectionType, opts = {
@@ -25,130 +162,8 @@ function buildSchema(col: CollectionType, opts = {
         if (f.type && f.name) {
 
             let fieldName = f.name
-
-            if (f.type == 'string') {
-                propertiesSchema[fieldName] = Joi.string()
-            }
-
-            if (f.type == 'password') {
-                propertiesSchema[fieldName] = Joi.string()
-            }
-
-            if (f.type == 'number') {
-                propertiesSchema[fieldName] = Joi.number()
-            }
-
-            if (f.type == 'integer') {
-                propertiesSchema[fieldName] = Joi.number().integer()
-            }
-
-            if (f.type == 'boolean') {
-                propertiesSchema[fieldName] = Joi.boolean()
-            }
-
-            if (f.type.match(/(date|datetime-local)/)) {
-                propertiesSchema[fieldName] = Joi.date()
-            }
-
-            if (f.type == 'array') {
-                propertiesSchema[fieldName] = Joi.array()
-            }
-
-            if (f.type == 'json') {
-                propertiesSchema[fieldName] = Joi.object()
-            }
-
-            if (f.type == 'uuid') {
-                propertiesSchema[fieldName] = Joi.string().uuid()
-            }
-            if (f.type == 'email') {
-                propertiesSchema[fieldName] = Joi.string().email()
-            }
-
-            if (f.type == 'url') {
-                propertiesSchema[fieldName] = Joi.string().uri()
-            }
-
-            if (f.type == 'slug') {
-                let schema = Joi.string().pattern(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
-                if (f.slugOptions?.min != null) schema = schema.min(f.slugOptions.min)
-                if (f.slugOptions?.max != null) schema = schema.max(f.slugOptions.max)
-                propertiesSchema[fieldName] = schema
-            }
-
-            if (f.type == 'ipv4') {
-                propertiesSchema[fieldName] = Joi.string().ip({ version: 'ipv4' })
-            }
-
-            if (f.type == 'ipv6') {
-                propertiesSchema[fieldName] = Joi.string().ip({ version: 'ipv6' })
-            }
-
-            if (f.type == 'enum' && !f.enumOptions?.multiple) {
-                propertiesSchema[fieldName] = Joi.string().valid(...f.enumOptions?.items || [])
-            }
-
-            if (f.type == 'enum' && f.enumOptions?.multiple) {
-                propertiesSchema[fieldName] = Joi.array().items(Joi.string().valid(...f.enumOptions?.items || []))
-            }
-
-            if (f.type == 'random') {
-                propertiesSchema[fieldName] = Joi.string()
-            }
-
-            if (f.type == 'random' && f?.randomOptions?.toNumber) {
-                propertiesSchema[fieldName] = Joi.number()
-            }
-
-            if (f?.type.match(/(geojson\.Point|geojson\.LineString|geojson\.Polygon)/)) {
-                propertiesSchema[fieldName] = Joi.object({
-                    type: Joi.string().valid("Point", "LineString", "Polygon", "MultiPoint").required(),
-                    coordinates: Joi.alternatives().conditional("type", [
-                        {
-                            is: "Point",
-                            then: Joi.array().items(Joi.number()).length(2).required(), // [lng, lat]
-                        },
-                        {
-                            is: Joi.string().valid("LineString", "MultiPoint"),
-                            then: Joi.array().items(Joi.array().items(Joi.number()).length(2)).required(), // [[lng, lat], ...]
-                        },
-                        {
-                            is: "Polygon",
-                            then: Joi.array().items(Joi.array().items(Joi.array().items(Joi.number()).length(2))).required(), // [[[lng, lat], ...]]
-                        },
-                    ]),
-                });
-            }
-
-            if (f?.type == 'relationship') {
-                propertiesSchema[fieldName] = Joi.string().optional().messages({
-                    'string.base': `${f.name} must be  a string (ObjectId)`,
-                })
-            }
-
-            if (f?.type == 'relationship' && f?.relation?.hasMany) {
-                propertiesSchema[fieldName] = Joi.array().items(Joi.string().optional()).messages({
-                    'string.base': `${f.name} must be  a string (ObjectId)`,
-                })
-            }
-
-            if (f.validate?.schema) {
-                propertiesSchema[fieldName] = f.validate.schema
-            }
-
-            if (f?.required) {
-                propertiesSchema[fieldName] = propertiesSchema[fieldName]?.required()!
-            } else {
-                propertiesSchema[fieldName] = propertiesSchema[fieldName]?.optional()!
-            }
-
-            if (f?.nullable) {
-                propertiesSchema[fieldName] = propertiesSchema[fieldName]?.allow(null)
-            }
-
-            if (f?.empty) {
-                propertiesSchema[fieldName] = propertiesSchema[fieldName]?.allow('')
-            }
+            const fieldSchema = fieldToSchema(f)
+            if (fieldSchema) propertiesSchema[fieldName] = fieldSchema
 
         }
     }
@@ -164,4 +179,4 @@ function buildSchemaForkOptional(schemaPassed: AnySchema): AnySchema {
     )
 }
 
-export { buildSchema, buildSchemaForkOptional }
+export { buildSchema, buildSchemaForkOptional, fieldToSchema }

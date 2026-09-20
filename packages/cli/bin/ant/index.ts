@@ -4,7 +4,6 @@
 //   anteros create server [name]   scaffold a new project
 //   anteros dev                    run the local dev server
 //   anteros doctor                 diagnose the local environment
-//   anteros ros <command>          deployment / CI-CD commands
 
 import { join } from "node:path"
 import { parseArgs, unsupportedFlags } from "./args.ts"
@@ -105,28 +104,6 @@ MongoDB connection, the HTTP port and the writability of the project directory.
 Exits with code 1 when an error is reported.
 `,
   },
-
-  ros: {
-    // Never dispatched: `anteros ros …` is forwarded before argument parsing.
-    run: () => {},
-    summary: "Deployment / CI-CD commands (forwarded to `ros`)",
-    usage: "anteros ros <command> [options]",
-    flags: [],
-    help: `
-${c.bold("anteros ros")} — deployment / CI-CD commands
-
-${c.bold("Usage:")}
-  anteros ros <command> [options]
-
-Every argument is forwarded to the \`ros\` binary — run \`anteros ros --help\`
-for the command list and options.
-
-${c.bold("Examples:")}
-  anteros ros init
-  anteros ros deploy --env production
-  anteros ros status api
-`,
-  },
 }
 
 const HELP = `
@@ -152,21 +129,11 @@ ${c.bold("Examples:")}
   anteros create server my-api
   anteros dev
   anteros doctor
-  anteros ros deploy --env production
 
 ${c.dim("Run `anteros <command> --help` for command-specific options.")}
 `
 
 async function main(argv = process.argv.slice(2)) {
-  // `anteros ros …` is forwarded verbatim to the ros binary, which owns its
-  // deployment flags (`--env`, `--server`, …) and its own help.
-  const rosIndex = argv.indexOf("ros")
-  if (rosIndex !== -1 && !argv.slice(0, rosIndex).some((token) => !token.startsWith("-"))) {
-    const { main: runRos } = await import("../ros/index.ts")
-    await runRos(argv.slice(rosIndex + 1))
-    return
-  }
-
   const parsed = parseArgs(argv)
   setColorEnabled(!parsed.opts.noColor)
 

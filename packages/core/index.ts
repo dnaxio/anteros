@@ -13,10 +13,19 @@ import utils from "./utils";
 // BentoCache-based caching (memory L1 + filesystem/Redis L2)
 import { useMemoryCache, useFilesystemCache, useRedisCache } from "./utils/cache";
 import { logger } from "./utils/logger";
+import { startReplication, stopReplication, replicationNow, getReplicationState, resetReplication, seedReplication } from "./database/replication";
 const cache = {
     useMemoryCache,
     useFilesystemCache,
     useRedisCache
+}
+const replication = {
+    start: startReplication,
+    stop: stopReplication,
+    now: replicationNow,
+    state: getReplicationState,
+    reset: resetReplication,
+    seed: seedReplication,
 }
 const app = {
     boot: bootApp
@@ -30,5 +39,6 @@ export {
     v,
     utils,
     cache,
+    replication,
     logger,
 }

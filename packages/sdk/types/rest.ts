@@ -79,6 +79,10 @@ export type LookupOptions = {
 
 export type FileResult = {
   _id: string;
+  /** ISO string — set on upload */
+  createdAt?: string;
+  /** ISO string — refreshed when the metadata is completed */
+  updatedAt?: string;
   _file: {
     filename: string;
     name: string;

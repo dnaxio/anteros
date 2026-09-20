@@ -1,6 +1,7 @@
 import { joinURL, withQuery } from "ufo";
 import type { ApiAction, FileResult, FindOptions, PublicConfig, RestClientOptions, RestQueryOptions, RestRequestOptions } from "../types/rest";
 import { cleanDeep } from "../utils";
+import { Vars } from "./vars";
 
 export type { RestClientOptions, RestQueryOptions, RestRequestOptions } from "../types/rest";
 
@@ -91,6 +92,15 @@ class Rest {
 
     private buildServiceUrl(service: string, action: string, query?: RestQueryOptions): string {
         const base = joinURL(this.#server, "services", this.#tenant, service, action);
+        if (!query || Object.keys(query).length === 0) {
+            return base;
+        }
+        return withQuery(base, query as Record<string, string | number | boolean | null | undefined>);
+    }
+
+    /** `POST /vars/:tenant/:action` (see `VARS_PREFIX` server-side). */
+    private buildVarsUrl(action: string, query?: RestQueryOptions): string {
+        const base = joinURL(this.#server, "vars", this.#tenant, action);
         if (!query || Object.keys(query).length === 0) {
             return base;
         }
@@ -278,6 +288,22 @@ class Rest {
         options?: RestRequestOptions,
     ): Promise<T> {
         return this.request<T>(collection, action, data !== undefined ? { data } : undefined, options);
+    }
+
+    /**
+     * Tenant-scoped variables API — `POST /vars/:tenant/:action`.
+     * Mirrors the server's `rest.vars` (scope, meta, TTL).
+     *
+     * ```ts
+     * await api.vars.set('config', 'licence', 'RDX00');
+     * const licence = await api.vars.get('config', 'licence');
+     * await api.vars.scope(companyId).set('config', 'licence', 'ACME-001', { ttl: '30d' });
+     * ```
+     */
+    get vars(): Vars {
+        return new Vars((action, body, options) =>
+            this.postJson<any>(this.buildVarsUrl(action, options?.query), body, options ?? {}),
+        );
     }
 
     /**

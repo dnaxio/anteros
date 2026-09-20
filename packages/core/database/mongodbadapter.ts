@@ -11,6 +11,10 @@ import { AppError, fn } from "../lib/error";
 import { createWorkflow } from "./workflow";
 import { getTenant } from "./tenant";
 import { getCollection, getCollectionKeys } from "./collection"
+import { AUDIT_COLLECTION } from "./audit"
+import { writeAuditFile } from "../lib/audit"
+import { redactPayload } from "../lib/redact"
+import { summarizeAuditResult } from "../lib/auditResult"
 import { encryptFields, encryptUpdate } from "./field.crypto"
 import type { RestActions, BulkUpdateOperation, RestOptions, CursorOptions, TenantCache } from "../types/rest";
 import type Joi from "joi";
@@ -22,6 +26,8 @@ import * as os from 'node:os';
 import { cfg } from '../server/config';
 import { io } from '../server/io';
 import type { Service } from '../types/service';
+import { createVars } from "./vars";
+import type { TenantVars } from "../types/vars";
 
 class MongoRest {
     client!: MongoClient;
@@ -185,10 +191,14 @@ class MongoRest {
             core_version: cfg.version ?? restMeta?.core_version,
         }
 
-        // Determine collection type
-        const colMeta = cfg.collections?.find(c => c.slug === data.collection && c._tenant_ === this.tenant_id)
-            ?? cfg.fileCollections?.find(c => c.slug === data.collection && c._tenant_ === this.tenant_id)
-        const collectionType = colMeta && 'type' in colMeta ? colMeta.type : colMeta ? 'file' : undefined
+        // Determine collection type — a file collection is 'file'; a declared
+        // document collection is 'document' unless it explicitly declares a
+        // `type`. Never inferred from the absence of a declaration.
+        const fileCol = cfg.fileCollections?.find(c => c.slug === data.collection && c._tenant_ === this.tenant_id)
+        const docCol = cfg.collections?.find(c => c.slug === data.collection && c._tenant_ === this.tenant_id)
+        const collectionType: ActivityInput['operation']['collectionType'] = fileCol
+            ? 'file'
+            : docCol ? (docCol.type ?? 'document') : undefined
 
         const activity: ActivityInput = {
             internal: requestCtxStorage.get<boolean>('internal') ?? this.#internal,
@@ -202,7 +212,7 @@ class MongoRest {
                 collectionType,
                 status: data.error ? 'error' : 'success',
                 input: data.input,
-                result: data.result,
+                result: summarizeAuditResult(data.action, data.result),
                 error: data.error ?? null,
                 duration: data.duration,
                 transaction: this.session?.inTransaction?.() ?? false,
@@ -219,13 +229,49 @@ class MongoRest {
         collection: string,
         input: any,
         fn: () => Promise<T>,
-        options?: { invalidate?: boolean | string[] }
+        options?: {
+            invalidate?: boolean | string[]
+            /**
+             * `false` → the result is **not** stored in the audit entry
+             * (`operation.result` stays `null`). Used by reads and custom actions,
+             * whose payload is arbitrary, potentially huge or sensitive — the trail
+             * records *who did what, with which parameters, when*.
+             * Default: `true`.
+             */
+            includeResult?: boolean
+            /**
+             * `false` → on error, log it and rethrow the **original** error as-is.
+             * Default: `true` (non-`AppError` errors are wrapped in `INTERNAL_API_ERROR`).
+             */
+            wrapErrors?: boolean
+            /**
+             * `true` (default) → the audit entry is written **before** the operation
+             * returns, so a successful mutation can never lose its trace. Reads pass
+             * `false` to avoid an extra round-trip.
+             */
+            awaitAudit?: boolean
+        }
     ): Promise<T> {
         const start = Date.now()
+        const includeResult = options?.includeResult ?? true
+        const wrapErrors = options?.wrapErrors ?? true
+        const awaitAudit = options?.awaitAudit ?? true
+        const log = async (entry: {
+            action: string
+            collection: string
+            input?: any
+            result?: any
+            error?: { message: string; code: string }
+            duration: number
+        }) => {
+            const promise = this.#logActivity(entry)
+            if (awaitAudit) await promise
+            else promise.catch(() => { })
+        }
         try {
             const result = await fn()
             const duration = Date.now() - start
-            this.#logActivity({ action, collection, input, result, duration })
+            await log({ action, collection, input, result: includeResult ? result : null, duration })
             // Writes invalidate the collection's query cache (and its $include dependents).
             // An array of ids = targeted invalidation (only queries containing those ids),
             // `true` = clear the whole collection namespace.
@@ -235,7 +281,8 @@ class MongoRest {
             return result
         } catch (err: any) {
             const duration = Date.now() - start
-            this.#logActivity({ action, collection, input, error: { message: err?.message, code: err?.code || 'INTERNAL_API_ERROR' }, duration })
+            await log({ action, collection, input, result: null, error: { message: err?.message, code: err?.code || 'INTERNAL_API_ERROR' }, duration })
+            if (!wrapErrors) throw err
             throw err instanceof AppError ? err : new AppError(err?.message || 'Internal server error', { code: 'INTERNAL_API_ERROR', status: 500 })
         }
     }
@@ -243,6 +290,24 @@ class MongoRest {
     /** Invalidate the DB query cache for a collection after a write (targeted by ids when known) */
     #invalidateCache(collection: string, ids?: string[]) {
         return dbInvalidate(collection, this.tenant_id, ids)
+    }
+
+    /**
+     * Audit a read operation — `find`, `findOne`, `aggregate`.
+     *
+     * Reads are logged with their **parameters only** (filters, pipeline, options):
+     * `operation.result` is always `null`. What a query returned is huge, redundant
+     * with the collection itself, and often a privacy leak — the audit trail answers
+     * "who read what, with which filter, when", not "what did they see".
+     */
+    async #executeReadWithAudit<T>(
+        action: string,
+        collection: string,
+        input: any,
+        fn: () => Promise<T>
+    ): Promise<T> {
+        // Reads stay fire-and-forget: they must not pay for an extra round-trip
+        return this.#executeWithAudit(action, collection, input, fn, { includeResult: false, awaitAudit: false })
     }
 
     async connect(options?: {
@@ -271,60 +336,64 @@ class MongoRest {
 
     @CheckIfCollectionExists()
     async watch(collection: string, pipeline: any[], options: ChangeStreamOptions): Promise<ChangeStream> {
-        const col = getCollection(collection, this.#tenant.id) as Collection
-        const isSafe = func.isSafeAggregatePipeline(pipeline);
-        if (!isSafe.isSafe) {
-            throw isSafe.error;
-        }
-        pipeline = await func.buildInput(pipeline)
-        pipeline = func.toBson(pipeline, { col })
-        return await this.db.collection(collection).watch(pipeline, {
-            allowDiskUse: true,
-            session: this.session,
-            ...options
-        })
+        // Audited with the parameters only — the change stream itself is a live object
+        return this.#executeWithAudit('watch', collection, { pipeline, options }, async () => {
+            const col = getCollection(collection, this.#tenant.id) as Collection
+            const isSafe = func.isSafeAggregatePipeline(pipeline);
+            if (!isSafe.isSafe) {
+                throw isSafe.error;
+            }
+            pipeline = await func.buildInput(pipeline)
+            pipeline = func.toBson(pipeline, { col })
+            return await this.db.collection(collection).watch(pipeline, {
+                allowDiskUse: true,
+                session: this.session,
+                ...options
+            })
+        }, { includeResult: false, awaitAudit: false })
     }
 
     @LogSlowQuery()
     @CheckIfCollectionExists()
     async aggregate(collection: string, pipeline: any[]): Promise<Document[]> {
         const action = 'aggregate' as ActionsApiList
-        try {
+        return this.#executeReadWithAudit(action, collection, { pipeline }, async () => {
+            try {
+                const col = getCollection(collection, this.#tenant.id) as Collection
+                // Flaw 12: restrict $lookup targets to this tenant's declared collections
+                const allowedCollections = [
+                    ...(cfg.collections ?? [])
+                        .filter(c => c._tenant_ === this.tenant_id)
+                        .map(c => c.slug),
+                    ...(cfg.fileCollections ?? [])
+                        .filter(fc => fc._tenant_ === this.tenant_id)
+                        .map(fc => fc.slug),
+                    AUDIT_COLLECTION, '_locks_', '_workflows_',
+                ];
+                const isSafe = func.isSafeAggregatePipeline(pipeline, allowedCollections);
+                if (!isSafe.isSafe) {
+                    throw isSafe.error;
+                }
+                pipeline = func.toBson(pipeline, { col })
+                const meta: any = { action, collection, pipeline }
+                if (col.hooks?.beforeOperation) {
+                    await col.hooks.beforeOperation({ rest: this, io, action, meta })
+                }
 
-            const col = getCollection(collection, this.#tenant.id) as Collection
-            // Flaw 12: restrict $lookup targets to this tenant's declared collections
-            const allowedCollections = [
-                ...(cfg.collections ?? [])
-                    .filter(c => c._tenant_ === this.tenant_id)
-                    .map(c => c.slug),
-                ...(cfg.fileCollections ?? [])
-                    .filter(fc => fc._tenant_ === this.tenant_id)
-                    .map(fc => fc.slug),
-                '_activities_', '_locks_', '_workflows_',
-            ];
-            const isSafe = func.isSafeAggregatePipeline(pipeline, allowedCollections);
-            if (!isSafe.isSafe) {
-                throw isSafe.error;
+                let result = await this.db.collection(collection).aggregate(pipeline, {
+                    session: this.session,
+                    allowDiskUse: true,
+                }).toArray()
+                result = func.toJson(result)
+                meta.result = result
+
+                await col.hooks?.afterOperation?.({ rest: this, io, action, meta })
+
+                return result as any[]
+            } catch (err: any) {
+                throw err instanceof AppError ? err : new AppError(err?.message || 'Internal server error', { code: 'INTERNAL_API_ERROR', status: 500 })
             }
-            pipeline = func.toBson(pipeline, { col })
-            const meta: any = { action, collection, pipeline }
-            if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({ rest: this, io, action, meta })
-            }
-
-            let result = await this.db.collection(collection).aggregate(pipeline, {
-                session: this.session,
-                allowDiskUse: true,
-            }).toArray()
-            result = func.toJson(result)
-            meta.result = result
-
-            await col.hooks?.afterOperation?.({ rest: this, io, action, meta })
-
-            return result as any[]
-        } catch (err: any) {
-            throw err instanceof AppError ? err : new AppError(err?.message || 'Internal server error', { code: 'INTERNAL_API_ERROR', status: 500 })
-        }
+        })
     }
 
     /**
@@ -359,6 +428,10 @@ class MongoRest {
      */
     @CheckIfCollectionExists()
     async *findStream<T = any>(collection: string, params: FindOptions = {}, options: CursorOptions = {}): AsyncGenerator<any> {
+        // The entry is written when the stream ends (completion, error, or early
+        // `break`/`return()` — which triggers the `finally` below). Parameters only.
+        const start = Date.now();
+        let failure: any = null;
         const pageSize = options.pageSize;
         // Page mode counts by default (opt-out with withCount: false); per-doc mode counts only when withCount: true
         const withCount = pageSize ? options.withCount !== false : options.withCount === true;
@@ -410,7 +483,18 @@ class MongoRest {
                     }
                 }
             }
+        } catch (err: any) {
+            failure = err
+            throw err
         } finally {
+            this.#logActivity({
+                action: 'findStream',
+                collection,
+                input: { params, options },
+                result: null,
+                error: failure ? { message: failure?.message, code: failure?.code || 'INTERNAL_API_ERROR' } : undefined,
+                duration: Date.now() - start,
+            })
             await cursor.close().catch(() => {})
         }
     }
@@ -427,11 +511,15 @@ class MongoRest {
      */
     @CheckIfCollectionExists()
     async *aggregateStream<T = any>(collection: string, pipeline: any[] = [], options: CursorOptions = {}): AsyncGenerator<any> {
+        // The entry is written when the stream ends (completion, error, or early
+        // `break`/`return()` — which triggers the `finally` below). Parameters only.
+        const start = Date.now();
+        let failure: any = null;
         const col = getCollection(collection, this.#tenant.id) as Collection
         const allowedCollections = [
             ...(cfg.collections ?? []).filter((c) => c._tenant_ === this.tenant_id).map((c) => c.slug),
             ...(cfg.fileCollections ?? []).filter((fc) => fc._tenant_ === this.tenant_id).map((fc) => fc.slug),
-            '_activities_', '_locks_', '_workflows_',
+            AUDIT_COLLECTION, '_locks_', '_workflows_',
         ];
         const isSafe = func.isSafeAggregatePipeline(pipeline, allowedCollections);
         if (!isSafe.isSafe) {
@@ -466,7 +554,18 @@ class MongoRest {
                     yield value
                 }
             }
+        } catch (err: any) {
+            failure = err
+            throw err
         } finally {
+            this.#logActivity({
+                action: 'aggregateStream',
+                collection,
+                input: { pipeline, options },
+                result: null,
+                error: failure ? { message: failure?.message, code: failure?.code || 'INTERNAL_API_ERROR' } : undefined,
+                duration: Date.now() - start,
+            })
             await cursor.close().catch(() => {})
         }
     }
@@ -475,23 +574,69 @@ class MongoRest {
     @CheckIfCollectionExists()
     async find(collection: string, params: FindOptions = {}, options: FindCallOptions = {}): Promise<Document[]> {
         const action = 'find' as ActionsApiList
-        try {
-            // Real query — hooks + pipeline + toArray
-            const run = async (): Promise<Document[]> => {
+        return this.#executeReadWithAudit(action, collection, { params, options }, async () => {
+            try {
+                // Real query — hooks + pipeline + toArray
+                const run = async (): Promise<Document[]> => {
+                    const col = getCollection(collection, this.#tenant.id) as Collection
+                    let pipeline = func.buildPipeline(params, { col: col })
+                    pipeline = await func.buildInput(pipeline, { rest: this })
+                    pipeline = func.toBson(pipeline, { col })
+
+                    const meta: any = { action, collection, params, options }
+                    if (col.hooks?.beforeOperation) {
+                        await col.hooks.beforeOperation({ rest: this, io, action, meta })
+                    }
+
+                    let result = await this.db.collection(collection).aggregate(pipeline, {
+                        session: this.session,
+                        allowDiskUse: true
+                    }).toArray()
+                    result = func.toJson(result)
+                    meta.result = result
+
+                    if (col.hooks?.afterOperation) {
+                        await col.hooks.afterOperation({ rest: this, io, action, meta })
+                    }
+
+                    return result as any[]
+                }
+
+                // Cache-first when `useCache: true` — served from the query cache, populated on miss
+                if (options.useCache === true) {
+                    return await dbGetOrSet(collection, this.tenant_id, params, options, run)
+                }
+                return await run()
+            } catch (err: any) {
+                throw err instanceof AppError ? err : new AppError(err?.message || 'Internal server error', { code: 'INTERNAL_API_ERROR', status: 500 })
+            }
+        })
+    }
+
+    @LogSlowQuery()
+    @CheckIfCollectionExists()
+    async findOne(collection: string, _id: string, params?: findOneOptions): Promise<any> {
+        const action = 'findOne' as ActionsApiList
+        return this.#executeReadWithAudit(action, collection, { id: _id, params }, async () => {
+            try {
                 const col = getCollection(collection, this.#tenant.id) as Collection
-                let pipeline = func.buildPipeline(params, { col: col })
+                let pipeline = func.buildPipeline({
+                    ...params,
+                    $match: { _id },
+                    $limit: 1
+                }, { col: col })
                 pipeline = await func.buildInput(pipeline, { rest: this })
                 pipeline = func.toBson(pipeline, { col })
 
-                const meta: any = { action, collection, params, options }
+                const meta: any = { action, collection, params, id: _id }
                 if (col.hooks?.beforeOperation) {
                     await col.hooks.beforeOperation({ rest: this, io, action, meta })
                 }
 
-                let result = await this.db.collection(collection).aggregate(pipeline, {
+                let result = (await this.db.collection(collection).aggregate(pipeline, {
                     session: this.session,
                     allowDiskUse: true
-                }).toArray()
+                }).toArray()).at(0) ?? null
                 result = func.toJson(result)
                 meta.result = result
 
@@ -499,53 +644,11 @@ class MongoRest {
                     await col.hooks.afterOperation({ rest: this, io, action, meta })
                 }
 
-                return result as any[]
+                return result
+            } catch (err: any) {
+                throw err instanceof AppError ? err : new AppError(err?.message || 'Internal server error', { code: 'INTERNAL_API_ERROR', status: 500 })
             }
-
-            // Cache-first when `useCache: true` — served from the query cache, populated on miss
-            if (options.useCache === true) {
-                return await dbGetOrSet(collection, this.tenant_id, params, options, run)
-            }
-            return await run()
-        } catch (err: any) {
-            throw err instanceof AppError ? err : new AppError(err?.message || 'Internal server error', { code: 'INTERNAL_API_ERROR', status: 500 })
-        }
-    }
-
-    @LogSlowQuery()
-    @CheckIfCollectionExists()
-    async findOne(collection: string, _id: string, params?: findOneOptions): Promise<any> {
-        const action = 'findOne' as ActionsApiList
-        try {
-            const col = getCollection(collection, this.#tenant.id) as Collection
-            let pipeline = func.buildPipeline({
-                ...params,
-                $match: { _id },
-                $limit: 1
-            }, { col: col })
-            pipeline = await func.buildInput(pipeline, { rest: this })
-            pipeline = func.toBson(pipeline, { col })
-
-            const meta: any = { action, collection, params, id: _id }
-            if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({ rest: this, io, action, meta })
-            }
-
-            let result = (await this.db.collection(collection).aggregate(pipeline, {
-                session: this.session,
-                allowDiskUse: true
-            }).toArray()).at(0) ?? null
-            result = func.toJson(result)
-            meta.result = result
-
-            if (col.hooks?.afterOperation) {
-                await col.hooks.afterOperation({ rest: this, io, action, meta })
-            }
-
-            return result
-        } catch (err: any) {
-            throw err instanceof AppError ? err : new AppError(err?.message || 'Internal server error', { code: 'INTERNAL_API_ERROR', status: 500 })
-        }
+        })
     }
 
     @LogSlowQuery()
@@ -973,49 +1076,60 @@ class MongoRest {
     }
 
     async runAction<T = any>(collection: string, action: string, data?: any): Promise<T> {
-        const col = getCollection(collection, this.#tenant.id)
-        if (!col) {
-            throw new AppError(`Collection '${collection}' not found`, { code: 'COLLECTION_NOT_FOUND', status: 500 })
-        }
+        // Audited like any other operation: the custom action **name** and its
+        // `data` are recorded, the returned payload never is (`includeResult: false`).
+        // `wrapErrors: false` — a custom action's own error must reach the caller unchanged.
+        return this.#executeWithAudit('runAction', collection, { action, data }, async () => {
+            const col = getCollection(collection, this.#tenant.id)
+            if (!col) {
+                throw new AppError(`Collection '${collection}' not found`, { code: 'COLLECTION_NOT_FOUND', status: 500 })
+            }
 
-        if (!Object.hasOwn(col?.actions ?? {}, action)) {
-            throw new AppError(`Action '${action}' not found on collection '${collection}'`, { code: 'ACTION_NOT_FOUND', status: 500 })
-        }
+            if (!Object.hasOwn(col?.actions ?? {}, action)) {
+                throw new AppError(`Action '${action}' not found on collection '${collection}'`, { code: 'ACTION_NOT_FOUND', status: 500 })
+            }
 
-        const token = requestCtxStorage.get<{ value: string | null, decoded: Record<string, unknown> | null, provided: boolean, expired: boolean }>('token')
+            const token = requestCtxStorage.get<{ value: string | null, decoded: Record<string, unknown> | null, provided: boolean, expired: boolean }>('token')
 
-        return await col.actions?.[action]?.({
-            rest: this,
-            io,
-            data,
-            error: fn.error,
-            jwt: func.jwt,
-            token: token ?? { value: null, decoded: null, provided: false, expired: false },
-        } as any)
+            return await col.actions?.[action]?.({
+                rest: this,
+                io,
+                data,
+                error: fn.error,
+                jwt: func.jwt,
+                token: token ?? { value: null, decoded: null, provided: false, expired: false },
+            } as any)
+        }, { includeResult: false, wrapErrors: false })
     }
 
     async runService<T = any>(service: string, action: string, data?: any): Promise<T> {
-        const serviceInstance = cfg.services?.find(s => s.name === service && s._tenant_ === this.tenant_id) as Service | undefined
-        if (!serviceInstance) {
-            throw new AppError(`Service '${service}' not found`, { code: 'SERVICE_NOT_FOUND', status: 500 })
-        }
-        if (!serviceInstance.enabled) {
-            throw new AppError(`Service '${service}' is not enabled`, { code: 'SERVICE_NOT_ENABLED', status: 500 })
-        }
-        if (!Object.hasOwn(serviceInstance.actions, action) || !serviceInstance.actions?.[action]) {
-            throw new AppError(`Action '${action}' not found on service '${service}'`, { code: 'SERVICE_ACTION_NOT_FOUND', status: 500 })
-        }
+        // Audited like `runAction`: the service name (`collection`), the invoked
+        // action and its `data` are recorded — never the returned payload.
+        // `internal` tells whether the call came from server-side code or the route.
+        // `wrapErrors: false` — a service's own error must reach the caller unchanged.
+        return this.#executeWithAudit('runService', service, { action, data }, async () => {
+            const serviceInstance = cfg.services?.find(s => s.name === service && s._tenant_ === this.tenant_id) as Service | undefined
+            if (!serviceInstance) {
+                throw new AppError(`Service '${service}' not found`, { code: 'SERVICE_NOT_FOUND', status: 500 })
+            }
+            if (!serviceInstance.enabled) {
+                throw new AppError(`Service '${service}' is not enabled`, { code: 'SERVICE_NOT_ENABLED', status: 500 })
+            }
+            if (!Object.hasOwn(serviceInstance.actions, action) || !serviceInstance.actions?.[action]) {
+                throw new AppError(`Action '${action}' not found on service '${service}'`, { code: 'SERVICE_ACTION_NOT_FOUND', status: 500 })
+            }
 
-        const token = requestCtxStorage.get<{ value: string | null, decoded: Record<string, unknown> | null, provided: boolean, expired: boolean }>('token')
+            const token = requestCtxStorage.get<{ value: string | null, decoded: Record<string, unknown> | null, provided: boolean, expired: boolean }>('token')
 
-        return await serviceInstance.actions?.[action]?.({
-            data,
-            error: fn.error,
-            io,
-            jwt: func.jwt,
-            token: token ?? { value: null, decoded: null, provided: false, expired: false },
-            rest: this,
-        } as any)
+            return await serviceInstance.actions?.[action]?.({
+                data,
+                error: fn.error,
+                io,
+                jwt: func.jwt,
+                token: token ?? { value: null, decoded: null, provided: false, expired: false },
+                rest: this,
+            } as any)
+        }, { includeResult: false, wrapErrors: false })
     }
 
     async stats() {
@@ -1101,12 +1215,59 @@ class MongoRest {
 
     get audit() {
         return {
+            /**
+             * Log an audit entry the way the framework does (same envelope: trace,
+             * request, meta, `internal`, redaction, result policy).
+             *
+             * @example
+             * await rest.audit.log({ action: 'export', collection: 'orders', input: { from, to } })
+             */
+            log: async (entry: {
+                action: string;
+                collection: string;
+                input?: any;
+                result?: any;
+                error?: { message: string; code?: string } | null;
+                duration?: number;
+            }): Promise<void> => {
+                await this.#logActivity({
+                    action: entry.action,
+                    collection: entry.collection,
+                    input: entry.input,
+                    result: entry.result,
+                    error: entry.error
+                        ? { message: entry.error.message, code: entry.error.code ?? 'INTERNAL_API_ERROR' }
+                        : undefined,
+                    duration: entry.duration ?? 0,
+                })
+            },
             addActivities: async (activities: ActivityInput[]) => {
-                await this.db.collection('_activities_').insertMany(activities)
+                // Single choke point for the audit trail: every payload is redacted
+                // here (`server.audit.redact`), whatever wrote the entry — including a
+                // direct `rest.audit.addActivities()` call. Never store a password,
+                // token or secret in clear, in `_audit_` or in the local file.
+                const entries = activities.map((activity) => ({
+                    ...activity,
+                    // `request` (headers, query string) is attacker-controlled too — it
+                    // carries `x-api-key`, `?token=…`, … just like a payload
+                    request: redactPayload(activity?.request),
+                    meta: redactPayload(activity?.meta),
+                    operation: {
+                        ...activity?.operation,
+                        input: redactPayload(activity?.operation?.input),
+                        result: redactPayload(activity?.operation?.result),
+                    },
+                }))
+                await this.db.collection(AUDIT_COLLECTION).insertMany(entries)
                     .then(e => e)
                     .catch(err => {
                         console.error('Error inserting activities', err)
                     })
+                // Local append-only backup (opt-in) — fire-and-forget, never fatal.
+                // Runs after the insert on purpose: `insertMany` mutates the documents
+                // with the `_id` generated by MongoDB, so every line of the local file
+                // can be joined back to the `_audit_` collection.
+                writeAuditFile(getTenant(this.tenant_id), entries)
             },
             getActivities: async (opts = {
                 $match: {},
@@ -1114,7 +1275,7 @@ class MongoRest {
             }) => {
 
                 let pipeline = func.buildPipeline(opts)
-                return await this.db.collection('_activities_').aggregate(pipeline).toArray()
+                return await this.db.collection(AUDIT_COLLECTION).aggregate(pipeline).toArray()
             }
         }
     }
@@ -1149,6 +1310,19 @@ class MongoRest {
             clear: () => ns().clear(),
             namespace: (name) => cache.namespace(`app:${tenantId}:${name}`),
         };
+    }
+
+    /**
+     * Tenant-scoped key/value store — like Redis, MongoDB-backed (durable, no TTL).
+     * Meant for configuration-like values (`rest.cache` is for ephemeral data).
+     *
+     * @example
+     * await rest.vars.set('config', 'licence', 'RDX00');
+     * const licence = await rest.vars.get('config', 'licence');
+     * await rest.vars.del('config', 'licence');
+     */
+    get vars(): TenantVars {
+        return createVars(this.tenant_id);
     }
 
     /**

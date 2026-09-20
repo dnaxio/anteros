@@ -1,4 +1,7 @@
 import { getFileCollection } from "../database/file";
+import { getTenant } from "../database/tenant";
+import { writeDeleteMarkers } from "../database/deleteLog";
+import { toBson } from "../utils/func";
 import { useRest } from "../database/rest";
 import { cfg } from "../server/config";
 import { AppError } from "./error";
@@ -13,6 +16,10 @@ import { ObjectId } from "mongodb";
 
 export type FileResult = {
   _id: string;
+  /** ISO string — set on upload */
+  createdAt: string;
+  /** ISO string — refreshed when the metadata is completed */
+  updatedAt: string;
   _file: {
     filename: string;
     name: string;
@@ -236,6 +243,7 @@ export function getStorageForCollection(slug: string, tenant_id: string): FileSt
  * Handle a file upload for a given collection.
  */
 export async function handleUpload(options: UploadOptions): Promise<FileResult> {
+  const startedAt = Date.now();
   const { collection, tenant_id, file, data } = options;
 
   const col = getFileCollection(collection, tenant_id);
@@ -283,6 +291,9 @@ export async function handleUpload(options: UploadOptions): Promise<FileResult> 
     });
   }
 
+  // Timestamps (ISO strings) — stored and returned in the response
+  const now = new Date()
+
   // Insert metadata first to get the MongoDB auto-generated ObjectId
   let _id: string;
   try {
@@ -290,6 +301,8 @@ export async function handleUpload(options: UploadOptions): Promise<FileResult> 
     // Form-data / JSON always sends IDs as strings, but MongoDB expects
     // ObjectId for fields that reference other collections.
     const insertDoc: Record<string, any> = {
+      createdAt: now,
+      updatedAt: now,
       _file: {
         filename: '',
         name: file.name,
@@ -325,7 +338,13 @@ export async function handleUpload(options: UploadOptions): Promise<FileResult> 
       }
     }
     const rest = new useRest({ tenant_id, internal: false, useHook: false, useCustomApi: false });
-    const result = await rest.db.collection(collection).insertOne(insertDoc);
+    // Convert the custom fields exactly like a regular collection insert
+    // (ISO date strings → Date, hex ids → ObjectId, …) so file metadata matches
+    // the collections' storage types. `_file` is framework-generated and must
+    // stay untouched (a filename could otherwise look like a date or an ObjectId).
+    const { _file, ...fields } = insertDoc;
+    const stored = { _file, ...toBson<Record<string, any>>(fields, { col } as any) };
+    const result = await rest.db.collection(collection).insertOne(stored as any);
     _id = String(result.insertedId);
   } catch (err) {
     throw new AppError('Failed to save file metadata', {
@@ -346,7 +365,7 @@ export async function handleUpload(options: UploadOptions): Promise<FileResult> 
     const rest = new useRest({ tenant_id, internal: true, useHook: false, useCustomApi: false });
     await rest.db.collection(collection).updateOne(
       { _id: new ObjectId(_id) },
-      { $set: { '_file.filename': filename, '_file.size': size, '_file.url': url } },
+      { $set: { '_file.filename': filename, '_file.size': size, '_file.url': url, updatedAt: new Date() } },
     );
   } catch (err) {
     await storage.delete(tenant_id, collection, _id, filename, subpath).catch(() => {});
@@ -362,8 +381,26 @@ export async function handleUpload(options: UploadOptions): Promise<FileResult> 
     });
   }
 
+  // Audit the upload — the file metadata and the generated id, never the stored
+  // document (see the Audit page: parameters only). `internal` is taken from the
+  // request context, so an HTTP upload is logged as such.
+  try {
+    await new useRest({ tenant_id, internal: false, useHook: false, useCustomApi: false }).audit.log({
+      action: 'upload',
+      collection,
+      input: {
+        file: { name: file.name, mimetype, size },
+        fields: Object.keys(data ?? {}),
+      },
+      result: { _id },
+      duration: Date.now() - startedAt,
+    });
+  } catch { /* auditing must never fail an upload */ }
+
   return {
     _id,
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
     _file: {
       filename,
       name: file.name,
@@ -477,6 +514,7 @@ export async function handleDelete(
   collection: string,
   fileId: string,
 ): Promise<void> {
+  const startedAt = Date.now();
   const storage = getStorageForCollection(collection, tenant_id);
   const col = getFileCollection(collection, tenant_id);
   const subpath = col?.storage?.path || undefined;
@@ -510,6 +548,21 @@ export async function handleDelete(
     const rest = new useRest({ tenant_id, internal: true, useHook: false, useCustomApi: false });
     await rest.db.collection(collection).deleteOne({
       _id: (ObjectId.isValid(fileId) ? new ObjectId(fileId) : fileId) as any,
+    });
+    // This path bypasses the collection hooks — record a tombstone explicitly so the
+    // deletion propagates when the file collection opted into replication.
+    if (col?.replication?.enabled) {
+      const db = getTenant(tenant_id)?.database?.db;
+      if (db) await writeDeleteMarkers(db, tenant_id, collection, [fileId]);
+    }
+    // Audited like any other delete: the id and the stored filename, nothing else.
+    // (`internal` is taken from the request context, so an HTTP call is logged as such.)
+    await rest.audit.log({
+      action: 'deleteFile',
+      collection,
+      input: { id: fileId, filename },
+      result: { deleted: true },
+      duration: Date.now() - startedAt,
     });
   } catch (err: any) {
     console.error('Failed to delete file metadata:', err?.message || err);

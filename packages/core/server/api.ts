@@ -16,8 +16,11 @@ import type { ActivityInput } from "../types/activity";
 import * as os from 'node:os';
 import { basename } from 'node:path';
 import { handleUpload, handleServe, handleDelete, type FileResult } from "../lib/files";
+import { getVarsDefinition } from "../database/vars";
+import { getTenant } from "../database/tenant";
 const API_PREFIX = '/api/:tenant_id/:collection/:action';
 const SERVICE_PREFIX = '/services/:tenant_id/:service/:action';
+const VARS_PREFIX = '/vars/:tenant_id/:action';
 const UPLOAD_PREFIX = '/upload/:tenant_id/:collection';
 const FILES_PREFIX = '/files/:tenant_id/:collection/:file';
 
@@ -351,10 +354,9 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
 
             // ── Execute action ──
             if (col.actions?.[action]) {
-                response = await col.actions[action]({
-                    rest, data: body?.data, error: fn.error,
-                    io, jwt: func.jwt, token: accessToken,
-                });
+                // Delegated to `rest.runAction` so the invocation is audited once,
+                // with the same context (`rest`, `io`, `data`, `token`, …)
+                response = await rest.runAction(collection, action, body?.data);
             } else {
                 const handler = crudHandlers[action];
                 if (!handler) throw new AppError('Action `' + action + '` not found', { status: 400, code: 'ACTION_NOT_FOUND' });
@@ -378,6 +380,97 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
 
         } catch (err: any) {
             if (cfg?.debug) console.error(err)
+            return errorResponse(c, err);
+        }
+    });
+
+    // ─── Vars API ───────────────────────────────────────────────────────
+    app.post(VARS_PREFIX, async (c) => {
+        let rest: InstanceType<typeof useRest> | undefined;
+        let tenant_id = '';
+        let action = '';
+        let ns = '';
+        let body: any;
+        const logStart = Date.now();
+        try {
+            const ContentType = c.req.header('Content-Type');
+            if (ContentType?.includes('application/json')) {
+                try { body = await c.req.json(); } catch {
+                    throw new AppError('Invalid JSON body', { status: 400, code: 'INVALID_JSON_BODY' });
+                }
+            } else {
+                body = {};
+            }
+
+            const params = c.req.param() as { tenant_id: string; action: string };
+            tenant_id = params.tenant_id;
+            action = params.action;
+            ns = body?.ns;
+
+            if (!tenant_id) throw new AppError('Tenant ID is required', { status: 400, code: 'TENANT_ID_REQUIRED' });
+            if (!action) throw new AppError('Action is required', { status: 400, code: 'ACTION_REQUIRED' });
+            if (!ns) throw new AppError('Variables namespace is required', { status: 400, code: 'NAMESPACE_REQUIRED' });
+            if (!getTenant(tenant_id)) throw new AppError('Tenant not found', { status: 400, code: 'TENANT_NOT_FOUND' });
+
+            requestCtxStorage.set('tenant_id', tenant_id);
+
+            // Only namespaces declared with `define.Vars` are reachable, and their
+            // `api.access` gates every action (no rules = denied).
+            const definition = getVarsDefinition(tenant_id, ns);
+            if (!definition) throw new AppError(`Variables namespace '${ns}' not found`, { status: 400, code: 'NAMESPACE_NOT_FOUND' });
+
+            rest = new useRest({ internal: false, tenant_id });
+            await evaluateAccess(definition.api?.access as any, action, rest, `vars:${ns}`, c);
+
+            const vars = rest.vars;
+            const { key, value, meta, ttl, scope, where, entries, by } = body ?? {};
+            let response: any;
+
+            switch (action) {
+                case 'set': await vars.set(ns, key, value, { meta, ttl, scope }); response = { ok: true }; break;
+                case 'setMany': await vars.setMany(ns, entries ?? {}, { meta, ttl, scope }); response = { ok: true }; break;
+                case 'get': response = { value: await vars.get(ns, key, { scope }) }; break;
+                case 'entry': response = { entry: await vars.entry(ns, key, { scope }) }; break;
+                case 'entries': response = { entries: await vars.entries(ns, { scope, where }) }; break;
+                case 'all': response = { vars: await vars.all(ns, { scope, where }) }; break;
+                case 'del': response = { ok: await vars.del(ns, key, { scope }) }; break;
+                case 'has': response = { exists: await vars.has(ns, key, { scope }) }; break;
+                case 'incr': response = { value: await vars.incr(ns, key, by, { scope, ttl }) }; break;
+                case 'expire': response = { ok: await vars.expire(ns, key, ttl, { scope }) }; break;
+                case 'clear': response = { deleted: await vars.clear(ns, { scope }) }; break;
+                default: throw new AppError(`Action '${action}' not found`, { status: 400, code: 'ACTION_NOT_FOUND' });
+            }
+
+            // Audit — never store `value` / `meta` (they may hold secrets).
+            const accessToken = getAccessToken(c);
+            await logActivity({
+                rest,
+                tenant_id,
+                action,
+                collection: `_vars_:${ns}`,
+                status: 'success',
+                input: { ns, key, scope, ttl },
+                result: ['get', 'all', 'entry', 'entries'].includes(action) ? response : undefined,
+                duration: Date.now() - logStart,
+                token: { decoded: accessToken.decoded, value: null, provided: true, expired: false },
+            });
+            return c.json(response);
+        } catch (err: any) {
+            if (cfg?.debug) console.error(err);
+            if (rest && tenant_id && ns) {
+                const accessToken = getAccessToken(c);
+                await logActivity({
+                    rest,
+                    tenant_id,
+                    action,
+                    collection: `_vars_:${ns}`,
+                    status: 'error',
+                    input: { ns },
+                    error: { message: err?.message, code: err?.code || 'INTERNAL_VARS_ERROR' },
+                    duration: Date.now() - logStart,
+                    token: { decoded: accessToken.decoded, value: null, provided: true, expired: false },
+                }).catch(() => {});
+            }
             return errorResponse(c, err);
         }
     });
@@ -415,21 +508,10 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
             const serviceAccess = serviceInstance.api?.access as Record<string, boolean | Function> | undefined;
             await evaluateAccess(serviceAccess as any, action, rest, action, c);
 
-            // Re-read accessToken for the action handler
-            const accessToken = getAccessToken(c);
-
-            const logStart = Date.now();
-            try {
-                const response = await serviceInstance.actions[action]({
-                    data: body?.data, error: fn.error, io, jwt: func.jwt, token: accessToken, rest,
-                });
-
-                await logActivity({ rest, tenant_id, action, collection: service, status: 'success', input: body?.data, result: response, duration: Date.now() - logStart, token: { decoded: accessToken.decoded, value: null, provided: true, expired: false } });
-                return c.json(response);
-            } catch (err: any) {
-                await logActivity({ rest, tenant_id, action, collection: service, status: 'error', input: body?.data, error: { message: err?.message, code: err?.code || 'INTERNAL_SERVICE_ERROR' }, duration: Date.now() - logStart, token: { decoded: accessToken.decoded, value: null, provided: true, expired: false } }).catch(() => {});
-                throw err;
-            }
+            // No `logActivity` here: the call is delegated to `rest.runService()`, which
+            // audits it once (`action: 'runService'`, `internal: false`, params only)
+            const response = await rest.runService(service, action, body?.data);
+            return c.json(response);
         } catch (err: any) {
             if (cfg?.debug) console.error(err)
             return errorResponse(c, err);
@@ -469,12 +551,14 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
                 });
             }
 
-            const formData = await c.req.parseBody({ all: true }); // all: true → every value is an array (several files can share the same field name)
+            const formData = await c.req.parseBody({ all: true }); // repeated fields → arrays; a single occurrence stays a single value
 
             // Collect files from both accepted field names (single or multiple)
             const files: File[] = [];
             for (const key of ['file', 'upload']) {
-                for (const value of formData[key] ?? []) {
+                const raw = formData[key];
+                const values = Array.isArray(raw) ? raw : raw ? [raw] : [];
+                for (const value of values) {
                     if (value instanceof File) files.push(value);
                 }
             }

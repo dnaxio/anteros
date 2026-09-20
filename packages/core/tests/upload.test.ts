@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { ObjectId } from "mongodb";
 import { createApp } from "../server/hono";
 import { formatConfig, cfg } from "../server/config";
 import { syncTenants } from "../database/tenant";
@@ -25,7 +26,7 @@ beforeAll(async () => {
         _tenant_: TENANT,
         _isFileCollection_: true,
         slug: SLUG,
-        fields: [{ name: "label", type: "string" }],
+        fields: [{ name: "label", type: "string" }, { name: "takenAt", type: "date" }],
         upload: { allowedMimeTypes: ["image/png", "text/plain"], maxSize: 5 * 1024 * 1024 },
         storage: { driver: "disk" },
         api: { access: { "*": true } },
@@ -56,6 +57,65 @@ function pngFile(name: string) {
     return new File([bytes], name, { type: "image/png" });
 }
 
+describe("upload — audit trail", () => {
+    /** Latest audit entry for an action, polling until it lands */
+    async function auditEntry(action: string, id?: string) {
+        const filter: any = { "operation.action": action };
+        if (id) filter["operation.result._id"] = id;
+        for (let i = 0; i < 40; i++) {
+            const found: any = await rest.db.collection("_audit_").findOne(filter, { sort: { ts: -1 } });
+            if (found) return found;
+            await Bun.sleep(25);
+        }
+        return null;
+    }
+
+    it("records an upload with the file metadata and the generated id — never the document", async () => {
+        const form = new FormData();
+        form.append("file", pngFile("audited.png"));
+        form.append("label", "audited");
+
+        const res = await fetch(`${url}/upload/${TENANT}/${SLUG}`, { method: "POST", body: form });
+        expect(res.status).toBe(200);
+        const body: any = await res.json();
+
+        const logged: any = await auditEntry("upload", body._id);
+        expect(logged).not.toBeNull();
+        expect(logged.operation.collection).toBe(SLUG);
+        expect(logged.operation.collectionType).toBe("file");
+        expect(logged.operation.status).toBe("success");
+        expect(logged.internal).toBe(false); // HTTP upload
+
+        // parameters only: the file's metadata and which custom fields were sent
+        expect(logged.operation.input.file.name).toBe("audited.png");
+        expect(logged.operation.input.file.mimetype).toBe("image/png");
+        expect(typeof logged.operation.input.file.size).toBe("number");
+        expect(logged.operation.input.fields).toEqual(["label"]);
+        expect(logged.operation.input.label).toBeUndefined(); // the value is NOT stored
+
+        // and the generated id, never the stored document
+        expect(logged.operation.result).toEqual({ _id: body._id });
+    });
+
+    it("records a file deletion", async () => {
+        const form = new FormData();
+        form.append("file", pngFile("deleted.png"));
+        const uploaded: any = await (
+            await fetch(`${url}/upload/${TENANT}/${SLUG}`, { method: "POST", body: form })
+        ).json();
+
+        const res = await fetch(`${url}/files/${TENANT}/${SLUG}/${uploaded._id}`, { method: "DELETE" });
+        expect(res.status).toBe(200);
+
+        const logged: any = await auditEntry("deleteFile");
+        expect(logged).not.toBeNull();
+        expect(logged.operation.input.id).toBe(uploaded._id);
+        expect(logged.operation.input.filename).toBeString();
+        expect(logged.operation.result).toEqual({ deleted: true });
+        expect(logged.internal).toBe(false);
+    });
+});
+
 describe("upload — single file (unchanged contract)", () => {
     it("returns a single object", async () => {
         const form = new FormData();
@@ -71,10 +131,17 @@ describe("upload — single file (unchanged contract)", () => {
         expect(body._file.name).toBe("one.png");
         expect(body._file.mimetype).toBe("image/png");
         expect(body._file.url).toContain(`/files/${TENANT}/${SLUG}/`);
+        expect(body.createdAt).toBeString();
+        expect(body.updatedAt).toBeString();
 
         // metadata persisted on the document
         const doc: any = await rest.findOne(SLUG, body._id);
         expect(doc.label).toBe("single");
+
+        // Stored as BSON Dates (same end result as collections via toBson)
+        const raw: any = await rest.db.collection(SLUG).findOne({ _id: new ObjectId(body._id) });
+        expect(raw.createdAt).toBeInstanceOf(Date);
+        expect(raw.updatedAt).toBeInstanceOf(Date);
     });
 
     it("accepts the 'upload' field name too", async () => {
@@ -112,6 +179,9 @@ describe("upload — multiple files", () => {
             const doc: any = await rest.findOne(SLUG, id);
             expect(doc.label).toBe("batch");
             expect(doc._file.url).toContain(`/files/${TENANT}/${SLUG}/`);
+            // Uploads carry timestamps (required by the replication cursor)
+            expect(doc.createdAt).toBeString();
+            expect(doc.updatedAt).toBeString();
         }
     });
 
@@ -134,5 +204,36 @@ describe("upload — multiple files", () => {
         expect(res.status).toBe(400);
         const body: any = await res.json();
         expect(body.code).toBe("MIMETYPE_NOT_ALLOWED");
+    });
+});
+
+describe("upload — custom field types (toBson, like collections)", () => {
+    it("converts a `date` field to a BSON Date", async () => {
+        const form = new FormData();
+        form.append("file", pngFile("dated.png"));
+        form.append("label", "dated");
+        form.append("takenAt", "2024-05-01T10:00:00.000Z");
+
+        const res = await fetch(`${url}/upload/${TENANT}/${SLUG}`, { method: "POST", body: form });
+        expect(res.status).toBe(200);
+        const body: any = await res.json();
+
+        const raw: any = await rest.db.collection(SLUG).findOne({ _id: new ObjectId(body._id) });
+        expect(raw.takenAt).toBeInstanceOf(Date);
+        expect(raw.takenAt.toISOString()).toBe("2024-05-01T10:00:00.000Z");
+    });
+
+    it("leaves `_file` untouched, even when a name looks like a date", async () => {
+        const form = new FormData();
+        form.append("file", pngFile("2024-01-01")); // ← a file literally named like a date
+
+        const res = await fetch(`${url}/upload/${TENANT}/${SLUG}`, { method: "POST", body: form });
+        expect(res.status).toBe(200);
+        const body: any = await res.json();
+        expect(body._file.name).toBe("2024-01-01");
+
+        const raw: any = await rest.db.collection(SLUG).findOne({ _id: new ObjectId(body._id) });
+        expect(raw._file.name).toBe("2024-01-01"); // NOT converted to a Date
+        expect(typeof raw._file.name).toBe("string");
     });
 });

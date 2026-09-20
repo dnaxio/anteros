@@ -1,5 +1,0 @@
-{
-  "title": "Anteros CLI",
-  "icon": "Terminal",
-  "pages": ["installation", "ant", "ros"]
-}

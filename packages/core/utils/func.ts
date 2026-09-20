@@ -1225,6 +1225,20 @@ function isSafeAggregatePipeline(pipeline: Array<Record<string, unknown>>, allow
     }
 }
 
+/**
+ * Parse a human duration (`'500ms'`, `'30s'`, `'5m'`, `'2h'`, `'1d'`) or a number
+ * of milliseconds. Returns `null` when the value cannot be parsed.
+ */
+function parseDuration(value: string | number): number | null {
+    if (typeof value === 'number') return Number.isFinite(value) ? Math.max(0, value) : null;
+    const match = String(value).trim().match(/^(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)?$/i);
+    if (!match) return null;
+    const amount = Number.parseFloat(match[1] ?? '0');
+    const unit = (match[2] ?? 'ms').toLowerCase();
+    const factor = unit === 's' ? 1_000 : unit === 'm' ? 60_000 : unit === 'h' ? 3_600_000 : unit === 'd' ? 86_400_000 : 1;
+    return Math.round(amount * factor);
+}
+
 export {
     buildPipeline,
     reorder,
@@ -1253,6 +1267,7 @@ export {
     walkAggregatePipeline,
     countAggregatePipelineStages,
     isSafeAggregatePipeline,
+    parseDuration,
 }
 
 export type { PaginationResult, FormatToDateOptions }

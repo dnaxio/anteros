@@ -1,6 +1,7 @@
 import type { Tenant } from "../types/tenant";
 import { cfg } from "../server/config";
 import { useRest } from "./rest";
+import { setupAuditCollection, resolveAuditRetention } from "./audit";
 async function syncTenants() {
     try {
         for await (let tenant of cfg.tenants ?? []) {
@@ -17,6 +18,9 @@ async function syncTenants() {
             const { client, db } = await rest.connect()
             tenant.database.client = client
             tenant.database.db = db
+            // One-off audit setup: legacy rename, query indexes, retention
+            // (tenant config wins, `server.audit.retention` is the fallback)
+            await setupAuditCollection(db, resolveAuditRetention(tenant))
         }
     } catch (err: any) {
         console.error('Error bootstrapping tenants', cfg.debug ? err : err?.message)
