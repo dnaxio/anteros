@@ -6,6 +6,7 @@ export default defineAppConfig({
       contentDir: "docd/content",
     },
     ui: {
+      colorMode: "dark",
       borderType: "dashed",
       header: {
         title: "Anteros",

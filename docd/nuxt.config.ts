@@ -1,5 +1,6 @@
 export default defineNuxtConfig({
   extends: ["@baybreezy/docd"],
+
   site: {
     name: "Anteros",
     description:
