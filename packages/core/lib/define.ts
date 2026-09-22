@@ -159,11 +159,46 @@ function Middleware(config: GlobalMiddlewareConfig): GlobalMiddlewareConfig {
 }
 
 import type { WorkflowDefinition } from "../types/workflow";
+import type { AgentConfig, AgentTool } from "../types/agent";
 
 export function Workflow<TData = any>(workflow: WorkflowDefinition<TData>): WorkflowDefinition<TData> {
     return {
         ...workflow,
+        enabled: workflow.enabled ?? true,
         _isWorkflow_: true,
+    }
+}
+
+/**
+ * Declares an LLM agent — `{tenant.dir}/agents/**\/*.agent.ts`.
+ *
+ * @example
+ * ```ts
+ * export default define.Agent({
+ *   id: 'weather',
+ *   instructions: 'You are a concise weather assistant.',
+ *   provider: { model: 'gpt-4o-mini', compatible: 'openai' },
+ *   tools: { forecast },
+ * })
+ * ```
+ */
+function Agent(config: AgentConfig): AgentConfig {
+    return {
+        ...config,
+        enabled: config.enabled ?? true,
+        _isAgent_: true,
+    }
+}
+
+/**
+ * Declares an agent tool — `define.Tool({ description, inputSchema, execute })`.
+ * A `define.McpTool` is accepted by an agent as-is.
+ */
+function Tool(tool: AgentTool): AgentTool {
+    return {
+        ...tool,
+        enabled: tool.enabled ?? true,
+        _isTool_: true,
     }
 }
 
@@ -186,5 +221,7 @@ export const define = {
   McpTool,
   McpResource,
   Lifecycle,
-  Vars
+  Vars,
+  Agent,
+  Tool,
 }

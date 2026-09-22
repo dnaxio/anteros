@@ -4,6 +4,7 @@ import path from "path"
 import fs from "fs/promises"
 import type { FileCollection } from "../types/file"
 import { getTenant } from "./tenant"
+import { importDefinition } from "../lib/load"
 import type { IndexDescription } from "mongodb"
 
 async function syncFileCollections() {
@@ -18,7 +19,7 @@ async function syncFileCollections() {
             if (filesExist && (await fs.stat(FILES_PATH)).isDirectory()) {
                 const globFiles = new Glob(path.join(FILES_PATH, '**/*.file.ts'))
                 for await (let file of globFiles.scan('.')) {
-                    let fileModule = await import(file)
+                    let fileModule = await importDefinition(file, 'file collection')
                     if (fileModule?.default?._isFileCollection_) {
                         fileCollections.push({
                             ...fileModule?.default,
@@ -30,7 +31,7 @@ async function syncFileCollections() {
                 // Also scan *.model.ts in files/ with _isFileCollection_
                 const globModels = new Glob(path.join(FILES_PATH, '**/*.model.ts'))
                 for await (let file of globModels.scan('.')) {
-                    let fileModule = await import(file)
+                    let fileModule = await importDefinition(file, 'file collection')
                     if (fileModule?.default?._isFileCollection_) {
                         fileCollections.push({
                             ...fileModule?.default,
@@ -46,7 +47,7 @@ async function syncFileCollections() {
             if (collectionsExist && (await fs.stat(COLLECTIONS_PATH)).isDirectory()) {
                 const globFiles = new Glob(path.join(COLLECTIONS_PATH, '**/*.file.ts'))
                 for await (let file of globFiles.scan('.')) {
-                    let fileModule = await import(file)
+                    let fileModule = await importDefinition(file, 'file collection')
                     if (fileModule?.default?._isFileCollection_) {
                         fileCollections.push({
                             ...fileModule?.default,

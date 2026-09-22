@@ -85,8 +85,9 @@ describe("vars replication", () => {
         expect(dest?.value).toBe("SCOPED-1");
     });
 
-    it("does NOT replicate namespaces that did not opt in", async () => {
-        // `private.var.ts` has no `replication` — it must never reach the destination.
+    it("does NOT replicate namespaces that opt out (`enabled: false`)", async () => {
+        // `private.var.ts` declares `replication: { enabled: false }` — it must
+        // never reach the destination.
         await rest.vars.set("private", "secret", "top-secret");
         await replicateTenant(TEST_TENANT);
 

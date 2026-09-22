@@ -5,6 +5,7 @@ import fs from "fs/promises"
 import type { Collection } from "../types/collection"
 import type { IndexDescription } from "mongodb"
 import type { Field } from "../types/field"
+import { importDefinition } from "../lib/load"
 import { getTenant } from "./tenant"
 import { buildSchema } from "./schema"
 import type { FileCollection } from "../types/file"
@@ -38,7 +39,8 @@ async function syncCollections() {
             if (isDirectory) {
                 const glob = new Glob(path.join(COLLECTIONS_PATH, '**/*.model.ts'))
                 for await (let file of glob.scan('.')) {
-                    let collectionModule = await import(file)
+                    // A broken model file is skipped, never fatal for the others
+                    let collectionModule = await importDefinition(file, 'collection')
                     if (collectionModule?.default?._isCollection_) {
                         collections.push({
                             ...collectionModule?.default,

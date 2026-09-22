@@ -13,6 +13,7 @@ demo/*
 .agents/*
 AGENTS.md
 opencode.json
+.memory
 
 # code coverage
 coverage

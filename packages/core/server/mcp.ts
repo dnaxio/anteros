@@ -10,72 +10,15 @@ import {
     ErrorCode,
 } from "@modelcontextprotocol/sdk/types.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
-import type Joi from "joi";
 import { cfg } from "./config";
 import { useRest } from "../database/rest";
 import { logger } from "../utils/logger";
 import type { McpTool, McpResource } from "../types/mcp";
 import type { HonoVariables } from "./env";
+import { joiToJsonSchema } from "../lib/jsonSchema";
 
-// ─── Joi → JSON Schema (for the MCP protocol) ────────────────────────────
-
-function joiTypeToJson(type: string): string {
-    switch (type) {
-        case 'number': return 'number';
-        case 'integer': return 'integer';
-        case 'boolean': return 'boolean';
-        case 'date': return 'string';
-        default: return 'string';
-    }
-}
-
-/** Minimal Joi → JSON Schema converter (covers the common field types). */
-function joiToJsonSchema(schema: Joi.Schema, describe = schema.describe() as any): any {
-    const node: any = {};
-    const type = describe?.type;
-
-    switch (type) {
-        case 'object': {
-            node.type = 'object';
-            const properties: Record<string, any> = {};
-            const required: string[] = [];
-            for (const [key, child] of Object.entries(describe.keys ?? {})) {
-                properties[key] = joiToJsonSchema(child as any, child);
-                if ((child as any)?.flags?.presence === 'required') required.push(key);
-            }
-            node.properties = properties;
-            if (required.length) node.required = required;
-            break;
-        }
-        case 'array': {
-            node.type = 'array';
-            if (describe.items?.length) node.items = joiToJsonSchema(describe.items[0], describe.items[0]);
-            break;
-        }
-        default: {
-            node.type = joiTypeToJson(type);
-            if (type === 'date') node.format = 'date-time';
-            if (type === 'string') {
-                for (const rule of describe.rules ?? []) {
-                    if (['email', 'uri', 'uuid', 'isoDate', 'ip'].includes(rule.name)) {
-                        node.format = rule.name;
-                    }
-                    if (rule.name === 'pattern' && rule.args?.regex) {
-                        node.pattern = String(rule.args.regex).replace(/^\/|\/[gimsuy]*$/g, '');
-                    }
-                }
-            }
-            if (describe.valids?.length && describe.valids.length <= 50) {
-                node.enum = describe.valids;
-            }
-            break;
-        }
-    }
-
-    if (describe?.flags?.presence === 'required') node.description = node.description ?? 'required';
-    if (describe?.flags?.description) node.description = describe.flags.description;
-    return node;
-}
+// The Joi → JSON Schema converter is shared with the agent runtime — a tool
+// must look identical whether it is exposed over MCP or to a model.
 
 // ─── URI template matching (users://{id} → params) ───────────────────────
 

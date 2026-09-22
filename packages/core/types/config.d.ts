@@ -8,6 +8,7 @@ import type { Script } from "./scripts";
 import type { FileCollection } from "./file";
 import type { McpTool, McpResource } from "./mcp";
 import type { VarDefinition } from "./vars";
+import type { AgentDefinition } from "./agent";
 import type { AuditFileConfig } from "../lib/audit";
 export type ServerConfig = {
     debug?: boolean;
@@ -66,6 +67,18 @@ export type ServerConfig = {
              * actions/services never store a result, whatever this setting.
              */
             results?: 'none' | 'summary' | 'full';
+        };
+        /**
+         * Workflow defaults for every tenant — a tenant declaring its own
+         * `tenant.workflows` always wins.
+         */
+        workflows?: {
+            /**
+             * How long **finished** workflow runs are kept (MongoDB TTL on
+             * `completedAt`). Duration string: `'30d'`, `'90d'`.
+             * `false` → explicitly disabled. Omitted → untouched.
+             */
+            retention?: string | false;
         };
         body?: {
             maxSize?: number;
@@ -187,4 +200,5 @@ export type Config = ServerConfig & {
     mcpTools?: McpTool[]
     mcpResources?: McpResource[]
     vars?: VarDefinition[]
+    agents?: AgentDefinition[]
 }

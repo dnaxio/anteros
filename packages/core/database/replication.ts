@@ -4,6 +4,7 @@ import { getTenant } from "./tenant";
 import { useRest } from "./rest";
 import { logger } from "../utils/logger";
 import * as func from "../utils/func";
+import * as os from "node:os";
 import type { Collection } from "../types/collection";
 import type { Tenant } from "../types/tenant";
 import type { HookContext } from "../types/hook";
@@ -11,6 +12,7 @@ import type {
     ReplicationConfig,
     ReplicationDestination,
     ReplicationInitialSync,
+    ReplicationMetaName,
     ReplicationResetOptions,
     ReplicationResetResult,
     ReplicationRunResult,
@@ -20,6 +22,9 @@ import type {
     ReplicationState,
     ReplicationStats,
 } from "../types/replication";
+import { AUDIT_TTL_INDEX, resolveAuditRetention } from "./audit";
+import { WORKFLOW_RUNS_TTL_INDEX, resolveWorkflowsRetention } from "../lib/workflow";
+import { syncTtlRetention } from "./ttl";
 
 const META_COLLECTION = "_replication_";
 const DEFAULT_KEY = "updatedAt";
@@ -28,6 +33,60 @@ const DEFAULT_BATCH = 1000;
 const BULK_CHUNK = 1000;
 /** Distributed-lock TTL used to guard a run across cluster workers. */
 const LOCK_TTL = 5 * 60_000;
+
+/**
+ * Framework collections replication covers **by default**, with the date key each
+ * one is read with (the engine's cursor). `'vars'` is handled apart, per namespace.
+ */
+const META_COLLECTIONS: Record<Exclude<ReplicationMetaName, 'vars'>, { slug: string; key: string }> = {
+    audit: { slug: "_audit_", key: "ts" },
+    workflows: { slug: "_workflows_", key: "updatedAt" },
+    locks: { slug: "_locks_", key: "expiresAt" },
+    replication: { slug: "_replication_", key: "updatedAt" },
+};
+
+/**
+ * Everything replicated for a tenant: the collections that opted in, plus the
+ * framework's meta collections — which are replicated **by default** and left out
+ * with `replication.exclude: ['audit', 'locks', …]`.
+ */
+function replicatedCollectionsFor(tenantId: string, config: ReplicationConfig): Collection[] {
+    const excluded = new Set<string>(config.exclude ?? []);
+
+    const collections: Collection[] = [
+        ...(cfg.collections ?? []).filter((c) => c._tenant_ === tenantId && c.replication?.enabled),
+        ...(cfg.fileCollections ?? [])
+            .filter((c) => c._tenant_ === tenantId && c.replication?.enabled)
+            .map((c) => ({ slug: c.slug, _tenant_: tenantId, replication: c.replication }) as any),
+    ];
+
+    for (const [name, meta] of Object.entries(META_COLLECTIONS)) {
+        if (excluded.has(name)) continue;
+        // Each meta collection knows its own date key (`_audit_` is indexed on `ts`),
+        // so a tenant-level `key` never breaks it
+        collections.push({
+            slug: meta.slug,
+            _tenant_: tenantId,
+            replication: { enabled: true, key: meta.key },
+        } as any);
+    }
+
+    if (!excluded.has('vars')) {
+        // Every namespace, minus the ones explicitly opting out — a per-document
+        // filter: `replication.exclude: ['vars']` is the blunt way out.
+        const optedOut = (cfg.vars ?? [])
+            .filter((v) => v._tenant_ === tenantId && v.replication?.enabled === false)
+            .map((v) => v.namespace);
+        collections.push({
+            slug: "_vars_",
+            _tenant_: tenantId,
+            replication: { enabled: true },
+            _baseFilter_: { ns: { $nin: optedOut } },
+        } as any);
+    }
+
+    return collections;
+}
 
 type Runtime = {
     tenantId: string;
@@ -221,6 +280,11 @@ async function saveState(
                 status,
                 error,
                 stats: { ...stats },
+                // Which process owns this run — `reusePort`/forked deployments can
+                // see at a glance which worker is replicating (the lock holds the
+                // same information)
+                pid: process.pid,
+                hostname: os.hostname(),
                 updatedAt: now,
             },
             $setOnInsert: { createdAt: now },
@@ -311,7 +375,15 @@ async function flushDeletes(
 
     const ops = markers.map((m: any) => ({
         deleteOne: {
-            filter: { _id: toId(m.docId), [key]: { $lte: m.deletedAt } },
+            filter: {
+                _id: toId(m.docId),
+                // The key is a Date on most collections, but a number on `_locks_`:
+                // accept either, so a numeric key never silently skips the delete
+                $or: [
+                    { [key]: { $lte: m.deletedAt } },
+                    { [key]: { $lte: m.deletedAt?.getTime?.() ?? m.deletedAt } },
+                ],
+            },
         },
     }));
     const res = await withRetry(() => runtime.db.collection(collection.slug).bulkWrite(ops as any, { ordered: false }));
@@ -388,6 +460,23 @@ async function replicateCollection(
     await ensureIndex(tenant.database.db!, collection.slug, key, "source");
     await ensureIndex(runtime.db, collection.slug, key, `destination:${runtime.destination.id}`);
 
+    // Meta collections have no hooks, so their deletions never reach the
+    // destination (an audit TTL expiry is invisible to a date cursor): mirror the
+    // source's retention on the destination, otherwise the copy grows forever.
+    if (collection.slug === '_audit_' || collection.slug === '_workflows_') {
+        const isAudit = collection.slug === '_audit_';
+        const retention = isAudit ? resolveAuditRetention(tenant) : resolveWorkflowsRetention(tenant);
+        if (retention !== undefined) {
+            await syncTtlRetention(runtime.db, {
+                collection: collection.slug,
+                index: isAudit ? AUDIT_TTL_INDEX : WORKFLOW_RUNS_TTL_INDEX,
+                field: isAudit ? 'ts' : 'completedAt',
+                retention,
+                label: `${collection.slug} (destination)`,
+            });
+        }
+    }
+
     // Resolve the initial cursor on the first run — `initialSync` lets a
     // pre-loaded destination skip the full backfill (`full` = default).
     if (!state) {
@@ -452,29 +541,7 @@ async function replicateTenant(
     const mainDb = tenant?.database?.db;
     if (!tenant || !config || !mainDb) return [];
 
-    const collections = (cfg.collections ?? []).filter((c) => c._tenant_ === tenantId && c.replication?.enabled);
-
-    // File collections opt in the same way (`define.FileCollection({ replication })`).
-    collections.push(
-        ...(cfg.fileCollections ?? [])
-            .filter((c) => c._tenant_ === tenantId && c.replication?.enabled)
-            .map((c) => ({ slug: c.slug, _tenant_: tenantId, replication: c.replication }) as any),
-    );
-
-    // `define.Vars({ replication: { enabled: true } })` → replicate the opted-in
-    // namespaces of `_vars_`. A per-document filter keeps the namespaces that
-    // did NOT opt in (e.g. secrets) out of the destination.
-    const varsNamespaces = (cfg.vars ?? [])
-        .filter((v) => v._tenant_ === tenantId && v.replication?.enabled)
-        .map((v) => v.namespace);
-    if (varsNamespaces.length) {
-        collections.push({
-            slug: "_vars_",
-            _tenant_: tenantId,
-            replication: { enabled: true },
-            _baseFilter_: { ns: { $in: varsNamespaces } },
-        } as any);
-    }
+    const collections = replicatedCollectionsFor(tenantId, config);
     const results: ReplicationRunResult[] = [];
     const meta = mainDb.collection(META_COLLECTION);
     const rest = new useRest({ tenant_id: tenantId });
@@ -606,14 +673,8 @@ async function seedReplication(
     if (!tenant || !config || !mainDb) return { tenant: tenantId, seeded: 0 };
 
     const meta: any = mainDb.collection(META_COLLECTION);
-    const collections = (cfg.collections ?? []).filter(
-        (c) => c._tenant_ === tenantId && c.replication?.enabled && (!opts?.collection || c.slug === opts.collection),
-    );
-    collections.push(
-        ...(cfg.fileCollections ?? [])
-            .filter((c) => c._tenant_ === tenantId && c.replication?.enabled && (!opts?.collection || c.slug === opts.collection))
-            .map((c) => ({ slug: c.slug, _tenant_: tenantId, replication: c.replication }) as any),
-    );
+    const collections = replicatedCollectionsFor(tenantId, config)
+        .filter((c) => !opts?.collection || c.slug === opts.collection);
     const destinations = (config.destinations ?? []).filter(
         (d) => d.enabled !== false && d.id && d.uri && (!opts?.destination || d.id === opts.destination),
     );

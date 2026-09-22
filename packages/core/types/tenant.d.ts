@@ -27,6 +27,19 @@ export type Tenant = {
          */
         file?: AuditFileConfig;
     };
+    /**
+     * Workflow runs (`_workflows_`). Indexes are always ensured in the
+     * background; retention is opt-in and only prunes **finished** runs.
+     */
+    workflows?: {
+        /**
+         * How long finished runs are kept, as a MongoDB TTL index on `completedAt`
+         * (runs still running, paused or failed keep no `completedAt` and are never
+         * pruned). Duration string: `'30d'`, `'90d'`.
+         * `false` → explicitly disabled. Omitted → untouched.
+         */
+        retention?: string | false;
+    };
     routes?: {
         prefix?: string;
     },

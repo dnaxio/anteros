@@ -3,6 +3,7 @@ import { cfg } from "../server/config"
 import path from "path"
 import fs from "fs/promises"
 import type { McpTool, McpResource } from "../types/mcp"
+import { importDefinition } from "./load"
 
 /**
  * Load MCP tools & resources from each tenant's `mcp/` folder:
@@ -26,7 +27,7 @@ async function syncMcpTools() {
             if (await fs.exists(TOOLS_PATH)) {
                 const toolsGlob = new Glob(path.join(TOOLS_PATH, '**/*.tool.ts'))
                 for await (let file of toolsGlob.scan('.')) {
-                    let module = await import(file)
+                    let module = await importDefinition(file, 'MCP tool')
                     if (module?.default?._isMcpTool_ && module?.default?.enabled !== false) {
                         tools.push({ ...module?.default, _tenant_: tenant.id })
                     }
@@ -38,7 +39,7 @@ async function syncMcpTools() {
             if (await fs.exists(RESOURCES_PATH)) {
                 const resourcesGlob = new Glob(path.join(RESOURCES_PATH, '**/*.resource.ts'))
                 for await (let file of resourcesGlob.scan('.')) {
-                    let module = await import(file)
+                    let module = await importDefinition(file, 'MCP resource')
                     if (module?.default?._isMcpResource_ && module?.default?.enabled !== false) {
                         resources.push({ ...module?.default, _tenant_: tenant.id })
                     }

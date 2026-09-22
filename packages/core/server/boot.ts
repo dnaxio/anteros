@@ -14,6 +14,7 @@ import { syncFileCollections } from '../database/file'
 import { syncVars } from '../database/vars'
 import { startReplication, stopReplication } from '../database/replication'
 import { loadLifecycles, runBeforeBoot, runAfterBoot, runOnDestroy } from '../lib/lifecycle'
+import { workflowStats } from '../lib/workflow'
 
 import { loadRoutes } from '../lib/routes'
 import { runScripts } from '../lib/scripts'
@@ -22,6 +23,7 @@ import { loadServices } from '../lib/services'
 import { loadSockets } from '../lib/sockets'
 import { syncWorkflows } from '../lib/workflow'
 import { syncMcpTools } from '../lib/mcp'
+import { syncAgents, agentsStats } from '../lib/agents'
 import { loadTenantsMiddlewares } from '../lib/middleware'
 import crypto from 'node:crypto';
 import os from 'node:os';
@@ -87,6 +89,14 @@ function renderBanner(opts: {
     }
     box += `Replication: ${replicationInfo}`.gray.bold + '\n'
 
+    // Workflows loaded from `{tenant.dir}/workflows/**/*.workflow.ts`
+    const wf = workflowStats();
+    box += `Workflows: ${wf.total ? `${wf.total}`.green.bold + ` (${wf.tenants.join(', ')})`.gray : 'none'.gray}\n`.gray.bold
+
+    // Agents loaded from `{tenant.dir}/agents/**/*.agent.ts`
+    const ag = agentsStats();
+    box += `Agents: ${ag.total ? `${ag.total}`.green.bold + ` (${ag.tenants.join(', ')})`.gray : 'none'.gray}\n`.gray.bold
+
     // Only shown when something is disabled — the default banner stays compact
     if (off.length) {
         box += `Mode: ${capabilitiesLabel(caps)}`.gray.bold + ` (${off.join(', ')} off)`.yellow + '\n';
@@ -144,6 +154,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
             if (caps.sockets) await loadSockets(); // load websocket handlers
             await syncWorkflows();
             await syncMcpTools(); // load MCP tools per tenant (mcp/**/*.tool.ts)
+            await syncAgents(); // load agents per tenant (agents/**/*.agent.ts)
             await loadTenantsMiddlewares();
             await loadRoutes(); // load routes
         }

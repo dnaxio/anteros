@@ -31,6 +31,15 @@ export type ReplicationDestination = {
     enabled?: boolean;
 };
 
+/**
+ * Framework (internal) collections that replication covers **by default**.
+ *
+ * The name is the collection name without its underscores: `_audit_` → `'audit'`,
+ * `_workflows_` → `'workflows'`, `_locks_` → `'locks'`, `_replication_` →
+ * `'replication'`, `_vars_` → `'vars'`.
+ */
+export type ReplicationMetaName = 'audit' | 'workflows' | 'locks' | 'replication' | 'vars';
+
 /** Per-tenant replication configuration (source → destination, one-way). */
 export type ReplicationConfig = {
     /** Enable/disable replication for this scope (default: true when `destinations` is non-empty). */
@@ -54,6 +63,20 @@ export type ReplicationConfig = {
      * backfill when the destination is already pre-loaded (e.g. via `mongorestore`).
      */
     initialSync?: ReplicationInitialSync;
+    /**
+     * Framework collections to **leave out** of replication. All of them are
+     * replicated by default (`audit`, `workflows`, `locks`, `replication`,
+     * `vars`) — excluding one is what you opt out of.
+     *
+     * ```ts
+     * replication: { exclude: ['locks', 'replication'] }
+     * ```
+     *
+     * ⚠️ `vars` covers *every* namespace of `_vars_`, including the ones that
+     * never declared `replication: { enabled: true }`; a namespace can still opt
+     * out with `replication: { enabled: false }`, but this list wins over it.
+     */
+    exclude?: ReplicationMetaName[];
     /** Destination databases (required). */
     destinations: ReplicationDestination[];
 };
@@ -98,6 +121,10 @@ export type ReplicationState = {
     lastRunAt: Date | null;
     lastError: string | null;
     stats: ReplicationStats;
+    /** PID of the process that ran this replication (`reusePort` / forked workers) */
+    pid?: number;
+    /** Hostname of that process — a PID is only meaningful on its own host */
+    hostname?: string;
     createdAt?: Date;
     updatedAt: Date;
 };

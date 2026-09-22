@@ -1,6 +1,20 @@
 
 import type { Tenant } from "../types/tenant";
 import type { MongoClientOptions, Db, ClientSession, UpdateOptions, UpdateFilter, Document, DeleteResult, ChangeStreamOptions, ChangeStream, ChangeStreamDocument, AnyBulkWriteOperation, BulkWriteOptions, BulkWriteResult, UpdateResult } from "mongodb";
+
+/**
+ * Is a process still running **on this host**? `EPERM` means it exists but belongs
+ * to another user — which still counts as alive.
+ */
+function isProcessAlive(pid: number): boolean {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (err: any) {
+        return err?.code === 'EPERM';
+    }
+}
 import { MongoClient, ObjectId, AggregationCursor } from "mongodb";
 import type { FindOptions, findOneOptions } from "../types/mongo";
 import type { FindCallOptions } from "../types/mongo";
@@ -28,6 +42,8 @@ import { io } from '../server/io';
 import type { Service } from '../types/service';
 import { createVars } from "./vars";
 import type { TenantVars } from "../types/vars";
+import { createAgents } from "../lib/agents";
+import type { TenantAgents } from "../types/agent";
 
 class MongoRest {
     client!: MongoClient;
@@ -1326,6 +1342,19 @@ class MongoRest {
     }
 
     /**
+     * Tenant-scoped agent registry — the agents declared in
+     * `{tenant.dir}/agents/**\/*.agent.ts` (`define.Agent`), instantiated at boot
+     * and bound to this tenant (their tools receive a tenant-scoped `rest`).
+     *
+     * @example
+     * const weather = rest.agents.get('weather');
+     * const { text } = await weather.generate('Weather in Paris?');
+     */
+    get agents(): TenantAgents {
+        return createAgents(this.tenant_id, this);
+    }
+
+    /**
      * Acquire a distributed lock for this tenant.
      * Uses MongoDB atomic findOneAndUpdate with upsert.
      * Only one node in a cluster can hold the lock at a time.
@@ -1335,39 +1364,71 @@ class MongoRest {
         const now = Date.now();
         const expiresAt = now + ttlMs;
         const id = `${this.tenant_id}:${name}`;
+        const hostname = os.hostname();
+        const col = this.db.collection('_locks_');
 
-        try {
-            const result = await this.db.collection('_locks_').findOneAndUpdate(
-                { _id: id as any, expiresAt: { $lt: now } },
-                { $set: { tid: this.tenant_id, name, acquiredAt: now, expiresAt } },
-                { upsert: true, returnDocument: 'after' }
+        // A lock is free when it expired, or when it is held by a process that is
+        // gone **on this host** (Bun `reusePort` / forked processes: a crashed
+        // worker must not block a run for the whole TTL). A remote owner cannot be
+        // probed — its TTL is the only guarantee.
+        const stale = (lock: any): boolean => {
+            if ((lock.expiresAt ?? 0) < now) return true;
+            if (lock.hostname === hostname && typeof lock.pid === 'number') {
+                if (lock.pid === process.pid) return false; // ours: not stale
+                return !isProcessAlive(lock.pid);
+            }
+            return false;
+        };
+
+        const claim = async (): Promise<boolean> => {
+            const existing: any = await col.findOne({ _id: id as any });
+
+            if (!existing) {
+                try {
+                    await col.insertOne({
+                        _id: id as any,
+                        tid: this.tenant_id,
+                        name,
+                        acquiredAt: now,
+                        expiresAt,
+                        pid: process.pid,
+                        hostname,
+                    } as any);
+                    return true;
+                } catch (err: any) {
+                    if (err?.code === 11000) return false; // another node won the race
+                    throw err;
+                }
+            }
+
+            if (!stale(existing)) return false;
+
+            // Compare-and-set on `expiresAt` (+ owner pid): another node may take it
+            // over in the same instant, only one of us matches
+            const res = await col.updateOne(
+                { _id: id as any, expiresAt: existing.expiresAt ?? null, pid: existing.pid ?? null },
+                { $set: { tid: this.tenant_id, name, acquiredAt: now, expiresAt, pid: process.pid, hostname } },
             );
-            if (!result) {
-                throw new AppError(`Lock '${name}' is already held by another node`, {
-                    code: 'LOCK_ACQUISITION_FAILED',
-                    status: 409
-                });
-            }
-        } catch (err: any) {
-            if (err instanceof AppError) throw err;
-            // E11000 duplicate key = another node holds a valid lock
-            if (err?.code === 11000) {
-                throw new AppError(`Lock '${name}' is already held by another node`, {
-                    code: 'LOCK_ACQUISITION_FAILED',
-                    status: 409
-                });
-            }
-            throw err;
+            return (res.matchedCount ?? 0) > 0;
+        };
+
+        if (!(await claim())) {
+            throw new AppError(`Lock '${name}' is already held by another node`, {
+                code: 'LOCK_ACQUISITION_FAILED',
+                status: 409,
+            });
         }
     }
 
     /**
-     * Release a distributed lock.
+     * Release a distributed lock — only when **we** own it: another node may have
+     * taken it over after our process was considered gone.
      */
     async unlock(name: string): Promise<void> {
         await this.db.collection('_locks_').deleteOne({
             tid: this.tenant_id,
             name,
+            $or: [{ pid: process.pid }, { pid: { $exists: false } }],
         });
     }
 

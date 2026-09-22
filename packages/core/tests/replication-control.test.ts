@@ -102,7 +102,7 @@ describe("replication seed", () => {
         const preMarker = `pre-${crypto.randomUUID()}`;
         await rest.insertOne("orders", { title: preMarker });
 
-        const res = await seedReplication(TEST_TENANT, "latest");
+        const res = await seedReplication(TEST_TENANT, "latest", { collection: "orders" });
         expect(res.seeded).toBe(1);
 
         await replicateTenant(TEST_TENANT);
@@ -118,7 +118,7 @@ describe("replication seed", () => {
 
     it("seeds from an explicit date", async () => {
         await resetReplication(TEST_TENANT);
-        const res = await seedReplication(TEST_TENANT, "2020-01-01T00:00:00Z");
+        const res = await seedReplication(TEST_TENANT, "2020-01-01T00:00:00Z", { collection: "orders" });
         expect(res.seeded).toBe(1);
 
         const state = await getReplicationState(TEST_TENANT, DEST_ID, "orders");

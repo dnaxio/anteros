@@ -1,7 +1,7 @@
 import type { Db } from "mongodb";
 import { cfg } from "../server/config";
 import type { Tenant } from "../types/tenant";
-import { parseDuration } from "../utils/func";
+import { syncTtlRetention, type RetentionResult } from "./ttl";
 
 /**
  * Collection holding the audit trail — one document per database operation
@@ -34,8 +34,6 @@ const AUDIT_INDEXES: { name: string; key: Record<string, 1 | -1> }[] = [
     /** Correlate every operation of a request (`trace.id`) */
     { name: '_audit_trace_', key: { 'trace.id': 1 } },
 ]
-
-type RetentionResult = 'applied' | 'dropped' | 'unchanged' | 'skipped'
 
 /**
  * One-off migration: `_activities_` → `_audit_`.
@@ -90,67 +88,19 @@ async function ensureAuditIndexes(db: Db): Promise<string[]> {
 }
 
 /**
- * Declarative retention (MongoDB TTL on `ts`):
+ * Declarative retention (MongoDB TTL on `ts`) — shared TTL helper:
  * - duration string (`'90d'`, `'24h'`) → ensure the TTL index with that expiry
  * - `false`                            → explicitly disabled: drop the TTL index
  * - omitted                            → untouched (entries are kept forever)
  */
 async function syncAuditRetention(db: Db, retention?: string | false): Promise<RetentionResult> {
-    if (retention === undefined) return 'skipped'
-
-    const col: any = db.collection(AUDIT_COLLECTION)
-
-    try {
-        const existing = (await col.listIndexes().toArray())
-            .find((index: any) => index.name === AUDIT_TTL_INDEX)
-
-        if (retention === false) {
-            if (!existing) return 'unchanged'
-            await col.dropIndex(AUDIT_TTL_INDEX)
-            console.log(`🧹 Audit retention disabled — ${AUDIT_TTL_INDEX} dropped`)
-            return 'dropped'
-        }
-
-        const parsed = parseDuration(retention)
-        if (parsed === null) {
-            console.error(`Invalid audit retention '${retention}' — expected a duration like '90d' or '24h'`)
-            return 'skipped'
-        }
-        const expireAfterSeconds = Math.round(parsed / 1000)
-
-        if (!existing) {
-            await col.createIndex({ ts: 1 }, {
-                name: AUDIT_TTL_INDEX,
-                expireAfterSeconds,
-                background: true,
-            })
-            console.log(`🧹 Audit retention enabled — entries expire after ${retention}`)
-            return 'applied'
-        }
-
-        if (existing.expireAfterSeconds === expireAfterSeconds) return 'unchanged'
-
-        // `expireAfterSeconds` cannot be updated through createIndex: collMod does it
-        // instantly, dropping/recreating the index is only a fallback for older servers
-        try {
-            await db.command({
-                collMod: AUDIT_COLLECTION,
-                index: { name: AUDIT_TTL_INDEX, expireAfterSeconds },
-            })
-        } catch {
-            await col.dropIndex(AUDIT_TTL_INDEX)
-            await col.createIndex({ ts: 1 }, {
-                name: AUDIT_TTL_INDEX,
-                expireAfterSeconds,
-                background: true,
-            })
-        }
-        console.log(`🧹 Audit retention updated — entries expire after ${retention}`)
-        return 'applied'
-    } catch (err: any) {
-        console.error(`Audit retention failed (${retention})`, err?.message)
-        return 'skipped'
-    }
+    return syncTtlRetention(db, {
+        collection: AUDIT_COLLECTION,
+        index: AUDIT_TTL_INDEX,
+        field: 'ts',
+        retention,
+        label: 'Audit',
+    })
 }
 
 /**
