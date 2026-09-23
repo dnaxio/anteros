@@ -34,7 +34,7 @@ afterAll(async () => {
 });
 
 const post = (action: string, body: any) =>
-    fetch(`${url}/vars/${TENANT}/${action}`, {
+    fetch(`${url}/api/${TENANT}/vars/${action}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

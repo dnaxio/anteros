@@ -4,8 +4,9 @@ import { define } from "./lib/define";
 import { bootApp } from "./server/boot";
 import { useRest } from "./database/rest";
 import { AppError } from "./lib/error";
-import { Agent, InMemoryAgentMemory } from "./lib/agent";
-import { createAgents } from "./lib/agents";
+import { Agent } from "./lib/agent";
+import { agents } from "./lib/agents";
+import { endpoints } from "./lib/endpoints";
 import * as v from "joi";
 import utils from "./utils";
 
@@ -33,14 +34,6 @@ const app = {
     boot: bootApp
 }
 
-// Agents — LLM runtime (`define.Agent`, `rest.agents`)
-const agents = {
-    use: createAgents,
-    memory: {
-        InMemory: InMemoryAgentMemory,
-    },
-}
-
 export {
     define,
     app,
@@ -53,4 +46,5 @@ export {
     logger,
     Agent,
     agents,
+    endpoints,
 }

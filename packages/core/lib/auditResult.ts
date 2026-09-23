@@ -107,6 +107,19 @@ function summarizeAuditResult(action: string, result: any): any {
             return typeof result === 'string' ? result : null
         case 'dropIndexes':
             return result?.nIndexesWas !== undefined ? { nIndexesWas: result.nIndexesWas } : null
+        case 'agent.generate':
+        case 'agent.stream':
+        case 'agent.object':
+            // The model's answer is never stored — only the envelope that proves the
+            // run happened and what it cost (nothing the caller did not already send).
+            return result ? {
+                finishReason: result.finishReason ?? null,
+                usage: result.usage ?? null,
+                tools: Array.isArray(result.toolCalls)
+                    ? result.toolCalls.map((call: any) => call?.name).filter(Boolean)
+                    : [],
+                steps: Array.isArray(result.steps) ? result.steps.length : null,
+            } : null
         default:
             // Anything unknown: a document must never be stored.
             return null

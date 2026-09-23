@@ -5,6 +5,8 @@ import fs from "fs/promises"
 import type { Script } from "../types/scripts"
 import type { Tenant } from "../types/tenant"
 import { useRest } from "../database/rest"
+import { createAgents } from "./agents"
+import { createApi } from "./api"
 import { asyncContextStorage, requestCtxStorage } from "./asyncContextStorage"
 
 
@@ -95,9 +97,12 @@ async function runScripts() {
         await asyncContextStorage.run(new Map(), async () => {
             requestCtxStorage.set('trace', { id: crypto.randomUUID() })
             requestCtxStorage.set('internal', true)
+            const rest = new useRest({ tenant_id: tenant.id })
             await script.exec({
-                rest: new useRest({ tenant_id: tenant.id }),
+                rest,
                 tenant,
+                agents: createAgents(tenant.id, rest),
+                api: createApi(rest),
             })
         })
     }

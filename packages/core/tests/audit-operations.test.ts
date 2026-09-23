@@ -145,7 +145,7 @@ describe("audit — services", () => {
         const before = await internalRest.db.collection(AUDIT_COLLECTION)
             .countDocuments({ "operation.action": "runService" });
 
-        const res = await fetch(`${url}/services/${TENANT}/${SERVICE}/charge`, {
+        const res = await fetch(`${url}/api/${TENANT}/services/${SERVICE}/charge`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ data: { amount: 7 } }),

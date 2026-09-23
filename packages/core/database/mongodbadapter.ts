@@ -43,7 +43,7 @@ import type { Service } from '../types/service';
 import { createVars } from "./vars";
 import type { TenantVars } from "../types/vars";
 import { createAgents } from "../lib/agents";
-import type { TenantAgents } from "../types/agent";
+import { createApi } from "../lib/api";
 
 class MongoRest {
     client!: MongoClient;
@@ -177,6 +177,15 @@ class MongoRest {
 
         // No schema or nothing to sanitize → pass the raw data through
         return options.data;
+    }
+
+    /**
+     * Context handed to a collection hook. `agents` is the tenant-scoped registry,
+     * bound to `this` — so a hook runs an agent exactly like it reads a collection:
+     * `await agents.get('support')?.generate(...)`.
+     */
+    #hookCtx(action: any, meta: any) {
+        return { rest: this, io, action, meta, agents: createAgents(this.tenant_id, this), api: createApi(this) };
     }
 
     async #logActivity(data: {
@@ -393,7 +402,7 @@ class MongoRest {
                 pipeline = func.toBson(pipeline, { col })
                 const meta: any = { action, collection, pipeline }
                 if (col.hooks?.beforeOperation) {
-                    await col.hooks.beforeOperation({ rest: this, io, action, meta })
+                    await col.hooks.beforeOperation(this.#hookCtx(action, meta))
                 }
 
                 let result = await this.db.collection(collection).aggregate(pipeline, {
@@ -403,7 +412,7 @@ class MongoRest {
                 result = func.toJson(result)
                 meta.result = result
 
-                await col.hooks?.afterOperation?.({ rest: this, io, action, meta })
+                await col.hooks?.afterOperation?.(this.#hookCtx(action, meta))
 
                 return result as any[]
             } catch (err: any) {
@@ -601,7 +610,7 @@ class MongoRest {
 
                     const meta: any = { action, collection, params, options }
                     if (col.hooks?.beforeOperation) {
-                        await col.hooks.beforeOperation({ rest: this, io, action, meta })
+                        await col.hooks.beforeOperation(this.#hookCtx(action, meta))
                     }
 
                     let result = await this.db.collection(collection).aggregate(pipeline, {
@@ -612,7 +621,7 @@ class MongoRest {
                     meta.result = result
 
                     if (col.hooks?.afterOperation) {
-                        await col.hooks.afterOperation({ rest: this, io, action, meta })
+                        await col.hooks.afterOperation(this.#hookCtx(action, meta))
                     }
 
                     return result as any[]
@@ -646,7 +655,7 @@ class MongoRest {
 
                 const meta: any = { action, collection, params, id: _id }
                 if (col.hooks?.beforeOperation) {
-                    await col.hooks.beforeOperation({ rest: this, io, action, meta })
+                    await col.hooks.beforeOperation(this.#hookCtx(action, meta))
                 }
 
                 let result = (await this.db.collection(collection).aggregate(pipeline, {
@@ -657,7 +666,7 @@ class MongoRest {
                 meta.result = result
 
                 if (col.hooks?.afterOperation) {
-                    await col.hooks.afterOperation({ rest: this, io, action, meta })
+                    await col.hooks.afterOperation(this.#hookCtx(action, meta))
                 }
 
                 return result
@@ -681,7 +690,7 @@ class MongoRest {
 
             const meta: any = { action, collection, data }
             if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({ rest: this, io, action, meta })
+                await col.hooks.beforeOperation(this.#hookCtx(action, meta))
             }
             // Validate AFTER hooks (they may fill required fields or apply Joi defaults)
             meta.data = this._validate({ collection, action: action, data: meta.data })
@@ -697,7 +706,7 @@ class MongoRest {
             const result: T & { _id: string } = { ...func.toJson(meta.data as any), _id: (inserted.insertedId as ObjectId).toHexString() }
             meta.result = result
             if (col?.hooks?.afterOperation) {
-                await col.hooks.afterOperation({ rest: this, io, action, meta })
+                await col.hooks.afterOperation(this.#hookCtx(action, meta))
             }
 
             return result
@@ -724,7 +733,7 @@ class MongoRest {
 
             const meta: any = { action, collection, data: dataInput }
             if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({ rest: this, io, action, meta })
+                await col.hooks.beforeOperation(this.#hookCtx(action, meta))
             }
             // Validate AFTER hooks (they may fill required fields or apply Joi defaults)
             meta.data = this._validate({ collection, action: action, data: meta.data })
@@ -743,7 +752,7 @@ class MongoRest {
             meta.result = result
 
             if (col.hooks?.afterOperation) {
-                await col.hooks.afterOperation({ rest: this, io, action, meta })
+                await col.hooks.afterOperation(this.#hookCtx(action, meta))
             }
 
             return result as (T & { _id: string })[]
@@ -770,7 +779,7 @@ class MongoRest {
 
             const meta: any = { action, collection, update, id: _id }
             if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({ rest: this, io, action, meta })
+                await col.hooks.beforeOperation(this.#hookCtx(action, meta))
             }
 
             const data = await this.db.collection(collection).findOneAndUpdate(
@@ -783,7 +792,7 @@ class MongoRest {
             meta.result = result
 
             if (col.hooks?.afterOperation) {
-                await col.hooks.afterOperation({ rest: this, io, action, meta })
+                await col.hooks.afterOperation(this.#hookCtx(action, meta))
             }
 
             return result
@@ -837,7 +846,7 @@ class MongoRest {
 
             const meta: any = { action, collection, filter, update }
             if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({ rest: this, io, action, meta })
+                await col.hooks.beforeOperation(this.#hookCtx(action, meta))
             }
 
             const data = await this.db.collection(collection).findOneAndUpdate(
@@ -853,7 +862,7 @@ class MongoRest {
             meta.result = result
 
             if (col.hooks?.afterOperation) {
-                await col.hooks.afterOperation({ rest: this, io, action, meta })
+                await col.hooks.afterOperation(this.#hookCtx(action, meta))
             }
 
             return result as Document | null
@@ -879,7 +888,7 @@ class MongoRest {
 
             const meta: any = { action, collection, update, ids: _ids }
             if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({ rest: this, io, action, meta })
+                await col.hooks.beforeOperation(this.#hookCtx(action, meta))
             }
 
             const result = await this.db.collection(collection).updateMany(
@@ -890,7 +899,7 @@ class MongoRest {
             meta.result = result
 
             if (col.hooks?.afterOperation) {
-                await col.hooks.afterOperation({ rest: this, io, action, meta })
+                await col.hooks.afterOperation(this.#hookCtx(action, meta))
             }
 
             return result as UpdateResult
@@ -907,7 +916,7 @@ class MongoRest {
 
             const meta: any = { action, collection, id: _id }
             if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({ rest: this, io, action, meta })
+                await col.hooks.beforeOperation(this.#hookCtx(action, meta))
             }
 
             let result = await this.db.collection(collection).findOneAndDelete(
@@ -918,7 +927,7 @@ class MongoRest {
             meta.result = result
 
             if (col.hooks?.afterOperation) {
-                await col.hooks.afterOperation({ rest: this, io, action, meta })
+                await col.hooks.afterOperation(this.#hookCtx(action, meta))
             }
 
             return result
@@ -936,7 +945,7 @@ class MongoRest {
 
             const meta: any = { action, collection, ids: _ids }
             if (col.hooks?.beforeOperation) {
-                await col.hooks.beforeOperation({ rest: this, io, action, meta })
+                await col.hooks.beforeOperation(this.#hookCtx(action, meta))
             }
 
             let result: DeleteResult = await this.db.collection(collection).deleteMany(
@@ -947,7 +956,7 @@ class MongoRest {
             meta.result = result
 
             if (col.hooks?.afterOperation) {
-                await col.hooks.afterOperation({ rest: this, io, action, meta })
+                await col.hooks.afterOperation(this.#hookCtx(action, meta))
             }
 
             return result
@@ -1110,6 +1119,8 @@ class MongoRest {
             return await col.actions?.[action]?.({
                 rest: this,
                 io,
+                agents: createAgents(this.tenant_id, this),
+                api: createApi(this),
                 data,
                 error: fn.error,
                 jwt: func.jwt,
@@ -1141,6 +1152,8 @@ class MongoRest {
                 data,
                 error: fn.error,
                 io,
+                agents: createAgents(this.tenant_id, this),
+                api: createApi(this),
                 jwt: func.jwt,
                 token: token ?? { value: null, decoded: null, provided: false, expired: false },
                 rest: this,
@@ -1339,19 +1352,6 @@ class MongoRest {
      */
     get vars(): TenantVars {
         return createVars(this.tenant_id);
-    }
-
-    /**
-     * Tenant-scoped agent registry — the agents declared in
-     * `{tenant.dir}/agents/**\/*.agent.ts` (`define.Agent`), instantiated at boot
-     * and bound to this tenant (their tools receive a tenant-scoped `rest`).
-     *
-     * @example
-     * const weather = rest.agents.get('weather');
-     * const { text } = await weather.generate('Weather in Paris?');
-     */
-    get agents(): TenantAgents {
-        return createAgents(this.tenant_id, this);
     }
 
     /**

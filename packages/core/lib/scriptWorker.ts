@@ -3,6 +3,8 @@ import { useRest } from "../database/rest";
 import { syncTenants } from "../database/tenant";
 import { syncCollections } from "../database/collection";
 import { syncFileCollections } from "../database/file";
+import { syncAgents, createAgents } from "./agents";
+import { createApi } from "./api";
 import { asyncContextStorage, requestCtxStorage } from "./asyncContextStorage";
 
 // ─── Heavy-script worker entrypoint ─────────────────────────────────────────
@@ -42,6 +44,7 @@ async function main() {
         await syncTenants();
         await syncCollections();
         await syncFileCollections();
+        await syncAgents(); // a heavy script gets the same `agents` registry as any other context
     } catch (err: any) {
         console.error('[script-worker] failed to bootstrap context:', err?.message);
         process.exit(1);
@@ -62,7 +65,7 @@ async function main() {
         await asyncContextStorage.run(new Map(), async () => {
             requestCtxStorage.set('trace', { id: crypto.randomUUID() });
             requestCtxStorage.set('internal', true);
-            await script.exec({ rest, progress, tenant });
+            await script.exec({ rest, progress, tenant, agents: createAgents(tenant.id, rest), api: createApi(rest) });
         });
         process.send?.({ type: 'done' });
         process.exit(0);

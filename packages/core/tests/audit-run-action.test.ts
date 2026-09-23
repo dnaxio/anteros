@@ -81,7 +81,7 @@ describe("audit — custom actions (runAction)", () => {
 
     it("audits the HTTP route as well, and marks it as not internal", async () => {
         const since = new Date();
-        const res = await fetch(`${url}/api/${TENANT}/${SLUG}/greet`, {
+        const res = await fetch(`${url}/api/${TENANT}/collections/${SLUG}/greet`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ data: { name: "Grace" } }),

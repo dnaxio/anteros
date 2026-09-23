@@ -3,6 +3,8 @@ import { cfg } from "../server/config"
 import path from "path"
 import fs from "fs/promises"
 import { useRest } from "../database/rest"
+import { createAgents } from "../lib/agents"
+import { createApi } from "../lib/api"
 import { io } from "../server/io"
 import type { WebSocketHandler } from "../types/websocket"
 
@@ -26,7 +28,7 @@ async function loadSockets() {
                     const rest = new useRest({ tenant_id: tenant.id })
 
                     io.on('connection', (socket) => {
-                        handler.exec({ io, rest, socket })
+                        handler.exec({ io, rest, socket, agents: createAgents(tenant.id, rest), api: createApi(rest) })
                     })
 
                     console.log(`[socket] ${tenant.id}/${path.basename(file, '.ws.ts')} loaded`)

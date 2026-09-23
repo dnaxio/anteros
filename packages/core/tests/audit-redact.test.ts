@@ -77,10 +77,36 @@ afterAll(async () => {
     delete (cfg.server as any).audit;
 });
 
+// The URL shape, pinned here — every surface moved to `/api/:tenant_id/<family>/…`
+describe("API layout", () => {
+    it("serves nothing on a pre-refactor path", async () => {
+        // `/api/<tenant>/<collection>/<action>` used to be a collection action. No alias
+        // is mounted, so it is a plain 404 — never a silent misroute on another handler.
+        const legacy = await fetch(`${url}/api/${TENANT}/${SLUG}/find`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ $limit: 1 }),
+        });
+        expect(legacy.status).toBe(404);
+
+        // Same for a surface that moved with its own family
+        expect((await fetch(`${url}/services/${TENANT}/billing/charge`, { method: "POST" })).status).toBe(404);
+        expect((await fetch(`${url}/upload/${TENANT}/${SLUG}`, { method: "POST" })).status).toBe(404);
+
+        // …and the new shape is what answers
+        const current = await fetch(`${url}/api/${TENANT}/collections/${SLUG}/find`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ $limit: 1 }),
+        });
+        expect(current.status).toBe(200);
+    });
+});
+
 describe("audit redaction — defaults", () => {
     it("masks the password of a login payload (success path)", async () => {
         const since = new Date();
-        const res = await fetch(`${url}/api/${TENANT}/${SLUG}/login`, {
+        const res = await fetch(`${url}/api/${TENANT}/collections/${SLUG}/login`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ payload: { email: "ada@example.com", password: "SuperSecret123!" } }),
@@ -95,7 +121,7 @@ describe("audit redaction — defaults", () => {
 
     it("masks the password of a login payload (failure path)", async () => {
         const since = new Date();
-        const res = await fetch(`${url}/api/${TENANT}/${SLUG}/login`, {
+        const res = await fetch(`${url}/api/${TENANT}/collections/${SLUG}/login`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ payload: { email: "bad", password: "WrongOne!" } }),
@@ -156,7 +182,7 @@ describe("audit redaction — defaults", () => {
 
     it("redacts the request headers and query string", async () => {
         const since = new Date();
-        const res = await fetch(`${url}/api/${TENANT}/${SLUG}/find?token=query-secret&page=2`, {
+        const res = await fetch(`${url}/api/${TENANT}/collections/${SLUG}/find?token=query-secret&page=2`, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",

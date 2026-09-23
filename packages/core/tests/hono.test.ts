@@ -182,16 +182,19 @@ describe("rate limiting (in-memory)", () => {
     it("login limiter uses a distinct counter (not blocked by global)", async () => {
         cfg.server.rateLimit = { enabled: true, windowMs: 60_000, max: 100, login: { max: 2 } };
         const app = createApp();
-        app.post("/api/x/login", (c) => c.json({ ok: true }));
         app.get("/echo", (c) => c.json({ ok: true }));
         const server = Bun.serve({ port: 0, fetch: app.fetch });
         const url = `${base(server)}`;
 
+        // The login limiter has its own bucket: the third call is refused even though
+        // the global limit (100) is nowhere near. What the framework answers before
+        // that (unknown tenant here) is not the point.
         const statuses: number[] = [];
         for (let i = 0; i < 3; i++) {
-            statuses.push((await fetch(`${url}/api/x/login`, { method: "POST" })).status);
+            statuses.push((await fetch(`${url}/api/x/collections/users/login`, { method: "POST" })).status);
         }
-        expect(statuses).toEqual([200, 200, 429]);
+        expect(statuses.slice(0, 2).some((status) => status === 429)).toBe(false);
+        expect(statuses[2]).toBe(429);
 
         // same IP on a normal route → still allowed (distinct key)
         expect((await fetch(`${url}/echo`)).status).toBe(200);

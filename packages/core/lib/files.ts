@@ -5,6 +5,7 @@ import { toBson } from "../utils/func";
 import { useRest } from "../database/rest";
 import { cfg } from "../server/config";
 import { AppError } from "./error";
+import { endpoints } from "./endpoints";
 import { S3Client } from "bun";
 import type { FileCollection } from "../types/file";
 import path from "path";
@@ -360,7 +361,7 @@ export async function handleUpload(options: UploadOptions): Promise<FileResult> 
   const { path: filepath, size } = await storage.save(tenant_id, collection, file, { id: _id, mimetype, subpath });
 
   // Update MongoDB with actual file info
-  const url = `/files/${tenant_id}/${collection}/${filename}`;
+  const url = endpoints.file(tenant_id, collection, filename);
   try {
     const rest = new useRest({ tenant_id, internal: true, useHook: false, useCustomApi: false });
     await rest.db.collection(collection).updateOne(

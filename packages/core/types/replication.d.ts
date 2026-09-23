@@ -36,9 +36,11 @@ export type ReplicationDestination = {
  *
  * The name is the collection name without its underscores: `_audit_` → `'audit'`,
  * `_workflows_` → `'workflows'`, `_locks_` → `'locks'`, `_replication_` →
- * `'replication'`, `_vars_` → `'vars'`.
+ * `'replication'`, `_vars_` → `'vars'`, `_memories_` → `'memory'`.
+ *
+ * Every one of them is left out with `replication.exclude: ['audit', …]`.
  */
-export type ReplicationMetaName = 'audit' | 'workflows' | 'locks' | 'replication' | 'vars';
+export type ReplicationMetaName = 'audit' | 'workflows' | 'locks' | 'replication' | 'vars' | 'memory';
 
 /** Per-tenant replication configuration (source → destination, one-way). */
 export type ReplicationConfig = {

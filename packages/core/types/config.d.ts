@@ -201,4 +201,6 @@ export type Config = ServerConfig & {
     mcpResources?: McpResource[]
     vars?: VarDefinition[]
     agents?: AgentDefinition[]
+    /** Mongo collections used as agent memory — published by `syncAgents()` (see the Memory page). */
+    agentMemories?: Array<{ _tenant_: string; collection: string }>
 }

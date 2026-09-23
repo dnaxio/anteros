@@ -1,4 +1,6 @@
 import type { useRest } from "../database/rest";
+import type { TenantAgents } from "./agent";
+import type { Api } from "../lib/api";
 
 export type WorkflowStepHandler<TData = any> = (ctx: {
   data: TData;
@@ -6,6 +8,10 @@ export type WorkflowStepHandler<TData = any> = (ctx: {
   input?: any;
   /** Tenant-scoped client — `rest.find`, `rest.insertOne`, `rest.workflow`, `rest.vars`… */
   rest: InstanceType<typeof useRest>;
+  /** Tenant-scoped LLM registry — `agents.get('support')`, bound to `rest`. */
+  agents: TenantAgents;
+  /** The in-process facade — `api.collection("orders")`, `api.service("analytics")`, `api.vars`, `api.files`, `api.agent(id)`. */
+  api: Api;
   error: any;
   jwt: any;
   /** Aborted when the step exceeds its `timeout` — forward it to your own IO */
@@ -19,6 +25,9 @@ export type WorkflowCompensationHandler<TData = any> = (ctx: {
   /** The error that caused the failure */
   stepError: { message: string; code?: string };
   rest: InstanceType<typeof useRest>;
+  agents: TenantAgents;
+  /** The in-process facade — `api.collection("orders")`, `api.service("analytics")`, `api.vars`, `api.files`, `api.agent(id)`. */
+  api: Api;
   error: any;
   jwt: any;
   signal?: AbortSignal;

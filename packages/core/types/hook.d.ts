@@ -1,6 +1,8 @@
 import type { MongoRest } from "../database/mongodbadapter";
 import type { Server as SocketIO } from "socket.io";
 import type { ActionsApiList } from "./api";
+import type { TenantAgents } from "./agent";
+import type { Api } from "../lib/api";
 
 export type HookMeta = {
     action: ActionsApiList;
@@ -19,6 +21,10 @@ export type HookMeta = {
 /** Context passed to a collection hook (`define.Hook`). */
 export type HookContext = {
     rest: MongoRest;
+    /** Tenant-scoped LLM registry — `agents.get('support')`, bound to `rest`. */
+    agents: TenantAgents;
+    /** The in-process facade — `api.collection("orders")`, `api.service("analytics")`, `api.vars`, `api.files`, `api.agent(id)`. */
+    api: Api;
     action: ActionsApiList;
     meta: HookMeta;
     io: SocketIO;

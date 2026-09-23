@@ -11,8 +11,10 @@ import { Redis } from "ioredis"
 import { cfg } from "./config"
 import { rateLimit, createRedisStore, createMemoryStore, type RateLimitStore } from "./security"
 import { initializeRoutes } from "./routes";
+import { patterns } from "../lib/endpoints";
 import { asyncContextStorage, requestCtxStorage } from "../lib/asyncContextStorage";
 import { initializeApi } from "./api";
+import { initializeAgents } from "./agents";
 import { initializeMcp } from "./mcp";
 import { getGlobalMiddlewares } from "../lib/middleware";
 import { jwt } from "../utils/func";
@@ -326,8 +328,8 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
             keyGenerator: keyByClientIp(''),
         }));
 
-        // stricter limit for login endpoints
-        app.use('/api/*/login', rateLimit({
+        // stricter limit for login endpoints — the login is a collection action
+        app.use(patterns.login, rateLimit({
             windowMs: cfg.server.rateLimit?.login?.windowMs ?? 60_000,
             max: cfg.server.rateLimit?.login?.max ?? 10,
             store,
@@ -399,7 +401,10 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
     // initialize api
     initializeApi(app);
 
-    // initialize MCP (tools served at /mcp/:tenant_id)
+    // initialize the agents API (/api/:tenant_id/agents/:agent/:action)
+    initializeAgents(app);
+
+    // initialize MCP (tools served at /api/:tenant_id/mcp)
     initializeMcp(app);
 
 

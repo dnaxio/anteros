@@ -5,6 +5,7 @@ import { formatConfig, cfg } from "../server/config";
 import { syncTenants } from "../database/tenant";
 import { getFileCollection } from "../database/file";
 import { useRest } from "../database/rest";
+import { createApi } from "../lib/api";
 
 const TENANT = "up-test";
 const DB = "mongodb://localhost:27017/_DB_UP_TEST";
@@ -75,7 +76,7 @@ describe("upload — audit trail", () => {
         form.append("file", pngFile("audited.png"));
         form.append("label", "audited");
 
-        const res = await fetch(`${url}/upload/${TENANT}/${SLUG}`, { method: "POST", body: form });
+        const res = await fetch(`${url}/api/${TENANT}/upload/${SLUG}`, { method: "POST", body: form });
         expect(res.status).toBe(200);
         const body: any = await res.json();
 
@@ -101,10 +102,10 @@ describe("upload — audit trail", () => {
         const form = new FormData();
         form.append("file", pngFile("deleted.png"));
         const uploaded: any = await (
-            await fetch(`${url}/upload/${TENANT}/${SLUG}`, { method: "POST", body: form })
+            await fetch(`${url}/api/${TENANT}/upload/${SLUG}`, { method: "POST", body: form })
         ).json();
 
-        const res = await fetch(`${url}/files/${TENANT}/${SLUG}/${uploaded._id}`, { method: "DELETE" });
+        const res = await fetch(`${url}/api/${TENANT}/files/${SLUG}/${uploaded._id}`, { method: "DELETE" });
         expect(res.status).toBe(200);
 
         const logged: any = await auditEntry("deleteFile");
@@ -122,7 +123,7 @@ describe("upload — single file (unchanged contract)", () => {
         form.append("file", pngFile("one.png"));
         form.append("label", "single");
 
-        const res = await fetch(`${url}/upload/${TENANT}/${SLUG}`, { method: "POST", body: form });
+        const res = await fetch(`${url}/api/${TENANT}/upload/${SLUG}`, { method: "POST", body: form });
         expect(res.status).toBe(200);
 
         const body: any = await res.json();
@@ -130,7 +131,7 @@ describe("upload — single file (unchanged contract)", () => {
         expect(body._id).toBeString();
         expect(body._file.name).toBe("one.png");
         expect(body._file.mimetype).toBe("image/png");
-        expect(body._file.url).toContain(`/files/${TENANT}/${SLUG}/`);
+        expect(body._file.url).toContain(`/api/${TENANT}/files/${SLUG}/`);
         expect(body.createdAt).toBeString();
         expect(body.updatedAt).toBeString();
 
@@ -148,7 +149,7 @@ describe("upload — single file (unchanged contract)", () => {
         const form = new FormData();
         form.append("upload", pngFile("alt.png"));
 
-        const res = await fetch(`${url}/upload/${TENANT}/${SLUG}`, { method: "POST", body: form });
+        const res = await fetch(`${url}/api/${TENANT}/upload/${SLUG}`, { method: "POST", body: form });
         expect(res.status).toBe(200);
         const body: any = await res.json();
         expect(Array.isArray(body)).toBe(false);
@@ -164,7 +165,7 @@ describe("upload — multiple files", () => {
         form.append("file", pngFile("c.png"));
         form.append("label", "batch");
 
-        const res = await fetch(`${url}/upload/${TENANT}/${SLUG}`, { method: "POST", body: form });
+        const res = await fetch(`${url}/api/${TENANT}/upload/${SLUG}`, { method: "POST", body: form });
         expect(res.status).toBe(200);
 
         const body: any = await res.json();
@@ -178,7 +179,7 @@ describe("upload — multiple files", () => {
         for (const id of ids) {
             const doc: any = await rest.findOne(SLUG, id);
             expect(doc.label).toBe("batch");
-            expect(doc._file.url).toContain(`/files/${TENANT}/${SLUG}/`);
+            expect(doc._file.url).toContain(`/api/${TENANT}/files/${SLUG}/`);
             // Uploads carry timestamps (required by the replication cursor)
             expect(doc.createdAt).toBeString();
             expect(doc.updatedAt).toBeString();
@@ -189,7 +190,7 @@ describe("upload — multiple files", () => {
         const form = new FormData();
         form.append("label", "nofile");
 
-        const res = await fetch(`${url}/upload/${TENANT}/${SLUG}`, { method: "POST", body: form });
+        const res = await fetch(`${url}/api/${TENANT}/upload/${SLUG}`, { method: "POST", body: form });
         expect(res.status).toBe(400);
         const body: any = await res.json();
         expect(body.code).toBe("FILE_REQUIRED");
@@ -200,7 +201,7 @@ describe("upload — multiple files", () => {
         form.append("file", pngFile("ok.png"));
         form.append("file", new File([Buffer.from("nope")], "bad.exe", { type: "application/x-msdownload" }));
 
-        const res = await fetch(`${url}/upload/${TENANT}/${SLUG}`, { method: "POST", body: form });
+        const res = await fetch(`${url}/api/${TENANT}/upload/${SLUG}`, { method: "POST", body: form });
         expect(res.status).toBe(400);
         const body: any = await res.json();
         expect(body.code).toBe("MIMETYPE_NOT_ALLOWED");
@@ -214,7 +215,7 @@ describe("upload — custom field types (toBson, like collections)", () => {
         form.append("label", "dated");
         form.append("takenAt", "2024-05-01T10:00:00.000Z");
 
-        const res = await fetch(`${url}/upload/${TENANT}/${SLUG}`, { method: "POST", body: form });
+        const res = await fetch(`${url}/api/${TENANT}/upload/${SLUG}`, { method: "POST", body: form });
         expect(res.status).toBe(200);
         const body: any = await res.json();
 
@@ -227,7 +228,7 @@ describe("upload — custom field types (toBson, like collections)", () => {
         const form = new FormData();
         form.append("file", pngFile("2024-01-01")); // ← a file literally named like a date
 
-        const res = await fetch(`${url}/upload/${TENANT}/${SLUG}`, { method: "POST", body: form });
+        const res = await fetch(`${url}/api/${TENANT}/upload/${SLUG}`, { method: "POST", body: form });
         expect(res.status).toBe(200);
         const body: any = await res.json();
         expect(body._file.name).toBe("2024-01-01");
@@ -235,5 +236,36 @@ describe("upload — custom field types (toBson, like collections)", () => {
         const raw: any = await rest.db.collection(SLUG).findOne({ _id: new ObjectId(body._id) });
         expect(raw._file.name).toBe("2024-01-01"); // NOT converted to a Date
         expect(typeof raw._file.name).toBe("string");
+    });
+});
+
+describe("api.files — the in-process facade", () => {
+    it("builds a file URL, with the transformations the route understands", () => {
+        const api = createApi(rest);
+
+        expect(api.files.url(SLUG, "f1.png")).toBe(`/api/${TENANT}/files/${SLUG}/f1.png`);
+        expect(api.files.url(SLUG, "f1.png", { width: 200, format: "webp" }))
+            .toBe(`/api/${TENANT}/files/${SLUG}/f1.png?w=200&format=webp`);
+        expect(api.files.url(SLUG, "f1.png", { width: 200, height: 100, format: "avif", quality: 70 }))
+            .toBe(`/api/${TENANT}/files/${SLUG}/f1.png?w=200&h=100&format=avif&q=70`);
+    });
+
+    it("deletes the binary and the document — the same path as the route", async () => {
+        const form = new FormData();
+        form.append("file", pngFile("to-delete.png"));
+        const uploaded: any = await (
+            await fetch(`${url}/api/${TENANT}/upload/${SLUG}`, { method: "POST", body: form })
+        ).json();
+
+        const fs = await import("node:fs/promises");
+        const storage = getFileCollection(SLUG, TENANT)?.storage as any;
+        const dir = `${process.cwd()}/${storage?.path ?? "storage"}/${TENANT}/${SLUG}`;
+        expect((await fs.readdir(dir)).some((name) => name.startsWith(uploaded._id))).toBe(true);
+
+        const result = await createApi(rest).files.delete(SLUG, uploaded._id);
+
+        expect(result).toEqual({ message: "File deleted", ok: true });
+        expect(await rest.findOne(SLUG, uploaded._id)).toBeNull();
+        expect((await fs.readdir(dir)).some((name) => name.startsWith(uploaded._id))).toBe(false);
     });
 });

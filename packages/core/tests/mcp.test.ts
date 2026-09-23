@@ -62,7 +62,7 @@ describe("syncMcpTools", () => {
     });
 });
 
-describe("MCP protocol (GET/POST /mcp/:tenant_id)", () => {
+describe("MCP protocol (GET/POST /api/:tenant_id/mcp)", () => {
     it("serves tools/list and tools/call over JSON-RPC", async () => {
         cfg.tenants = [{ id: TENANT, dir: TENANT_DIR, database: { uri: "mongodb://localhost:27017/none" } }];
         await syncMcpTools();
@@ -72,7 +72,7 @@ describe("MCP protocol (GET/POST /mcp/:tenant_id)", () => {
         const url = server.url.href.replace(/\/$/, "");
 
         // 1. tools/list
-        const listRes = await fetch(`${url}/mcp/${TENANT}`, {
+        const listRes = await fetch(`${url}/api/${TENANT}/mcp`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
@@ -84,7 +84,7 @@ describe("MCP protocol (GET/POST /mcp/:tenant_id)", () => {
         expect(tools.some((t: any) => t.name === "badge")).toBe(true);
 
         // 1b. resources/list — static resources
-        const resListRes = await fetch(`${url}/mcp/${TENANT}`, {
+        const resListRes = await fetch(`${url}/api/${TENANT}/mcp`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "resources/list", params: {} }),
@@ -94,7 +94,7 @@ describe("MCP protocol (GET/POST /mcp/:tenant_id)", () => {
         expect(resources.some((r: any) => r.uri === "orders://summary")).toBe(true);
 
         // 1c. resources/templates/list
-        const tmplRes = await fetch(`${url}/mcp/${TENANT}`, {
+        const tmplRes = await fetch(`${url}/api/${TENANT}/mcp`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ jsonrpc: "2.0", id: 10, method: "resources/templates/list", params: {} }),
@@ -104,7 +104,7 @@ describe("MCP protocol (GET/POST /mcp/:tenant_id)", () => {
         expect(templates.some((t: any) => t.uriTemplate === "users://{id}")).toBe(true);
 
         // 1d. resources/read — static URI
-        const readRes = await fetch(`${url}/mcp/${TENANT}`, {
+        const readRes = await fetch(`${url}/api/${TENANT}/mcp`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ jsonrpc: "2.0", id: 11, method: "resources/read", params: { uri: "orders://summary" } }),
@@ -114,7 +114,7 @@ describe("MCP protocol (GET/POST /mcp/:tenant_id)", () => {
         expect(readText).toContain("\"total\":42");
 
         // 1e. resources/read — template URI with params
-        const readTplRes = await fetch(`${url}/mcp/${TENANT}`, {
+        const readTplRes = await fetch(`${url}/api/${TENANT}/mcp`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ jsonrpc: "2.0", id: 12, method: "resources/read", params: { uri: "users://abc123" } }),
@@ -123,7 +123,7 @@ describe("MCP protocol (GET/POST /mcp/:tenant_id)", () => {
         expect(readTpl?.result?.contents?.[0]?.text ?? "").toContain("\"id\":\"abc123\"");
 
         // 1f. resources/read — unknown URI → error
-        const readBadRes = await fetch(`${url}/mcp/${TENANT}`, {
+        const readBadRes = await fetch(`${url}/api/${TENANT}/mcp`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ jsonrpc: "2.0", id: 13, method: "resources/read", params: { uri: "nope://x" } }),
@@ -132,7 +132,7 @@ describe("MCP protocol (GET/POST /mcp/:tenant_id)", () => {
         expect(readBad?.error).toBeDefined();
 
         // 2. tools/call (valid args + Joi defaults)
-        const callRes = await fetch(`${url}/mcp/${TENANT}`, {
+        const callRes = await fetch(`${url}/api/${TENANT}/mcp`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -148,7 +148,7 @@ describe("MCP protocol (GET/POST /mcp/:tenant_id)", () => {
         expect(block.text ?? "").toContain("\"times\":1");
 
         // 2b. protocol content blocks pass through unchanged (image block)
-        const badgeRes = await fetch(`${url}/mcp/${TENANT}`, {
+        const badgeRes = await fetch(`${url}/api/${TENANT}/mcp`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -161,7 +161,7 @@ describe("MCP protocol (GET/POST /mcp/:tenant_id)", () => {
         expect(badge?.result?.content?.[0]?.mimeType).toBe("image/png");
 
         // 2b. invalid args → isError (Joi validation)
-        const badRes = await fetch(`${url}/mcp/${TENANT}`, {
+        const badRes = await fetch(`${url}/api/${TENANT}/mcp`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -174,7 +174,7 @@ describe("MCP protocol (GET/POST /mcp/:tenant_id)", () => {
         expect(bad?.result?.content?.[0]?.text ?? "").toContain("Invalid arguments");
 
         // 3. unknown tenant → 404
-        const notFound = await fetch(`${url}/mcp/ghost`, {
+        const notFound = await fetch(`${url}/api/ghost/mcp`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list", params: {} }),

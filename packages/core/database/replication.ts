@@ -24,6 +24,7 @@ import type {
 } from "../types/replication";
 import { AUDIT_TTL_INDEX, resolveAuditRetention } from "./audit";
 import { WORKFLOW_RUNS_TTL_INDEX, resolveWorkflowsRetention } from "../lib/workflow";
+import { agentMemoryCollections } from "../lib/agents";
 import { syncTtlRetention } from "./ttl";
 
 const META_COLLECTION = "_replication_";
@@ -36,9 +37,11 @@ const LOCK_TTL = 5 * 60_000;
 
 /**
  * Framework collections replication covers **by default**, with the date key each
- * one is read with (the engine's cursor). `'vars'` is handled apart, per namespace.
+ * one is read with (the engine's cursor). `'vars'` is handled apart, per namespace,
+ * and `'memory'` covers the agent memory collections — whose names the tenant
+ * chooses, so they come from the agent registry instead (see below).
  */
-const META_COLLECTIONS: Record<Exclude<ReplicationMetaName, 'vars'>, { slug: string; key: string }> = {
+const META_COLLECTIONS: Record<Exclude<ReplicationMetaName, 'vars' | 'memory'>, { slug: string; key: string }> = {
     audit: { slug: "_audit_", key: "ts" },
     workflows: { slug: "_workflows_", key: "updatedAt" },
     locks: { slug: "_locks_", key: "expiresAt" },
@@ -83,6 +86,20 @@ function replicatedCollectionsFor(tenantId: string, config: ReplicationConfig): 
             replication: { enabled: true },
             _baseFilter_: { ns: { $nin: optedOut } },
         } as any);
+    }
+
+    // Agent memory collections — the tenant names them, the agent loader publishes
+    // them (`cfg.agentMemories`). `exclude: ['memory']` covers all of them.
+    if (!excluded.has('memory')) {
+        for (const slug of agentMemoryCollections(tenantId)) {
+            // A memory collection may also be declared as a collection: one entry only
+            if (collections.some((collection) => collection.slug === slug)) continue;
+            collections.push({
+                slug,
+                _tenant_: tenantId,
+                replication: { enabled: true, key: "updatedAt" },
+            } as any);
+        }
     }
 
     return collections;

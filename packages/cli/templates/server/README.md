@@ -47,9 +47,9 @@ Everything else is discovered by convention under `{{tenant}}/`: add
 | What | Method | URL |
 | ---- | ------ | --- |
 | Health | `GET` | `http://localhost:{{port}}/health` |
-| Collection API | `POST` | `http://localhost:{{port}}/api/{{tenant}}/items/:action` |
+| Collection API | `POST` | `http://localhost:{{port}}/api/{{tenant}}/collections/items/:action` |
 | Custom route | `GET` | `http://localhost:{{port}}/api/v1/healthz` |
-| MCP (tools & resources) | `GET`/`POST` | `http://localhost:{{port}}/mcp/{{tenant}}` |
+| MCP (tools & resources) | `GET`/`POST` | `http://localhost:{{port}}/api/{{tenant}}/mcp` |
 | Public config | `GET` | `http://localhost:{{port}}/_dnax/config/{{tenant}}` |
 
 `tenant_id` in every URL is the `id` from `config/app.ts` — here `{{tenant}}`.
@@ -74,11 +74,11 @@ curl -s http://localhost:{{port}}/api/v1/healthz
 ## MCP
 
 The tenant exposes its `mcp/tools/**/*.tool.ts` and `mcp/resources/**/*.resource.ts`
-over the Model Context Protocol at `/mcp/{{tenant}}`, so agents (Claude, Cursor, VS
+over the Model Context Protocol at `/api/{{tenant}}/mcp`, so agents (Claude, Cursor, VS
 Code, …) can call them. Point an MCP client at:
 
 ```
-http://localhost:{{port}}/mcp/{{tenant}}
+http://localhost:{{port}}/api/{{tenant}}/mcp
 ```
 
 ## Access control

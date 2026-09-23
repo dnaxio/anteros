@@ -12,6 +12,7 @@ export default define.Agent({
     provider: { model: "test-model", compatible: "openai", apiKey: "fixture-key" },
     tools: {
         forecast: define.Tool({
+            id: "forecast",
             description: "Current weather for a city",
             inputSchema: v.object({ city: v.string().required() }),
             execute: async ({ city }) => ({ city, celsius: 21 }),

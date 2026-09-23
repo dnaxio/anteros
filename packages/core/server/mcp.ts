@@ -12,10 +12,13 @@ import {
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { cfg } from "./config";
 import { useRest } from "../database/rest";
+import { createAgents } from "../lib/agents";
+import { createApi } from "../lib/api";
 import { logger } from "../utils/logger";
 import type { McpTool, McpResource } from "../types/mcp";
 import type { HonoVariables } from "./env";
 import { joiToJsonSchema } from "../lib/jsonSchema";
+import { patterns } from "../lib/endpoints";
 
 // The Joi → JSON Schema converter is shared with the agent runtime — a tool
 // must look identical whether it is exposed over MCP or to a model.
@@ -91,7 +94,13 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
 
         const rest = new useRest({ tenant_id: tenantId });
         try {
-            const result = await tool.exec({ c: undefined as any, rest, args: value });
+            const result = await tool.exec({
+                c: undefined as any,
+                rest,
+                args: value,
+                agents: createAgents(tenantId, rest),
+                api: createApi(rest),
+            });
             const isError = !!(result as any)?.isError;
             logger[isError ? 'warn' : 'info']('MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, args: value, isError, duration: ms(start) });
             if (result && Array.isArray(result.content)) return result;
@@ -148,6 +157,8 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
             const result = await matched.resource.read({
                 c: undefined as any,
                 rest,
+                agents: createAgents(tenantId, rest),
+                api: createApi(rest),
                 params: matched.params,
                 uri,
             });
@@ -164,7 +175,7 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
 
 /**
  * Expose each tenant's MCP tools & resources over the Model Context Protocol
- * at `GET/POST /mcp/:tenant_id` (Streamable HTTP transport — works with
+ * at `GET/POST /api/:tenant_id/mcp` (Streamable HTTP transport — works with
  * Claude, Cursor, VS Code, and any MCP client).
  */
 export function initializeMcp(app: Hono<{ Variables: HonoVariables }>) {
@@ -181,7 +192,7 @@ export function initializeMcp(app: Hono<{ Variables: HonoVariables }>) {
         resourcesByTenant.set(resource._tenant_ ?? '', list);
     }
 
-    app.all('/mcp/:tenant_id', async (c: Context<{ Variables: HonoVariables }>) => {
+    app.all(patterns.mcp, async (c: Context<{ Variables: HonoVariables }>) => {
         const tenantId = c.req.param('tenant_id') ?? '';
         const tools = toolsByTenant.get(tenantId) ?? [];
         const resources = resourcesByTenant.get(tenantId) ?? [];

@@ -166,9 +166,9 @@ export const create: Command = async ({ args, opts, log }) => {
   nextSteps("Next steps", steps)
 
   keyValues([
-    ["API", `POST http://localhost:${port}/api/${tenant}/items/:action`],
+    ["API", `POST http://localhost:${port}/api/${tenant}/collections/items/:action`],
     ["Route", `GET  http://localhost:${port}/api/v1/healthz`],
-    ["MCP", `http://localhost:${port}/mcp/${tenant}`],
+    ["MCP", `http://localhost:${port}/api/${tenant}/mcp`],
   ])
   console.log()
 }

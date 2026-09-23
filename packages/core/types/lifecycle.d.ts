@@ -4,6 +4,8 @@ import type { Config } from "./config";
 import type { logger } from "../utils/logger";
 import type { Server as SocketIO } from "socket.io";
 import type { TenantReplicationApi } from "./replication";
+import type { TenantAgents } from "./agent";
+import type { Api } from "../lib/api";
 
 /** Signal that triggered the shutdown. */
 export type LifecycleReason = "SIGINT" | "SIGTERM";
@@ -12,6 +14,10 @@ export type LifecycleReason = "SIGINT" | "SIGTERM";
 export type LifecycleContext = {
     tenant: Tenant;
     rest: InstanceType<typeof useRest>;
+    /** Tenant-scoped LLM registry — `agents.get('support')`, bound to `rest`. */
+    agents: TenantAgents;
+    /** The in-process facade — `api.collection("orders")`, `api.service("analytics")`, `api.vars`, `api.files`, `api.agent(id)`. */
+    api: Api;
     logger: typeof logger;
     cfg: Config;
     /** Tenant-scoped replication API — `reset()`, `seed()`, `now()`, `state()` (no tenant id needed). */

@@ -537,3 +537,54 @@ describe("watch", () => {
         await stream.close();
     });
 });
+
+/**
+ * `rest` is the **original, fully supported surface** — `api` (the facade) and the
+ * SDK namespaces only *group* it. Nothing is removed when something is added, so a
+ * tenant that wrote `rest.find('orders', …)` never has to migrate: this contract
+ * fails loudly if a method ever disappears.
+ */
+describe("rest — the original surface (contract)", () => {
+    const COLLECTION_METHODS = [
+        "find", "findOne", "insertOne", "insertMany",
+        "updateOne", "findOneAndUpdate", "updateMany",
+        "deleteOne", "deleteMany", "bulkWrite", "bulkUpdate",
+        "aggregate", "countDocuments", "watch",
+        "dropCollection", "dropIndex", "dropIndexes",
+        "runAction",
+    ];
+
+    const FAMILY_METHODS = ["runService", "stats", "workflows", "lock", "unlock"];
+    const SESSION_METHODS = ["startSession", "endSession", "startTransaction", "commitTransaction", "abortTransaction"];
+    const GETTERS = ["db", "audit", "cache", "vars", "workflow"];
+
+    it("keeps every method and every member a tenant may already be using", () => {
+        for (const name of [...COLLECTION_METHODS, ...FAMILY_METHODS, ...SESSION_METHODS]) {
+            expect(typeof (rest as any)[name]).toBe("function");
+        }
+        for (const name of GETTERS) {
+            expect((rest as any)[name]).toBeDefined();
+        }
+        expect(rest.tenant_id).toBe(TEST_TENANT);
+    });
+
+    it("keeps the collection methods working exactly as before — `api` is additive", async () => {
+        const created = await rest.insertOne("items", { title: "legacy-surface", count: 1 });
+        const [found] = await rest.find("items", { $match: { title: "legacy-surface" } });
+        expect(found!.title).toBe("legacy-surface");
+
+        await rest.updateOne("items", created._id, { $set: { count: 2 } });
+        expect((await rest.findOne("items", created._id)).count).toBe(2);
+        expect(await rest.countDocuments("items", { title: "legacy-surface" })).toBe(1);
+        expect(await rest.aggregate("items", [{ $match: { title: "legacy-surface" } }, { $count: "n" }]))
+            .toEqual([{ n: 1 }]);
+
+        await rest.deleteOne("items", created._id);
+        expect(await rest.findOne("items", created._id)).toBeNull();
+    });
+
+    it("keeps `rest.vars` working, as the facade re-exposes the same object", async () => {
+        await rest.vars.set("legacy", "key", "value");
+        expect(await rest.vars.get<string>("legacy", "key")).toBe("value");
+    });
+});

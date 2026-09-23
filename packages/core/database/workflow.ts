@@ -3,6 +3,8 @@ import { getTenant } from "./tenant";
 import { AppError, fn } from "../lib/error";
 import * as func from "../utils/func";
 import { useRest } from "./rest";
+import { createAgents } from "../lib/agents";
+import { createApi } from "../lib/api";
 import { getWorkflow, validateWorkflowContext } from "../lib/workflow";
 import { logger } from "../utils/logger";
 import crypto from "crypto";
@@ -211,6 +213,9 @@ class Workflow {
       prevOutput,
       input: step.input,
       rest: this.#rest,
+      // Tenant-scoped LLM registry, bound to the same `rest` as the step
+      agents: createAgents(this.#tenant_id, this.#rest),
+      api: createApi(this.#rest),
       error: fn.error,
       jwt: func.jwt,
       __retries: step.retries,
@@ -351,6 +356,8 @@ class Workflow {
             stepOutput: step.output,
             stepError: run.error ?? { message: 'Workflow failed' },
             rest: this.#rest,
+            agents: createAgents(this.#tenant_id, this.#rest),
+            api: createApi(this.#rest),
             error: fn.error,
             jwt: func.jwt,
             __retries: def.retries,
@@ -433,7 +440,7 @@ class Workflow {
         try {
           await this.invoke(
             (ctx) => wf.exec!(ctx as any),
-            { data, prevOutput: null, input: undefined, rest: this.#rest, error: fn.error, jwt: func.jwt },
+            { data, prevOutput: null, input: undefined, rest: this.#rest, agents: createAgents(this.#tenant_id, this.#rest), api: createApi(this.#rest), error: fn.error, jwt: func.jwt },
             '__global__',
           );
         } catch (err: any) {

@@ -7,11 +7,14 @@ import { syncTenants } from "../database/tenant";
 import { syncCollections } from "../database/collection";
 import { syncWorkflows } from "../lib/workflow";
 import { startReplication, stopReplication, replicateTenant } from "../database/replication";
+import { syncAgents } from "../lib/agents";
+import { MongoAgentMemory } from "../lib/agentMemory";
+import { AGENT_THREADS } from "./fixtures/replication-meta/agents/chat.agent";
 import type { ReplicationMetaName } from "../types/replication";
 
 const DIR = "packages/core/tests/fixtures/replication-meta";
 
-/** Everything replicated: declared collection + the five framework collections */
+/** Everything replicated: declared collection + the six framework collections */
 const ALL_T = "rm-default";
 const ALL_T_DB = "mongodb://localhost:27017/_RM_DEFAULT_SRC";
 const ALL_T_DEST = "mongodb://localhost:27017/_RM_DEFAULT_DEST";
@@ -51,7 +54,7 @@ beforeAll(async () => {
                 replication: {
                     runOnBoot: false,
                     schedule: { interval: "1h" },
-                    exclude: ["audit", "workflows", "locks", "replication", "vars"],
+                    exclude: ["audit", "workflows", "locks", "replication", "vars", "memory"],
                     destinations: [{ id: "backup", uri: OFF_T_DEST }],
                 },
             },
@@ -61,6 +64,7 @@ beforeAll(async () => {
     await syncTenants();
     await syncCollections();
     await syncWorkflows();
+    await syncAgents(); // publishes the agent memory collections (`cfg.agentMemories`)
     await startReplication();
 
     rest = new useRest({ tenant_id: ALL_T });
@@ -80,12 +84,14 @@ afterAll(async () => {
             await client.close();
         } catch (_) {}
     }
+    cfg.agents = [];
+    cfg.agentMemories = [];
     try { await dest.close(); } catch (_) {}
     try { await destOff.close(); } catch (_) {}
 });
 
 describe("replication — framework collections", () => {
-    it("replicates them by default (audit, workflows, locks, replication, vars)", async () => {
+    it("replicates them by default (audit, workflows, locks, replication, vars, memory)", async () => {
         const marker = `meta-${crypto.randomUUID()}`;
 
         await rest.audit.addActivities([{
@@ -102,6 +108,12 @@ describe("replication — framework collections", () => {
         await rest.vars.set("config", marker, "META-1");
         await rest.lock(`meta-${marker}`);
         await rest.insertOne("orders", { title: marker });
+        // An agent conversation — the collection this tenant named for its memory
+        await new MongoAgentMemory({ collection: AGENT_THREADS }).save(
+            "chat-1",
+            [{ role: "user", content: marker }] as any,
+            { rest, tenant: ALL_T, resourceId: "u1" },
+        );
 
         // A first run picks the state document it writes, hence the second one
         await replicateTenant(ALL_T);
@@ -112,9 +124,22 @@ describe("replication — framework collections", () => {
         expect(await target("_vars_").findOne({ ns: "config", key: marker })).toBeDefined();
         expect(await target("_locks_").findOne({ name: `meta-${marker}` })).toBeDefined();
         expect(await target("_replication_").findOne({ type: "state", tenant: ALL_T })).toBeDefined();
+        expect(await target(AGENT_THREADS).findOne({ _id: "u1:chat-1" as any })).toBeDefined();
         expect(await target("orders").findOne({ title: marker })).toBeDefined();
 
         await rest.unlock(`meta-${marker}`);
+    }, 30_000);
+
+    it("propagates a cleared thread to the destination (tombstone)", async () => {
+        // The thread replicated by the previous test is deleted at the source: no
+        // date cursor can see a deletion, so the store leaves a tombstone.
+        await new MongoAgentMemory({ collection: AGENT_THREADS }).clear("chat-1", { rest, tenant: ALL_T, resourceId: "u1" });
+
+        await replicateTenant(ALL_T);
+
+        expect(await target(AGENT_THREADS).findOne({ _id: "u1:chat-1" as any })).toBeNull();
+        // The tombstone is consumed and purged
+        expect(await rest.db.collection("_replication_").countDocuments({ type: "delete", collection: AGENT_THREADS })).toBe(0);
     }, 30_000);
 
     it("uses each collection's own date key (audit is read on `ts`)", async () => {
@@ -137,7 +162,7 @@ describe("replication — framework collections", () => {
     it("leaves out only what `exclude` names", async () => {
         const tenant: any = cfg.tenants?.find((t) => t.id === ALL_T);
         const marker = `noaudit-${crypto.randomUUID()}`;
-        tenant.replication.exclude = ["audit"];
+        tenant.replication.exclude = ["audit", "memory"];
 
         await rest.audit.addActivities([{
             internal: true, trace: { id: crypto.randomUUID() }, meta: {},
@@ -148,10 +173,16 @@ describe("replication — framework collections", () => {
             ts: new Date(),
         } as any]);
         await rest.vars.set("config", marker, "still-replicated");
+        await new MongoAgentMemory({ collection: AGENT_THREADS }).save(
+            "chat-2",
+            [{ role: "user", content: marker }] as any,
+            { rest, tenant: ALL_T, resourceId: "u1" },
+        );
 
         await replicateTenant(ALL_T);
 
         expect(await target("_audit_").findOne({ "operation.action": marker })).toBeNull();      // excluded
+        expect(await target(AGENT_THREADS).findOne({ _id: "u1:chat-2" as any })).toBeNull();     // excluded
         expect(await target("_vars_").findOne({ ns: "config", key: marker })).toBeDefined();     // still there
 
         delete tenant.replication.exclude;
@@ -171,6 +202,11 @@ describe("replication — framework collections", () => {
         } as any]);
         await offRest.vars.set("config", marker, "not-replicated");
         await offRest.insertOne("orders", { title: marker });
+        await new MongoAgentMemory({ collection: AGENT_THREADS }).save(
+            "chat-3",
+            [{ role: "user", content: marker }] as any,
+            { rest: offRest, tenant: OFF_T, resourceId: "u1" },
+        );
 
         await replicateTenant(OFF_T);
         await replicateTenant(OFF_T);
@@ -181,6 +217,7 @@ describe("replication — framework collections", () => {
         expect(await targetOff("_audit_").countDocuments({})).toBe(0);
         expect(await targetOff("_vars_").countDocuments({})).toBe(0);
         expect(await targetOff("_workflows_").countDocuments({})).toBe(0);
+        expect(await targetOff(AGENT_THREADS).countDocuments({})).toBe(0);
     }, 30_000);
 
     it("propagates a delete on a collection whose key is a number", async () => {
@@ -196,8 +233,8 @@ describe("replication — framework collections", () => {
     }, 30_000);
 
     it("keeps the `exclude` list typed", () => {
-        const names: ReplicationMetaName[] = ["audit", "workflows", "locks", "replication", "vars"];
-        expect(names.length).toBe(5);
+        const names: ReplicationMetaName[] = ["audit", "workflows", "locks", "replication", "vars", "memory"];
+        expect(names.length).toBe(6);
 
         // @ts-expect-error — a declared collection slug is not a framework collection
         const wrong: ReplicationMetaName[] = ["orders"];

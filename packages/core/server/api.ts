@@ -3,6 +3,7 @@ import { cfg, safePublicConfig } from "./config";
 import type { ApiOptions } from "../types/api";
 import { getCollection } from "../database/collection";
 import { getFileCollection } from "../database/file";
+import { getTenant } from "../database/tenant";
 import { AppError, fn } from "../lib/error";
 import * as cookie from "hono/cookie"
 import { useRest } from "../database/rest";
@@ -17,12 +18,16 @@ import * as os from 'node:os';
 import { basename } from 'node:path';
 import { handleUpload, handleServe, handleDelete, type FileResult } from "../lib/files";
 import { getVarsDefinition } from "../database/vars";
-import { getTenant } from "../database/tenant";
-const API_PREFIX = '/api/:tenant_id/:collection/:action';
-const SERVICE_PREFIX = '/services/:tenant_id/:service/:action';
-const VARS_PREFIX = '/vars/:tenant_id/:action';
-const UPLOAD_PREFIX = '/upload/:tenant_id/:collection';
-const FILES_PREFIX = '/files/:tenant_id/:collection/:file';
+import { endpoints, patterns } from "../lib/endpoints";
+import { getAccessToken, errorResponse, evaluateAccess } from "./access";
+
+// Every surface hangs off `/api/:tenant_id` — the patterns live in `lib/endpoints.ts`,
+// next to the builders a client (and the SDK) uses, so a path is written once.
+const API_PREFIX = patterns.collection;
+const SERVICE_PREFIX = patterns.service;
+const VARS_PREFIX = patterns.vars;
+const UPLOAD_PREFIX = patterns.upload;
+const FILES_PREFIX = patterns.file;
 
 
 const ActionsValues = [
@@ -44,26 +49,6 @@ const ActionsValues = [
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-function getAccessToken(c: any) {
-    const t = c.get('token');
-    return {
-        value: (t?.value ?? null) as string | null,
-        decoded: (t?.decoded ?? null) as Record<string, unknown> | null,
-        provided: (t?.provided ?? false) as boolean,
-        expired: (t?.expired ?? false) as boolean,
-    };
-}
-
-function errorResponse(c: any, err: any) {
-    const isAppError = err instanceof AppError;
-    const status = isAppError ? Number(err.status) : 500;
-    return c.json({
-        message: isAppError ? err.message : 'Internal server error',
-        code: isAppError ? err.code : 'INTERNAL_SERVER_ERROR',
-        meta: isAppError ? err.meta : undefined,
-    }, status);
-}
-
 function stripReadOnlyData(col: any, body: any) {
     if (col?.api?.readOnlyFields?.length && body?.data) {
         body.data = func.omit(body.data, col.api.readOnlyFields);
@@ -76,52 +61,9 @@ function stripReadOnlyUpdate(col: any, body: any) {
     }
 }
 
-// ─── Access control helpers ──────────────────────────────────────────────────
-
-async function evaluateAccess(
-    access: { [key: string]: boolean | ((ctx: any) => boolean | Promise<boolean>) | undefined } | undefined,
-    operation: string,
-    rest: InstanceType<typeof useRest>,
-    label: string,
-    c: any,
-): Promise<void> {
-    if (!access) {
-        throw new AppError('Access denied', { status: 401, code: 'ACCESS_DENIED' });
-    }
-
-    const hasWildcard = access['*'] !== undefined;
-    const hasSpecific = access[operation] !== undefined;
-
-    if (!hasWildcard && !hasSpecific) {
-        throw new AppError('Access denied', { status: 401, code: 'ACCESS_DENIED' });
-    }
-
-    const rule = hasSpecific ? access[operation] : access['*'];
-    if (rule === undefined) return;
-
-    // Boolean `true` → allow without requiring a token
-    if (typeof rule === 'boolean') {
-        if (!rule) {
-            throw new AppError(`${label} not allowed`, { status: 401, code: 'ACCESS_DENIED' });
-        }
-        return;
-    }
-
-    // Function → requires a valid token
-    const accessToken = getAccessToken(c);
-
-    if (accessToken.expired) {
-        throw new AppError('Token expired', { status: 401, code: 'TOKEN_EXPIRED' });
-    }
-    if (!accessToken.value) {
-        throw new AppError('Authentication required', { status: 401, code: 'AUTH_REQUIRED' });
-    }
-
-    const allowed = await (rule as Function)({ rest, error: fn.error, jwt: func.jwt, token: accessToken });
-    if (!allowed) {
-        throw new AppError(`${label} not allowed`, { status: 401, code: 'ACCESS_DENIED' });
-    }
-}
+// ─── Access control ─────────────────────────────────────────────────────────
+// `evaluateAccess` / `errorResponse` / `getAccessToken` live in `./access`
+// (shared with the agents API).
 
 async function checkFileAccess(
     access: { [key: string]: boolean | ((ctx: any) => boolean | Promise<boolean>) | undefined } | undefined,

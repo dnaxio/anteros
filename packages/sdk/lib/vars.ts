@@ -5,7 +5,7 @@ type Post = (action: string, body: any, options?: RestRequestOptions) => Promise
 
 /**
  * Tenant-scoped variables API — `api.vars` (see the server's `rest.vars`).
- * Calls `POST /vars/:tenant_id/:action`; the tenant is the one passed to `new Rest()`.
+ * Calls `POST /api/:tenant_id/vars/:action`; the tenant is the one passed to `new Rest()`.
  *
  * ```ts
  * await api.vars.set('config', 'licence', 'RDX00');

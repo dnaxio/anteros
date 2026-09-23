@@ -1,5 +1,7 @@
 import { useRest } from "../database/rest"
 import type { Tenant } from "./tenant"
+import type { TenantAgents } from "./agent"
+import type { Api } from "../lib/api"
 
 
 export type Script = {
@@ -15,6 +17,10 @@ export type Script = {
     timeout?: number;
     exec: (ctx: {
         rest: InstanceType<typeof useRest>
+        /** Tenant-scoped LLM registry — `agents.get('support')`, bound to `rest`. */
+        agents: TenantAgents;
+        /** The in-process facade — `api.collection("orders")`, `api.service("analytics")`, `api.vars`, `api.files`, `api.agent(id)`. */
+        api: Api;
         /** Report progress — only wired for heavy scripts (sent via IPC to the parent) */
         progress?: (percent: number, info?: any) => void;
         /** Tenant this script runs for */

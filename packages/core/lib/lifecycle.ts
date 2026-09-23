@@ -2,6 +2,8 @@ import path from "path";
 import fs from "fs/promises";
 import { cfg } from "../server/config";
 import { useRest } from "../database/rest";
+import { createAgents } from "./agents";
+import { createApi } from "./api";
 import { logger } from "../utils/logger";
 import {
     replicationNow,
@@ -55,9 +57,13 @@ async function loadLifecycles(): Promise<void> {
 
 /** Tenant-scoped context passed to every hook. */
 function buildContext(tenant: Tenant, extra?: Record<string, any>) {
+    const rest = new useRest({ tenant_id: tenant.id });
     return {
         tenant,
-        rest: new useRest({ tenant_id: tenant.id }),
+        rest,
+        // Tenant-scoped LLM registry — a lifecycle hook can seed/refresh an agent
+        agents: createAgents(tenant.id, rest),
+        api: createApi(rest),
         logger,
         cfg,
         replication: tenantReplication(tenant.id),

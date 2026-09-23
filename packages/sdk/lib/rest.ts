@@ -1,179 +1,38 @@
-import { joinURL, withQuery } from "ufo";
-import type { ApiAction, FileResult, FindOptions, PublicConfig, RestClientOptions, RestQueryOptions, RestRequestOptions } from "../types/rest";
-import { cleanDeep } from "../utils";
-import { Vars } from "./vars";
+import { Client } from "./client";
+import type { FileResult, FindOptions, RestRequestOptions } from "../types/rest";
 
-export type { RestClientOptions, RestQueryOptions, RestRequestOptions } from "../types/rest";
+/**
+ * The **original** client — the flat surface, unchanged.
+ *
+ * ```ts
+ * import { Rest } from '@anteros/sdk';
+ *
+ * const api = new Rest({ server: 'http://localhost:4000', tenant: 'v1' });
+ *
+ * const paid = await api.find('orders', { $match: { status: 'paid' } });
+ * await api.updateOne('orders', paid[0]._id, { $set: { status: 'shipped' } });
+ * await api.upload('photos', file);
+ * await api.runService('analytics', 'monthly', { month: '2026-09' });
+ * ```
+ *
+ * Every method still works, with the same signature it always had — a client
+ * written before the namespaced client existed needs **no change**: only the
+ * URLs it talks to moved (they are built by this class, and the server serves
+ * them). For new code, [`Anteros`](./anteros) groups the very same calls per
+ * family; the two clients share the transport and can even be used side by side.
+ */
+class Rest extends Client {
+    // ── Authentication ───────────────────────────────────────────────────
 
-class Rest {
-    #server: string;
-    #tenant: string;
-    #headers: Record<string, string>;
-    #token?: string;
-    #persistToken: boolean;
-    #tokenStorageKey: string;
-    #defaultParams: RestClientOptions["defaultParams"];
-
-    constructor(options: RestClientOptions) {
-        this.#server = options.server.replace(/\/+$/, "");
-        this.#tenant = options.tenant;
-        this.#headers = options.headers ?? {};
-        this.#persistToken = options.token?.persist ?? true;
-        this.#tokenStorageKey = options.token?.storageKey ?? "dnax_token";
-        this.#defaultParams = options.defaultParams ?? {};
-
-        // Retrieve any token already stored client-side
-        if (this.#persistToken && typeof globalThis !== "undefined" && "localStorage" in globalThis) {
-            const storedToken = globalThis.localStorage.getItem(this.#tokenStorageKey);
-            if (storedToken) {
-                this.setToken(storedToken);
-            }
-        }
-    }
-
-    setHeader(name: string, value: string | undefined) {
-        if (value === undefined) {
-            delete this.#headers[name];
-            return;
-        }
-        this.#headers[name] = value;
-    }
-
-    setServer(url: string) {
-        this.#server = url.replace(/\/+$/, "");
-    }
-
-    setTenant(tenant: string) {
-        this.#tenant = tenant;
-    }
-
-    private setToken(token: string | undefined) {
-        if (!token) {
-            this.#token = undefined;
-            delete this.#headers.Authorization;
-            if (this.#persistToken && typeof globalThis !== "undefined" && "localStorage" in globalThis) {
-                globalThis.localStorage.removeItem(this.#tokenStorageKey);
-            }
-            return;
-        }
-
-        this.#token = token;
-        this.#headers.Authorization = `Bearer ${token}`;
-
-        if (this.#persistToken && typeof globalThis !== "undefined" && "localStorage" in globalThis) {
-            globalThis.localStorage.setItem(this.#tokenStorageKey, token);
-        }
-    }
-
-    getToken(): string | undefined {
-        return this.#token;
-    }
-
-    clearToken() {
-        this.setToken(undefined);
-    }
-
-    private buildUrl(collection: string, action: ApiAction, query?: RestQueryOptions): string {
-        const base = joinURL(this.#server, "api", this.#tenant, collection, String(action));
-        if (!query || Object.keys(query).length === 0) {
-            return base;
-        }
-        return withQuery(base, query as Record<string, string | number | boolean | null | undefined>);
-    }
-
-    /** `POST /services/:tenant/:service/:action` (see `SERVICE_PREFIX` server-side). */
-    private buildUploadUrl(collection: string): string {
-        return joinURL(this.#server, "upload", this.#tenant, collection);
-    }
-
-    private buildFileUrl(collection: string, filename: string): string {
-        return joinURL(this.#server, "files", this.#tenant, collection, filename);
-    }
-
-    private buildServiceUrl(service: string, action: string, query?: RestQueryOptions): string {
-        const base = joinURL(this.#server, "services", this.#tenant, service, action);
-        if (!query || Object.keys(query).length === 0) {
-            return base;
-        }
-        return withQuery(base, query as Record<string, string | number | boolean | null | undefined>);
-    }
-
-    /** `POST /vars/:tenant/:action` (see `VARS_PREFIX` server-side). */
-    private buildVarsUrl(action: string, query?: RestQueryOptions): string {
-        const base = joinURL(this.#server, "vars", this.#tenant, action);
-        if (!query || Object.keys(query).length === 0) {
-            return base;
-        }
-        return withQuery(base, query as Record<string, string | number | boolean | null | undefined>);
-    }
-
-    private async handleResponse<T>(res: Response): Promise<T> {
-        const contentType = res.headers.get("Content-Type") || "";
-        const isJson = contentType.includes("application/json");
-        const payload = isJson ? await res.json() : await res.text();
-
-        if (!res.ok) {
-            const error: any = new Error(
-                (isJson && (payload as any)?.message) || res.statusText || "Request failed",
-            );
-            if (isJson && typeof payload === "object" && payload) {
-                error.code = (payload as any).code;
-                error.meta = (payload as any).meta;
-            }
-            error.status = res.status;
-            throw error;
-        }
-
-        return payload as T;
-    }
-
-    private async postJson<TResponse = unknown>(
-        url: string,
-        body?: unknown,
-        options: RestRequestOptions = {},
-    ): Promise<TResponse> {
-        const headers: Record<string, string> = {
-            "Content-Type": "application/json",
-            ...this.#headers,
-            ...(options.headers ?? {}),
-        };
-
-        const requestBody = options.cleanDeep && body !== undefined ? cleanDeep(body) : body;
-        const res = await fetch(url, {
-            method: "POST",
-            headers,
-            body: requestBody !== undefined ? JSON.stringify(requestBody) : undefined,
-            signal: options.signal,
-        });
-
-        return this.handleResponse<TResponse>(res);
-    }
-
-    private async request<TResponse = any>(
-        collection: string,
-        action: ApiAction,
-        body?: unknown,
-        options: RestRequestOptions = {},
-    ): Promise<TResponse> {
-        const url = this.buildUrl(collection, action, options.query);
-        return this.postJson<TResponse>(url, body, options);
-    }
-
+    /** Authenticate against an auth-enabled collection and store the token. */
     async login<TData = any>(
         collection: string,
         payload: Record<string, unknown>,
         options?: RestRequestOptions,
     ): Promise<{ token: string; data: TData }> {
-        this.clearToken()
-        const res = await this.request<{ token: string; data: TData }>(
-            collection,
-            "login",
-            { payload },
-            options,
-        );
-        if (res?.token) {
-            this.setToken(res.token);
-        }
+        this.clearToken(); // a fresh login never reuses the previous token
+        const res = await this.request<{ token: string; data: TData }>(collection, "login", { payload }, options);
+        if (res?.token) this.setToken(res.token);
         return res;
     }
 
@@ -182,27 +41,22 @@ class Rest {
         payload?: Record<string, unknown>,
         options?: RestRequestOptions,
     ): Promise<TResponse> {
-        const res = await this.request<TResponse>(
-            collection,
-            "logout",
-            payload ? { payload } : undefined,
-            options,
-        );
+        const res = await this.request<TResponse>(collection, "logout", payload ? { payload } : undefined, options);
         this.clearToken();
         return res;
     }
+
+    // ── Reads ────────────────────────────────────────────────────────────
 
     async find<T = any>(
         collection: string,
         params: FindOptions,
         options?: RestRequestOptions,
     ): Promise<T[]> {
-        const merged = { ...(this.#defaultParams?.find ?? {}), ...params };
+        const merged = { ...(this.defaultParams?.find ?? {}), ...params };
         const { useCache, ...requestOptions } = options ?? {};
         const body: Record<string, unknown> = { params: merged };
-        if (useCache !== undefined) {
-            body.options = { useCache }; // TTL is managed server-side (collection/server config)
-        }
+        if (useCache !== undefined) body.options = { useCache }; // TTL is managed server-side
         return this.request<T[]>(collection, "find", body, requestOptions);
     }
 
@@ -212,16 +66,27 @@ class Rest {
         params: Record<string, unknown> = {},
         options?: RestRequestOptions,
     ): Promise<T | null> {
-        const merged = { ...(this.#defaultParams?.findOne ?? {}), ...params };
+        const merged = { ...(this.defaultParams?.findOne ?? {}), ...params };
         return this.request<T | null>(collection, "findOne", { id, params: merged }, options);
     }
+
+    async aggregate<T = any>(
+        collection: string,
+        pipeline: unknown[],
+        options?: RestRequestOptions,
+    ): Promise<T[]> {
+        const extra = this.defaultParams?.aggregate ?? {};
+        return this.request<T[]>(collection, "aggregate", { pipeline, ...extra }, options);
+    }
+
+    // ── Writes ───────────────────────────────────────────────────────────
 
     async insertOne<T = any, TBody = any>(
         collection: string,
         data: TBody,
         options?: RestRequestOptions,
     ): Promise<T & { _id: string }> {
-        const extra = this.#defaultParams?.insertOne ?? {};
+        const extra = this.defaultParams?.insertOne ?? {};
         return this.request<T & { _id: string }>(collection, "insertOne", { data, ...extra }, options);
     }
 
@@ -230,7 +95,7 @@ class Rest {
         data: TBody[],
         options?: RestRequestOptions,
     ): Promise<(T & { _id: string })[]> {
-        const extra = this.#defaultParams?.insertMany ?? {};
+        const extra = this.defaultParams?.insertMany ?? {};
         return this.request<(T & { _id: string })[]>(collection, "insertMany", { data, ...extra }, options);
     }
 
@@ -240,7 +105,7 @@ class Rest {
         update: TUpdate,
         options?: RestRequestOptions,
     ): Promise<T> {
-        const extra = this.#defaultParams?.updateOne ?? {};
+        const extra = this.defaultParams?.updateOne ?? {};
         return this.request<T>(collection, "updateOne", { id, update, ...extra }, options);
     }
 
@@ -250,7 +115,7 @@ class Rest {
         update: TUpdate,
         options?: RestRequestOptions,
     ): Promise<any> {
-        const extra = this.#defaultParams?.updateMany ?? {};
+        const extra = this.defaultParams?.updateMany ?? {};
         return this.request(collection, "updateMany", { ids, update, ...extra }, options);
     }
 
@@ -259,7 +124,7 @@ class Rest {
         id: string,
         options?: RestRequestOptions,
     ): Promise<any> {
-        const extra = this.#defaultParams?.deleteOne ?? {};
+        const extra = this.defaultParams?.deleteOne ?? {};
         return this.request(collection, "deleteOne", { id, ...extra }, options);
     }
 
@@ -268,18 +133,11 @@ class Rest {
         ids: string[],
         options?: RestRequestOptions,
     ): Promise<any> {
-        const extra = this.#defaultParams?.deleteMany ?? {};
+        const extra = this.defaultParams?.deleteMany ?? {};
         return this.request(collection, "deleteMany", { ids, ...extra }, options);
     }
 
-    async aggregate<T = any>(
-        collection: string,
-        pipeline: unknown[],
-        options?: RestRequestOptions,
-    ): Promise<T[]> {
-        const extra = this.#defaultParams?.aggregate ?? {};
-        return this.request<T[]>(collection, "aggregate", { pipeline, ...extra }, options);
-    }
+    // ── Custom actions & services ────────────────────────────────────────
 
     async runAction<T = any>(
         collection: string,
@@ -291,24 +149,8 @@ class Rest {
     }
 
     /**
-     * Tenant-scoped variables API — `POST /vars/:tenant/:action`.
-     * Mirrors the server's `rest.vars` (scope, meta, TTL).
-     *
-     * ```ts
-     * await api.vars.set('config', 'licence', 'RDX00');
-     * const licence = await api.vars.get('config', 'licence');
-     * await api.vars.scope(companyId).set('config', 'licence', 'ACME-001', { ttl: '30d' });
-     * ```
-     */
-    get vars(): Vars {
-        return new Vars((action, body, options) =>
-            this.postJson<any>(this.buildVarsUrl(action, options?.query), body, options ?? {}),
-        );
-    }
-
-    /**
-     * Calls `POST /services/:tenant/:service/:action` (server handler: `SERVICE_PREFIX`).
-     * @param service — service name (`cfg.services` config)
+     * Calls an action of a service (`cfg.services`), on its own family route.
+     * @param service — service name
      * @param action — name of the entry in `service.actions`
      */
     async runService<T = any>(
@@ -322,10 +164,11 @@ class Rest {
         return this.postJson<T>(url, data !== undefined ? { data } : undefined, opts);
     }
 
+    // ── Files ────────────────────────────────────────────────────────────
+
     /**
-     * Uploads one or more files via `POST /upload/:tenant/:collection`.
-     * The files are sent as `multipart/form-data`.
-     * Uses the additional fields to send metadata.
+     * Uploads one or more files (`multipart/form-data`) to a file collection —
+     * one document per file. `data` carries the collection's custom fields.
      */
     async upload<T extends FileResult = FileResult>(
         collection: string,
@@ -338,56 +181,21 @@ class Rest {
     ): Promise<T | T[]> {
         const files = Array.isArray(file) ? file : [file];
         const fieldName = opts?.fieldName ?? "file";
-
-        const appendData = (formData: FormData) => {
-            if (data) {
-                for (const [key, value] of Object.entries(data)) {
-                    formData.append(key, String(value));
-                }
-            }
-        };
-
-        if (files.length === 1) {
-            const url = this.buildUploadUrl(collection);
-            const formData = new FormData();
-            formData.append(fieldName, files[0]!);
-            appendData(formData);
-
-            const res = await fetch(url, {
-                method: "POST",
-                headers: { ...this.#headers },
-                body: formData,
-                signal: opts?.signal,
-            });
-
-            return this.handleResponse<T>(res);
-        }
-
-        // Multiple upload
-        const url = this.buildUploadUrl(collection);
         const formData = new FormData();
-        for (let i = 0; i < files.length; i++) {
-            formData.append(fieldName, files[i]!);
+        for (const entry of files) formData.append(fieldName, entry);
+
+        if (data) {
+            for (const [key, value] of Object.entries(data)) formData.append(key, String(value));
         }
-        appendData(formData);
 
-        const res = await fetch(url, {
-            method: "POST",
-            headers: { ...this.#headers },
-            body: formData,
-            signal: opts?.signal,
-        });
-
-        return this.handleResponse<T[]>(res);
+        return this.postForm<T | T[]>(this.buildUploadUrl(collection), formData, opts?.signal);
     }
 
-    /**
-     * Returns the full URL to serve a file.
-     */
+    /** The URL serving a file, with optional image transformations. */
     getFileUrl(collection: string, filename: string, transform?: {
         width?: number;
         height?: number;
-        format?: 'webp' | 'jpeg' | 'png' | 'avif';
+        format?: "webp" | "jpeg" | "png" | "avif";
         quality?: number;
     }): string {
         let url = this.buildFileUrl(collection, filename);
@@ -397,13 +205,13 @@ class Rest {
             if (transform.height) params.h = String(transform.height);
             if (transform.format) params.format = transform.format;
             if (transform.quality) params.q = String(transform.quality);
-            url = withQuery(url, params);
+            url = withQueryParams(url, params);
         }
         return url;
     }
 
     /**
-     * Deletes a file via `DELETE /files/:tenant/:collection/:fileId`.
+     * Deletes a file document and its stored binary.
      * @param fileId — the `_id` of the file document (returned by `upload()`)
      */
     async deleteFile<TResponse = { message: string; ok: boolean }>(
@@ -411,29 +219,26 @@ class Rest {
         fileId: string,
         signal?: AbortSignal,
     ): Promise<TResponse> {
-        const url = joinURL(this.#server, "files", this.#tenant, collection, fileId);
-        const res = await fetch(url, {
-            method: "DELETE",
-            headers: { ...this.#headers },
-            signal,
-        });
-        return this.handleResponse<TResponse>(res);
+        return this.remove<TResponse>(this.buildFileUrl(collection, fileId), signal);
     }
 
-    /**
-     * Fetch the public server configuration (non-sensitive only).
-     * GET /_dnax/config
-     */
-    async getConfig(): Promise<PublicConfig> {
-        const url = joinURL(this.#server, '_dnax', 'config', this.#tenant);
-        const res = await fetch(url, {
-            method: 'GET',
-            headers: { ...this.#headers },
-        });
-        return this.handleResponse<PublicConfig>(res);
+    // ── Internals ────────────────────────────────────────────────────────
+
+    private request<TResponse = any>(
+        collection: string,
+        action: string,
+        body?: unknown,
+        options: RestRequestOptions = {},
+    ): Promise<TResponse> {
+        return this.postJson<TResponse>(this.buildUrl(collection, action, options.query), body, options);
     }
 }
 
-export {
-    Rest,
-};
+function withQueryParams(url: string, params: Record<string, string>): string {
+    const search = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) search.set(key, value);
+    const query = search.toString();
+    return query ? `${url}?${query}` : url;
+}
+
+export { Rest };

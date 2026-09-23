@@ -1,5 +1,6 @@
 import { Glob } from "bun"
 import { cfg } from "../server/config"
+import { isReservedFamily } from "./endpoints"
 import path from "path"
 import fs from "fs/promises"
 
@@ -25,6 +26,18 @@ async function loadRoutes() {
                             _tenant_: tenant.id,
                             _prefix_: tenant.routes?.prefix,
                         })
+
+                        // A route mounted under a family segment the framework owns
+                        // (`/api/v1/vars/x`) is registered first and would shadow the
+                        // framework API silently — say it out loud.
+                        const path = String(routeModule.default.path ?? '');
+                        const family = path.replace(/^\/+/, '').split('/')[0];
+                        if (family && isReservedFamily(family)) {
+                            console.warn(
+                                `Route '${tenant.routes?.prefix}${path}' of tenant '${tenant.id}' shadows the `
+                                + `framework '/api/…/${family}/…' API: rename it or change the route prefix.`,
+                            );
+                        }
                     }
                 }
             }

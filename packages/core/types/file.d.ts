@@ -16,11 +16,11 @@ type FileAccessHandler = (ctx: {
 type FileApiAccess = {
     /** Default access rule applied when no per-operation rule is set */
     '*'?: boolean | FileAccessHandler;
-    /** Access control for POST /upload/:tenant_id/:slug */
+    /** Access control for POST /api/:tenant_id/upload/:slug */
     upload?: boolean | FileAccessHandler;
-    /** Access control for GET /files/:tenant_id/:slug/:file */
+    /** Access control for GET /api/:tenant_id/files/:slug/:file */
     read?: boolean | FileAccessHandler;
-    /** Access control for DELETE /files/:tenant_id/:slug/:file */
+    /** Access control for DELETE /api/:tenant_id/files/:slug/:file */
     delete?: boolean | FileAccessHandler;
 };
 
@@ -31,11 +31,11 @@ type FileApiAccess = {
  * for handling file uploads, storage, and serving.
  *
  * Each file collection generates:
- *   POST   /upload/:tenant_id/:slug       — upload a file
- *   GET    /files/:tenant_id/:slug/:file  — serve/download a file
+ *   POST   /api/:tenant_id/upload/:slug       — upload a file
+ *   GET    /api/:tenant_id/files/:slug/:file  — serve/download a file
  */
 export type FileCollection = {
-    /** Unique identifier used in routes: `/upload/:tenant_id/:slug` */
+    /** Unique identifier used in routes: `/api/:tenant_id/upload/:slug` */
     slug: string;
     hooks?: {
         beforeOperation?: HooksCollection['beforeOperation'];
@@ -54,7 +54,7 @@ export type FileCollection = {
         maxSize?: number;
         /**
          * Image transformations (resize, format, etc.).
-         * Applied on-the-fly when serving via GET /files/:tenant_id/:slug/:file
+         * Applied on-the-fly when serving via GET /api/:tenant_id/files/:slug/:file
          */
         transformations?: {
             /** Resize to max width in pixels */

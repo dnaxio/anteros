@@ -3,9 +3,25 @@ import { cfg } from "./config";
 import path from "path";
 import { jwt } from "../utils/func";
 import { useRest } from "../database/rest";
+import { createAgents } from "../lib/agents";
+import { createApi } from "../lib/api";
 import { io } from "./io";
 import { requestCtxStorage } from "../lib/asyncContextStorage";
 import type { HonoVariables } from "./env";
+
+/** The context of a route handler — `rest` and `agents` share the same tenant. */
+function routeContext(c: any, tenantId: string) {
+    const rest = new useRest({ tenant_id: tenantId });
+    return {
+        c,
+        rest,
+        // Tenant-scoped LLM registry, bound to this request's `rest`
+        agents: createAgents(tenantId, rest),
+        api: createApi(rest),
+        jwt: jwt,
+        io: io,
+    };
+}
 
 function initializeRoutes(app: Hono<{ Variables: HonoVariables }>) {
     for (let route of cfg.routes ?? []) {
@@ -24,42 +40,21 @@ function initializeRoutes(app: Hono<{ Variables: HonoVariables }>) {
             if (route.method == "GET") {
                 app.get(routePath, async (c) => { //
                     resolveTenant();
-                    return route.handler({
-                        c,
-                        rest: new useRest({
-                            tenant_id: route._tenant_,
-                        }),
-                        jwt: jwt,
-                        io: io,
-                    });
+                    return route.handler(routeContext(c, route._tenant_!));
                 });
             }
 
             if (route.method == 'POST') {
                 app.post(routePath, async (c) => {
                     resolveTenant();
-                    return route.handler({
-                        c,
-                        rest: new useRest({
-                            tenant_id: route._tenant_,
-                        }),
-                        jwt: jwt,
-                        io: io,
-                    });
+                    return route.handler(routeContext(c, route._tenant_!));
                 });
             }
 
             if (route.method == "PUT") {
                 app.put(routePath, async (c) => { //
                     resolveTenant();
-                    return route.handler({
-                        c,
-                        rest: new useRest({
-                            tenant_id: route._tenant_,
-                        }),
-                        jwt: jwt,
-                        io: io,
-                    });
+                    return route.handler(routeContext(c, route._tenant_!));
                 });
             }
         }

@@ -1,7 +1,7 @@
 import { define } from "@anteros/core"
 
 /**
- * Example collection — exposed at `POST /api/{{tenant}}/items/:action`
+ * Example collection — exposed at `POST /api/{{tenant}}/collections/items/:action`
  * (`find`, `findOne`, `insertOne`, `updateOne`, `deleteOne`, …).
  *
  * Docs: https://github.com/dnaxio/anteros

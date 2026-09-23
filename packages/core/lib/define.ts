@@ -159,7 +159,7 @@ function Middleware(config: GlobalMiddlewareConfig): GlobalMiddlewareConfig {
 }
 
 import type { WorkflowDefinition } from "../types/workflow";
-import type { AgentConfig, AgentTool } from "../types/agent";
+import type { AgentConfig, AgentTool, AgentToolDefinition } from "../types/agent";
 
 export function Workflow<TData = any>(workflow: WorkflowDefinition<TData>): WorkflowDefinition<TData> {
     return {
@@ -172,17 +172,21 @@ export function Workflow<TData = any>(workflow: WorkflowDefinition<TData>): Work
 /**
  * Declares an LLM agent — `{tenant.dir}/agents/**\/*.agent.ts`.
  *
+ * `id` and `description` are **required**: the id identifies it (and looks it up),
+ * the description says what it is for — it is served by `info` and read by humans.
+ *
  * @example
  * ```ts
  * export default define.Agent({
  *   id: 'weather',
+ *   description: 'Answers weather questions with a live forecast.',
  *   instructions: 'You are a concise weather assistant.',
  *   provider: { model: 'gpt-4o-mini', compatible: 'openai' },
  *   tools: { forecast },
  * })
  * ```
  */
-function Agent(config: AgentConfig): AgentConfig {
+function Agent(config: AgentConfig & { id: string; description: string }): AgentConfig {
     return {
         ...config,
         enabled: config.enabled ?? true,
@@ -191,10 +195,11 @@ function Agent(config: AgentConfig): AgentConfig {
 }
 
 /**
- * Declares an agent tool — `define.Tool({ description, inputSchema, execute })`.
+ * Declares an agent tool — `define.Tool({ id, description, inputSchema, execute })`.
+ * The `id` is **required** (it is the name the model calls).
  * A `define.McpTool` is accepted by an agent as-is.
  */
-function Tool(tool: AgentTool): AgentTool {
+function Tool(tool: AgentToolDefinition): AgentToolDefinition {
     return {
         ...tool,
         enabled: tool.enabled ?? true,

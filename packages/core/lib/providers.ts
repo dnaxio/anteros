@@ -1,9 +1,12 @@
 import { AppError } from "./error";
 import type {
     AgentCompatible,
-    AgentContentPart,
+    AgentMediaPart,
     AgentMessage,
     AgentProvider,
+    AgentThinking,
+    AgentThinkingBlock,
+    AgentToolChoice,
     AgentUsage,
 } from "../types/agent";
 
@@ -34,6 +37,10 @@ export type ModelChatRequest = {
     system?: string;
     messages: AgentMessage[];
     tools?: AgentToolSpec[];
+    /** How the model may use the tools (default: it chooses). */
+    toolChoice?: AgentToolChoice;
+    /** Extended thinking — mapped to a budget (Anthropic) or an effort (OpenAI). */
+    thinking?: AgentThinking;
     /** Per-request override of the adapter's `options.temperature`. */
     temperature?: number;
     /** Per-request override of the adapter's `options.maxTokens`. */
@@ -48,11 +55,22 @@ export type ModelChatResponse = {
     toolCalls: Array<{ id: string; name: string; argsText: string }>;
     finishReason: string;
     usage: AgentUsage;
+    /** The model's reasoning, when extended thinking is on. */
+    reasoning?: string;
+    /** The raw reasoning blocks — Anthropic needs them echoed back with a tool round. */
+    thinking?: AgentThinkingBlock[];
     raw?: any;
 };
 
 export type ModelStreamEvent =
     | { type: "text"; text: string }
+    /** Thinking output — the consumer decides whether to show it. */
+    | { type: "reasoning"; text: string }
+    /**
+     * The finished reasoning blocks, signatures included — emitted at the end of a
+     * turn. Anthropic requires them to be echoed back verbatim on a tool round.
+     */
+    | { type: "thinking_blocks"; blocks: AgentThinkingBlock[] }
     | { type: "tool_call"; index: number; id?: string; name?: string; argsText?: string }
     | { type: "usage"; usage: Partial<AgentUsage> }
     | { type: "finish"; finishReason: string };
@@ -125,13 +143,46 @@ function resolveBaseUrl(provider: AgentProvider, compatible: AgentCompatible): s
 
 // ─── Message conversion ──────────────────────────────────────────────────
 
-function openaiContent(content: string | AgentContentPart[]): any {
-    if (typeof content === "string") return content;
-    return content.map((part) =>
-        part.type === "text"
-            ? { type: "text", text: part.text }
-            : { type: "image_url", image_url: { url: `data:${part.mimeType ?? "image/png"};base64,${part.data}` } },
+/** A part the adapters must never see — `normalizeMessages` hoists tool parts away. */
+function unsupportedPart(part: unknown): AppError {
+    return new AppError(
+        `Unsupported content part '${(part as any)?.type}' — a \`tool-call\` / \`tool-result\` part belongs to the message, not its content`,
+        { status: 500, code: "AGENT_CONTENT_INVALID" },
     );
+}
+
+function openaiContent(content: string | AgentMediaPart[]): any {
+    if (typeof content === "string") return content;
+    return content.map((part) => {
+        switch (part.type) {
+            case "text":
+                return { type: "text", text: part.text };
+            case "image":
+                // A URL is handed to the endpoint (it fetches the image itself);
+                // base64 becomes the `data:` URL OpenAI expects
+                return {
+                    type: "image_url",
+                    image_url: {
+                        url: part.url ?? `data:${part.mimeType ?? "image/png"};base64,${part.data}`,
+                    },
+                };
+            case "file":
+                // Document input (PDF) — supported by the recent models; a model that
+                // does not accept it answers with a clear provider error. There is no
+                // URL form: it has been inlined by `normalizeMessages`.
+                return {
+                    type: "file",
+                    file: {
+                        filename: part.name ?? "document.pdf",
+                        file_data: part.url ?? `data:${part.mimeType ?? "application/pdf"};base64,${part.data}`,
+                    },
+                };
+            default:
+                // `tool-call` / `tool-result` parts are hoisted by `normalizeMessages`
+                // before this point — reaching one here is a bug, not a payload
+                throw unsupportedPart(part);
+        }
+    });
 }
 
 /** `AgentMessage[]` → OpenAI `messages[]`. */
@@ -139,15 +190,18 @@ function openaiMessages(system: string | undefined, messages: AgentMessage[]): a
     const out: any[] = [];
     if (system) out.push({ role: "system", content: system });
     for (const message of messages) {
+        const name = message.name ? { name: message.name } : {};
         switch (message.role) {
             case "system":
-                out.push({ role: "system", content: message.content });
+            case "developer":
+                // `developer` is OpenAI's own role — passed through as such
+                out.push({ role: message.role, content: message.content, ...name });
                 break;
             case "user":
-                out.push({ role: "user", content: openaiContent(message.content) });
+                out.push({ role: "user", content: openaiContent(message.content), ...name });
                 break;
             case "assistant": {
-                const msg: any = { role: "assistant", content: message.content ?? null };
+                const msg: any = { role: "assistant", content: message.content ?? null, ...name };
                 if (message.toolCalls?.length) {
                     msg.tool_calls = message.toolCalls.map((call) => ({
                         id: call.id,
@@ -166,16 +220,30 @@ function openaiMessages(system: string | undefined, messages: AgentMessage[]): a
     return out;
 }
 
-function anthropicContent(content: string | AgentContentPart[]): any {
+function anthropicContent(content: string | AgentMediaPart[]): any {
     if (typeof content === "string") return [{ type: "text", text: content }];
-    return content.map((part) =>
-        part.type === "text"
-            ? { type: "text", text: part.text }
-            : {
-                type: "image",
-                source: { type: "base64", media_type: part.mimeType ?? "image/png", data: part.data },
-            },
-    );
+    return content.map((part) => {
+        switch (part.type) {
+            case "text":
+                return { type: "text", text: part.text };
+            case "image":
+                return {
+                    type: "image",
+                    source: part.url
+                        ? { type: "url", url: part.url }
+                        : { type: "base64", media_type: part.mimeType ?? "image/png", data: part.data },
+                };
+            case "file":
+                return {
+                    type: "document",
+                    source: part.url
+                        ? { type: "url", url: part.url }
+                        : { type: "base64", media_type: part.mimeType ?? "application/pdf", data: part.data },
+                };
+            default:
+                throw unsupportedPart(part);
+        }
+    });
 }
 
 /**
@@ -183,7 +251,9 @@ function anthropicContent(content: string | AgentContentPart[]): any {
  *
  * Two structural differences with OpenAI: `system` is out of band (returned
  * separately) and a tool result is a **user** message holding `tool_result`
- * blocks — consecutive results are merged into a single turn.
+ * blocks — consecutive results are merged into a single turn. A `developer`
+ * message joins the system prompt, and a message `name` is dropped (the API has
+ * no such field).
  */
 function anthropicMessages(messages: AgentMessage[]): { system: string | undefined; messages: any[] } {
     const out: any[] = [];
@@ -192,13 +262,16 @@ function anthropicMessages(messages: AgentMessage[]): { system: string | undefin
     for (const message of messages) {
         switch (message.role) {
             case "system":
+            case "developer":
                 systems.push(message.content);
                 break;
             case "user":
                 out.push({ role: "user", content: anthropicContent(message.content) });
                 break;
             case "assistant": {
-                const blocks: any[] = [];
+                // The thinking blocks come first and **as returned**: Anthropic rejects a
+                // tool round whose assistant turn lost its signed reasoning blocks.
+                const blocks: any[] = [...(message.thinking ?? [])];
                 if (message.content) blocks.push({ type: "text", text: message.content });
                 for (const call of message.toolCalls ?? []) {
                     blocks.push({ type: "tool_use", id: call.id, name: call.name, input: call.args ?? {} });
@@ -241,6 +314,39 @@ function anthropicToolSpecs(tools: AgentToolSpec[]): any[] {
         description: tool.description,
         input_schema: tool.parameters,
     }));
+}
+
+/** Extended thinking, normalized: an effort level and/or an Anthropic token budget. */
+function thinkingOf(thinking?: AgentThinking): { effort: "low" | "medium" | "high"; budgetTokens: number } | null {
+    if (!thinking) return null;
+    if (thinking === true) return { effort: "medium", budgetTokens: 4_096 };
+    if (thinking === "low") return { effort: "low", budgetTokens: 2_048 };
+    if (thinking === "medium") return { effort: "medium", budgetTokens: 4_096 };
+    if (thinking === "high") return { effort: "high", budgetTokens: 8_192 };
+
+    const budgetTokens = Number((thinking as { budgetTokens?: number })?.budgetTokens);
+    if (!Number.isFinite(budgetTokens) || budgetTokens < 1_024) {
+        throw new AppError("`thinking.budgetTokens` must be at least 1024", {
+            status: 400, code: "AGENT_THINKING_INVALID",
+        });
+    }
+    // OpenAI-compatible endpoints only know levels — pick the closest one
+    const effort = budgetTokens <= 2_048 ? "low" : budgetTokens <= 8_192 ? "medium" : "high";
+    return { effort, budgetTokens };
+}
+
+/** `tool_choice` — the one place the two vocabularies differ. */
+function openaiToolChoice(choice?: AgentToolChoice): any | undefined {
+    if (!choice || choice === "auto") return undefined;
+    if (choice === "none" || choice === "required") return choice;
+    return { type: "function", function: { name: choice.name } };
+}
+
+function anthropicToolChoice(choice?: AgentToolChoice): any | undefined {
+    if (!choice || choice === "auto") return undefined;
+    if (choice === "none") return { type: "none" };
+    if (choice === "required") return { type: "any" };
+    return { type: "tool", name: choice.name };
 }
 
 /** Provider-specific finish reasons → the normalized vocabulary. */
@@ -412,8 +518,10 @@ function openaiAdapter(provider: AgentProvider, compatible: AgentCompatible): Mo
         };
         if (req.tools?.length) {
             payload.tools = openaiToolSpecs(req.tools);
-            payload.tool_choice = "auto";
+            payload.tool_choice = openaiToolChoice(req.toolChoice) ?? "auto";
         }
+        const thinking = thinkingOf(req.thinking);
+        if (thinking) payload.reasoning_effort = thinking.effort;
         const temperature = req.temperature ?? options.temperature;
         if (temperature !== undefined) payload.temperature = temperature;
         if (options.topP !== undefined) payload.top_p = options.topP;
@@ -456,6 +564,11 @@ function openaiAdapter(provider: AgentProvider, compatible: AgentCompatible): Mo
 
             return {
                 text: typeof choice?.message?.content === "string" ? choice.message.content : "",
+                // Reasoning models on OpenAI-compatible gateways (DeepSeek, Groq…) use
+                // `reasoning_content` — never mixed with the answer
+                ...(typeof choice?.message?.reasoning_content === "string" && choice.message.reasoning_content
+                    ? { reasoning: choice.message.reasoning_content }
+                    : {}),
                 toolCalls,
                 finishReason: normalizeFinishReason(choice?.finish_reason),
                 usage: mapUsage(raw?.usage, compatible),
@@ -496,6 +609,9 @@ function openaiAdapter(provider: AgentProvider, compatible: AgentCompatible): Mo
                 if (typeof delta?.content === "string" && delta.content) {
                     yield { type: "text", text: delta.content };
                 }
+                if (typeof delta?.reasoning_content === "string" && delta.reasoning_content) {
+                    yield { type: "reasoning", text: delta.reasoning_content };
+                }
                 for (const call of delta?.tool_calls ?? []) {
                     const index = call?.index ?? 0;
                     const argsText = call?.function?.arguments;
@@ -533,16 +649,28 @@ function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible):
     const body = (req: ModelChatRequest, stream: boolean): any => {
         const converted = anthropicMessages(req.messages);
         const system = [req.system, converted.system].filter(Boolean).join("\n\n");
+        const thinking = thinkingOf(req.thinking);
+        const maxTokens = req.maxTokens ?? options.maxTokens ?? DEFAULT_MAX_TOKENS;
+
         const payload: any = {
             model: provider.model,
             messages: converted.messages,
-            // `max_tokens` is REQUIRED by the Messages API
-            max_tokens: req.maxTokens ?? options.maxTokens ?? DEFAULT_MAX_TOKENS,
+            // `max_tokens` is REQUIRED by the Messages API — and must stay **above**
+            // the thinking budget, so it is raised rather than refused
+            max_tokens: thinking && maxTokens <= thinking.budgetTokens
+                ? thinking.budgetTokens + 1_024
+                : maxTokens,
         };
         if (system) payload.system = system;
-        if (req.tools?.length) payload.tools = anthropicToolSpecs(req.tools);
+        if (req.tools?.length) {
+            payload.tools = anthropicToolSpecs(req.tools);
+            const toolChoice = anthropicToolChoice(req.toolChoice);
+            if (toolChoice) payload.tool_choice = toolChoice;
+        }
+        if (thinking) payload.thinking = { type: "enabled", budget_tokens: thinking.budgetTokens };
         const temperature = req.temperature ?? options.temperature;
-        if (temperature !== undefined) payload.temperature = temperature;
+        // Extended thinking requires the default temperature (1)
+        if (temperature !== undefined && !thinking) payload.temperature = temperature;
         if (options.topP !== undefined) payload.top_p = options.topP;
         if (stream) payload.stream = true;
         return payload;
@@ -582,6 +710,17 @@ function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible):
             return {
                 text: blocks.filter((block) => block?.type === "text").map((block) => block.text).join(""),
                 toolCalls,
+                // The raw blocks are kept: a tool round must echo the **signed** ones back
+                ...(blocks.some((block) => block?.type === "thinking" || block?.type === "redacted_thinking")
+                    ? {
+                        thinking: blocks.filter((block) =>
+                            block?.type === "thinking" || block?.type === "redacted_thinking"),
+                        reasoning: blocks
+                            .filter((block) => block?.type === "thinking")
+                            .map((block) => block.thinking)
+                            .join(""),
+                    }
+                    : {}),
                 finishReason: normalizeFinishReason(raw?.stop_reason),
                 usage: mapUsage(raw?.usage, compatible),
                 raw,
@@ -589,6 +728,10 @@ function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible):
         },
 
         async *chatStream(req) {
+            // Thinking blocks, accumulated by index — signatures included, so the run
+            // can echo them back if the model then asks for a tool
+            const thinking = new Map<number, any>();
+
             const response = await fetchWithRetry(url, {
                 method: "POST",
                 headers: headers(),
@@ -625,22 +768,38 @@ function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible):
                     }
                     case "content_block_start": {
                         const block = payload?.content_block;
+                        const index = payload?.index ?? 0;
                         if (block?.type === "tool_use") {
                             yield {
                                 type: "tool_call",
-                                index: payload.index ?? 0,
+                                index,
                                 ...(block.id ? { id: block.id } : {}),
                                 ...(block.name ? { name: block.name } : {}),
                             };
+                        } else if (block?.type === "thinking") {
+                            // A reasoning block: text and signature arrive as deltas
+                            thinking.set(index, { type: "thinking", thinking: "" });
+                        } else if (block?.type === "redacted_thinking" && block.data) {
+                            thinking.set(index, { type: "redacted_thinking", data: block.data });
                         }
                         break;
                     }
                     case "content_block_delta": {
                         const delta = payload?.delta;
+                        const index = payload?.index ?? 0;
                         if (delta?.type === "text_delta" && delta.text) {
                             yield { type: "text", text: delta.text };
+                        } else if (delta?.type === "thinking_delta" && delta.thinking) {
+                            const block = thinking.get(index) ?? { type: "thinking", thinking: "" };
+                            block.thinking = `${block.thinking ?? ""}${delta.thinking}`;
+                            thinking.set(index, block);
+                            yield { type: "reasoning", text: delta.thinking };
+                        } else if (delta?.type === "signature_delta" && delta.signature) {
+                            const block = thinking.get(index) ?? { type: "thinking", thinking: "" };
+                            block.signature = delta.signature;
+                            thinking.set(index, block);
                         } else if (delta?.type === "input_json_delta" && delta.partial_json) {
-                            yield { type: "tool_call", index: payload.index ?? 0, argsText: delta.partial_json };
+                            yield { type: "tool_call", index, argsText: delta.partial_json };
                         }
                         break;
                     }
@@ -660,6 +819,14 @@ function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible):
                             reason: { provider: compatible },
                         });
                 }
+            }
+
+            // The reasoning blocks, whole and signed — what a tool round must echo
+            if (thinking.size) {
+                yield {
+                    type: "thinking_blocks",
+                    blocks: [...thinking.entries()].sort((a, b) => a[0] - b[0]).map(([, block]) => block),
+                };
             }
         },
     };

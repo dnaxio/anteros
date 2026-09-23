@@ -2,6 +2,8 @@ import type { Server as SocketIO } from "socket.io";
 import type { useRest } from "../database/rest";
 import type { fn } from "../lib/error";
 import type { jwt } from "../utils/func";
+import type { TenantAgents } from "./agent";
+import type { Api } from "../lib/api";
 
 export type Service = {
     _isService_?: boolean;
@@ -31,7 +33,11 @@ export type Service = {
             jwt: typeof jwt;
             error: typeof fn.error;
             io: SocketIO;
-            rest: InstanceType<typeof useRest>
+            rest: InstanceType<typeof useRest>;
+            /** Tenant-scoped LLM registry — `agents.get('support')`, bound to `rest`. */
+            agents: TenantAgents;
+            /** The in-process facade — `api.collection("orders")`, `api.service("analytics")`, `api.vars`, `api.files`, `api.agent(id)`. */
+            api: Api;
         }) => Promise<any>
     }
 }

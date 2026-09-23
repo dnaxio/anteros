@@ -1,7 +1,7 @@
 import { define, v } from "@anteros/core"
 
 /**
- * Example MCP tool — exposed to LLM clients at `POST /mcp/{{tenant}}`
+ * Example MCP tool — exposed to LLM clients at `POST /api/{{tenant}}/mcp`
  * (Model Context Protocol, Streamable HTTP).
  *
  * `inputSchema` uses the same Joi instance (`v`) as collections, and `exec`

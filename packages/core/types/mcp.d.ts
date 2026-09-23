@@ -2,6 +2,8 @@ import type Joi from "joi";
 import type { ContentBlock } from "@modelcontextprotocol/sdk/types.js";
 import type { Context } from "hono";
 import type { useRest } from "../database/rest";
+import type { TenantAgents } from "./agent";
+import type { Api } from "../lib/api";
 
 /**
  * MCP tool result — the Model Context Protocol `CallToolResult` shape.
@@ -15,7 +17,7 @@ export type McpToolResult = {
 
 /**
  * MCP tool definition — auto-loaded from `{tenant.dir}/mcp/tools/**\/*.tool.ts`.
- * Served over the MCP protocol at `GET/POST /mcp/:tenant_id` (Streamable HTTP).
+ * Served over the MCP protocol at `GET/POST /api/:tenant_id/mcp` (Streamable HTTP).
  */
 export type McpTool = {
     _isMcpTool_?: boolean;
@@ -32,6 +34,10 @@ export type McpTool = {
     exec: (ctx: {
         c: Context;
         rest: InstanceType<typeof useRest>;
+        /** Tenant-scoped LLM registry — `agents.get('support')`, bound to `rest`. */
+        agents: TenantAgents;
+        /** The in-process facade — `api.collection("orders")`, `api.service("analytics")`, `api.vars`, `api.files`, `api.agent(id)`. */
+        api: Api;
         /** Parsed & validated arguments */
         args: Record<string, any>;
     }) => McpToolResult | Promise<McpToolResult>;
@@ -73,6 +79,10 @@ export type McpResource = {
     read: (ctx: {
         c: Context;
         rest: InstanceType<typeof useRest>;
+        /** Tenant-scoped LLM registry — `agents.get('support')`, bound to `rest`. */
+        agents: TenantAgents;
+        /** The in-process facade — `api.collection("orders")`, `api.service("analytics")`, `api.vars`, `api.files`, `api.agent(id)`. */
+        api: Api;
         /** Params extracted from the URI template (e.g. `{ id: '123' }`) */
         params: Record<string, string>;
         /** The exact URI the client requested */

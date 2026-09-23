@@ -3,7 +3,7 @@ import type { useRest } from "../database/rest";
 import type { fn } from "../lib/error";
 import type { jwt } from "../utils/func";
 
-/** Actions exposed by the variables HTTP API (`POST /vars/:tenant_id/:action`). */
+/** Actions exposed by the variables HTTP API (`POST /api/:tenant_id/vars/:action`). */
 export type VarsActions =
     | "set"
     | "setMany"
@@ -82,7 +82,7 @@ export type VarDefinition = {
     meta?: Field[];
     /** Variables — a raw default value, or a `VarSpec`. */
     vars: Record<string, any>;
-    /** HTTP API access rules — required to expose this namespace over `POST /vars/:tenant_id/:action`. */
+    /** HTTP API access rules — required to expose this namespace over `POST /api/:tenant_id/vars/:action`. */
     api?: VarsApi;
     /** Opt this namespace into replication — like a collection, but scoped to this namespace. */
     replication?: VarsReplicationConfig;
