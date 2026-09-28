@@ -21,6 +21,8 @@ beforeAll(async () => {
             dir: "packages/core/tests/fixtures/vars-tenant",
             database: { uri: SRC_DB },
             replication: {
+                // These cases exercise the scan engine (vars namespace filter)
+                mode: "scan",
                 runOnBoot: false,
                 schedule: { interval: "1h" },
                 destinations: [{ id: "backup", uri: DEST_DB }],

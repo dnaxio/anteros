@@ -8,6 +8,7 @@ import type {
     AgentMemory,
     AgentMemoryContext,
     AgentMemoryOptions,
+    AgentMemoryProcessor,
     AgentMemoryState,
     AgentMessage,
     AgentThread,
@@ -15,6 +16,7 @@ import type {
     RedisAgentMemoryOptions,
     RedisClientLike,
 } from "../types/agent";
+import type { Agent } from "./agent";
 
 /**
  * Conversation stores — `agents.memory`.
@@ -84,6 +86,106 @@ function threadTitle(messages: AgentMessage[]): string | undefined {
 
 function cloneMessages(messages: AgentMessage[]): AgentMessage[] {
     return messages.map((message) => ({ ...message }));
+}
+
+// ─── Compaction (the summarising processor) ──────────────────────────────
+
+/** Options of `agents.memory.summarize()`. */
+export type SummarizeOptions = {
+    /** The agent that **writes** the summary — a cheap model is the whole point. */
+    agent: Agent;
+    /** Turns kept verbatim at the end of the thread (default 10). */
+    keep?: number;
+    /** Start compacting above this many messages (default `keep * 3`). */
+    threshold?: number;
+    /** Build the prompt from the turns being dropped (default: a transcript). */
+    prompt?: (dropped: AgentMessage[]) => string;
+};
+
+/** A conversation, as text — what the summariser is asked to condense. */
+function transcript(messages: AgentMessage[]): string {
+    return messages
+        .map((message) => {
+            const content = typeof message.content === "string"
+                ? message.content
+                : Array.isArray(message.content)
+                    ? message.content.map((part: any) => (part?.type === "text" ? part.text : `[${part?.type}]`)).join(" ")
+                    : "";
+            return `${message.role}: ${content}`;
+        })
+        .join("\n");
+}
+
+/** How a summary re-enters the conversation — one turn, clearly labelled. */
+function summaryTurn(summary: string): AgentMessage {
+    return { role: "user", content: `[Summary of the conversation so far]\n${summary}` };
+}
+
+/**
+ * A `load` processor that **compacts a thread that grew too long**: the turns older
+ * than the last `keep` are replaced by a summary written by another agent.
+ *
+ * ```ts
+ * const compact = new Agent({
+ *   id: 'compact', description: 'Condenses a conversation.',
+ *   instructions: 'You condense conversations into dense factual notes.',
+ *   provider: { model: 'gpt-4o-mini' },
+ * });
+ *
+ * define.Agent({ …, memory, processors: [agents.memory.summarize({ agent: compact, keep: 12 })] });
+ * ```
+ *
+ * Why a processor and not a store option: the framework ships no token counter and
+ * no default model — the summariser is **yours**, and so is the prompt (a tenant
+ * condenses a support thread and a legal review very differently). The summary is
+ * **cached in the store's state** (for the thread it belongs to) and only refreshed
+ * once the window has moved on by `keep` turns, so a long conversation costs one
+ * summary per `keep` turns — and the prompt prefix stays stable between refreshes,
+ * which is what a provider cache wants.
+ *
+ * A store without `getState`/`setState` simply writes no summary: the thread is
+ * compacted on every run instead of once in a while.
+ */
+function summarize(options: SummarizeOptions): AgentMemoryProcessor {
+    const keep = Math.max(1, Math.floor(options.keep ?? 10));
+    const threshold = Math.max(keep + 1, Math.floor(options.threshold ?? keep * 3));
+    const build = options.prompt ?? ((dropped: AgentMessage[]) => [
+        "Summarize the conversation below into a dense factual note.",
+        "Keep names, identifiers, decisions, numbers and open questions. State what was asked and what was answered.",
+        "Reply with the summary only — no preamble.",
+        "",
+        transcript(dropped),
+    ].join("\n"));
+
+    return {
+        id: "summarize",
+        async load(messages, ctx) {
+            if (messages.length <= threshold) return;
+
+            const opening = messages[0]?.role === "system" || messages[0]?.role === "developer" ? messages[0] : undefined;
+            const body = opening ? messages.slice(1) : messages;
+            const dropped = body.slice(0, Math.max(0, body.length - keep));
+            if (!dropped.length) return;
+
+            const tail = body.slice(-keep);
+            const head = opening ? [opening] : [];
+
+            // Cached in the store's state: a summary recomputed on every turn would
+            // cost a model call each time **and** move the prompt prefix
+            const key = `summary:${ctx.thread ?? ctx.resourceId ?? "default"}`;
+            const cached = (await ctx.memory?.getState?.(key, ctx))?.value as { summary: string; until: number } | undefined;
+            if (cached && dropped.length - cached.until < keep) {
+                return [...head, summaryTurn(cached.summary), ...tail];
+            }
+
+            const written = await options.agent.generate(build(dropped));
+            const summary = (written.text ?? "").trim();
+            if (!summary) return;
+
+            await ctx.memory?.setState?.(key, { value: { summary, until: dropped.length }, updatedAt: new Date() }, ctx);
+            return [...head, summaryTurn(summary), ...tail];
+        },
+    };
 }
 
 // ─── In-memory ──────────────────────────────────────────────────────────
@@ -364,6 +466,7 @@ export class MongoAgentMemory implements AgentMemory {
 
 export {
     DEFAULT_MAX_MESSAGES,
+    summarize,
     threadKey,
     threadTitle,
     trimMessages,

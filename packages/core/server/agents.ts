@@ -14,6 +14,7 @@ import type {
     AgentGenerateResult,
     AgentInput,
     AgentMessageInput,
+    AgentResume,
 } from "../types/agent";
 
 /**
@@ -74,6 +75,11 @@ type AgentRequestBody = {
     }>;
     /** Read the thread without writing the run back. */
     readOnly?: boolean;
+    /**
+     * Continue a run that paused for an approval — the `resume` payload `generate`
+     * handed back (`{ messages, decisions }`). `input` is then not needed.
+     */
+    resume?: AgentResume;
     /** Mastra-style shorthand — `memory: { thread, resource, readOnly }`. */
     memory?: {
         thread?: string;
@@ -164,6 +170,15 @@ function presentResult(result: AgentGenerateResult) {
         steps: result.steps,
         usage: result.usage,
         finishReason: result.finishReason,
+        // A paused run hands back the conversation to resume with: nothing is stored
+        // until the run completes, and an assistant turn with unanswered calls would
+        // poison the thread
+        ...(result.pendingApprovals?.length
+            ? {
+                pendingApprovals: result.pendingApprovals,
+                resume: { messages: result.messages },
+            }
+            : {}),
     };
 }
 
@@ -180,6 +195,8 @@ function auditInput(input: AgentInput | undefined) {
 type AuditOptions = {
     rest: InstanceType<typeof useRest>;
     agentId: string;
+    /** The prompt's version, when the agent declares one — what produced the answer. */
+    version?: string;
     action: string;
     input?: AgentInput;
     thread?: string;
@@ -190,12 +207,12 @@ type AuditOptions = {
 
 /** One audit entry per call, at the same place as `_vars_:<ns>` — `_agents_:<id>`. */
 async function auditAgent({
-    rest, agentId, action, input, thread, result, error, started,
+    rest, agentId, version, action, input, thread, result, error, started,
 }: AuditOptions): Promise<void> {
     await rest.audit.log({
         action: `agent.${action}`,
         collection: `_agents_:${agentId}`,
-        input: { agent: agentId, thread, ...auditInput(input) },
+        input: { agent: agentId, ...(version ? { version } : {}), thread, ...auditInput(input) },
         // Never the answer, never the tool arguments: the envelope only.
         result: result
             ? {
@@ -288,6 +305,7 @@ function initializeAgents(app: Hono<{ Variables: HonoVariables }>) {
         let rest: InstanceType<typeof useRest> | undefined;
         let tenant_id = '';
         let agentId = '';
+        let agentVersion: string | undefined;
         let action = '';
 
         try {
@@ -323,9 +341,11 @@ function initializeAgents(app: Hono<{ Variables: HonoVariables }>) {
             rest = new useRest({ internal: false, tenant_id });
             const agent = createAgents(tenant_id, rest).get(agentId);
             if (!agent) throw new AppError(`Agent '${agentId}' not found`, { status: 400, code: 'AGENT_NOT_FOUND' });
+            agentVersion = agent.getConfig().version;
 
             const api = agent.getConfig().api;
-            const needsInput = action === 'generate' || action === 'stream' || action === 'object';
+            // A resume carries its own conversation: no input to ask for
+            const needsInput = (action === 'generate' || action === 'stream' || action === 'object') && !body?.resume;
             const input = needsInput ? normalizeInput(body) : undefined;
             // `memory: { thread, resource }` or the flat `thread` / `resource`
             const thread = resolveThread(body);
@@ -353,12 +373,13 @@ function initializeAgents(app: Hono<{ Variables: HonoVariables }>) {
                 // Stop the run when the client disconnects (no tokens past the wire)
                 signal: c.req.raw.signal,
                 ...(body?.files?.length ? { files: body.files } : {}),
+                ...(body?.resume ? { resume: body.resume } : {}),
                 ...(readOnly ? { memory: { readOnly: true } } : {}),
             };
 
             if (action === 'stream') {
                 return streamResponse(c, agent, input as AgentInput, callOptions, {
-                    rest, agentId, action, started,
+                    rest, agentId, action, started, version: agent.getConfig().version,
                 });
             }
 
@@ -430,7 +451,7 @@ function initializeAgents(app: Hono<{ Variables: HonoVariables }>) {
                     throw new AppError(`Action '${action}' not found`, { status: 400, code: 'ACTION_NOT_FOUND' });
             }
 
-            await auditAgent({ rest, agentId, action, input, thread, result, started });
+            await auditAgent({ rest, agentId, action, input, thread, result, started, version: agent.getConfig().version });
             return c.json(response);
         } catch (err: any) {
             if (cfg?.debug) console.error(err);
@@ -438,7 +459,7 @@ function initializeAgents(app: Hono<{ Variables: HonoVariables }>) {
                 await rest.audit.log({
                     action: `agent.${action || 'unknown'}`,
                     collection: `_agents_:${agentId}`,
-                    input: { agent: agentId },
+                    input: { agent: agentId, ...(agentVersion ? { version: agentVersion } : {}) },
                     error: { message: err?.message, code: err?.code || 'INTERNAL_AGENT_ERROR' },
                     duration: Date.now() - started,
                 }).catch(() => {});

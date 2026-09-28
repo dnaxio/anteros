@@ -60,6 +60,15 @@ export type AgentOptions = {
     timeout?: number;
     /** Retries on network errors, 429 and 5xx (default 2). */
     retries?: number;
+    /**
+     * Mark the stable prefix of the prompt for the provider's **prompt cache**
+     * (default `false`). Anthropic only: a `cache_control` breakpoint is set on the
+     * system prompt (instructions + skills + working memory) and on the last tool,
+     * so the instructions are billed once instead of on every run.
+     *
+     * Ignored by an OpenAI-compatible gateway, which caches on its own.
+     */
+    cache?: boolean;
 };
 
 /** Text part of a multimodal message. */
@@ -345,6 +354,21 @@ export type AgentTool = {
     execute?: (input: any, ctx: AgentToolContext) => any | Promise<any>;
     /** MCP-compatible handler (`define.McpTool`) — adapted automatically. */
     exec?: (ctx: any) => any | Promise<any>;
+    /**
+     * Give up on this tool after N ms (default: the agent's `toolTimeoutMs`). The
+     * model is told it timed out and the run continues — an outbound call is the one
+     * thing the framework cannot bound for you.
+     */
+    timeoutMs?: number;
+    /**
+     * Ask the caller before running this tool (a payment, a delete, an email).
+     *
+     * The run **pauses** with `finishReason: 'approval_required'` and
+     * `result.pendingApprovals`; the caller resumes with
+     * `{ resume: { messages: result.messages, decisions } }`. Nothing is executed
+     * before a decision, and a refusal is reported to the model as a tool error.
+     */
+    approval?: boolean;
 };
 
 /** What a tool must carry to be **declared** — `define.Tool` enforces the id. */
@@ -429,6 +453,14 @@ export type AgentMemoryContext = {
      * boundary: gate `history` / `clear` with `api.access`.
      */
     resourceId?: string;
+    /** Memory thread of the run — what a processor keys a per-thread cache on. */
+    thread?: string;
+    /**
+     * The store of the agent running — so a processor can read and write the
+     * scratchpad state of a thread (see `agents.memory.summarize`). Exposed on the
+     * **run** context only.
+     */
+    memory?: AgentMemory;
 };
 
 /** A thread as listed by a memory store (`agents.memory.Mongo().list()`). */
@@ -540,9 +572,48 @@ export type RedisAgentMemoryOptions = AgentMemoryOptions & {
 /** Structured output request — the answer is parsed and validated against `schema`. */
 export type AgentStructuredOutput = {
     schema: Joi.Schema | any;
-    /** Only used by OpenAI-compatible providers (`response_format.json_schema`). */
+    /**
+     * Name of the schema on the wire — `response_format.json_schema.name`
+     * (default: the agent id, sanitized).
+     */
     name?: string;
+    /** What the object holds, sent to the provider next to the schema. */
     description?: string;
+};
+
+/**
+ * A tool call that is waiting for its caller's decision — see
+ * `AgentTool.approval`. Served on `result.pendingApprovals`.
+ */
+export type AgentPendingApproval = {
+    toolCallId: string;
+    name: string;
+    args: any;
+};
+
+/**
+ * What a paused run needs to go on: **the conversation it stopped on**, and one
+ * decision per pending call.
+ *
+ * ```ts
+ * const paused = await agent.generate('Refund order A-1', { thread: 't1' });
+ * if (paused.finishReason === 'approval_required') {
+ *   await agent.generate('ignored — the run resumes from `messages`', {
+ *     thread: 't1',
+ *     resume: { messages: paused.messages, decisions: { [paused.pendingApprovals![0]!.toolCallId]: true } },
+ *   });
+ * }
+ * ```
+ *
+ * The paused step is **not replayed through the model**: the approved tools run and
+ * the loop continues, so approving costs exactly one model call. A call left without
+ * a decision stays pending — the run pauses again.
+ */
+export type AgentResume = {
+    /** The conversation to continue — `result.messages` of the paused run. */
+    messages: AgentMessage[] | AgentMessageInput[];
+    /** One decision per pending call, by `toolCallId` — `true` runs it, `false` refuses it. */
+    decisions: Record<string, boolean>;
 };
 
 export type AgentCallOptions = {
@@ -643,6 +714,31 @@ export type AgentCallOptions = {
     };
     /** Called after each model call, before its tools run. */
     onStepFinish?: (step: AgentStep) => void | Promise<void>;
+    /**
+     * Give up on a single tool after N ms (default: the agent's `toolTimeoutMs`).
+     * A tool that times out is reported to the model as an error, and the run goes on.
+     */
+    toolTimeoutMs?: number;
+    /**
+     * Run the tools of one step **in parallel** (default `false` — sequential).
+     *
+     * Only safe when the tools do not write to the same place: two calls of the same
+     * tool with the same target can interleave. Read-only tools are the point.
+     */
+    parallelTools?: boolean;
+    /**
+     * Store what the run produced even when it **fails** (default `false`).
+     *
+     * Without it, a provider error at step 3 throws and the whole exchange is lost —
+     * the tokens are paid and the thread never hears about it. With it, the thread
+     * keeps the turns up to the failure, and the next call resumes from there.
+     */
+    savePartial?: boolean;
+    /**
+     * Continue a run that paused for an approval instead of starting a new one —
+     * see `AgentResume`.
+     */
+    resume?: AgentResume;
 };
 
 export type AgentGenerateResult<T = any> = {
@@ -658,6 +754,12 @@ export type AgentGenerateResult<T = any> = {
     finishReason: string;
     /** The complete conversation, ready to be persisted. */
     messages: AgentMessage[];
+    /**
+     * Calls waiting for a decision — present (and `finishReason`
+     * `'approval_required'`) when a tool declaring `approval: true` was called.
+     * Resume the run with `{ resume: { messages, decisions } }`.
+     */
+    pendingApprovals?: AgentPendingApproval[];
     error?: string;
 };
 
@@ -773,7 +875,70 @@ export type AgentApi = {
      * Schema returned by the `object` action. Declared **server-side** on purpose:
      * a client never dictates the shape, and the answer is really validated.
      */
+    /** Schema returned by the `object` action. Declared **server-side** on purpose:
+     * a client never dictates the shape, and the answer is really validated.
+     */
     object?: AgentStructuredOutput;
+};
+
+/**
+ * How an agent declares the documents injected into its system prompt — links to
+ * markdown files, nothing else:
+ *
+ * - a **string** is a path or a glob — `.md` only, resolved from the **tenant
+ *   directory** (an absolute path is used as-is): `'./docs/*.md'`, `'./guide/ml.md'`,
+ *   `'./guides/**\/SKILL.md'`
+ * - a **RegExp** is matched against every file of the tenant directory (`.md` only):
+ *   `/^runbooks\/.*\.md$/`
+ */
+export type AgentSkillSource = string | RegExp;
+
+/**
+ * A resolved skill — one markdown file with a frontmatter header:
+ *
+ * ```md
+ * ---
+ * name: pdf-forms
+ * description: Fill, flatten and merge PDF forms. Use for any AcroForm work.
+ * license: MIT
+ * compatibility: Needs the `pdftk` binary.
+ * metadata: { owner: platform }
+ * allowed-tools: read_pdf write_pdf
+ * ---
+ *
+ * # Filling a form
+ * …
+ * ```
+ *
+ * `name` and `description` are required (the name is kebab-case, 1-64 characters,
+ * and must match the containing directory when the file is a `SKILL.md`);
+ * everything else is optional. Unknown keys are kept out of the prompt and logged,
+ * and a file that is not markdown is never a skill — as is one whose body is empty:
+ * a skill *is* the text the model reads.
+ *
+ * The **`content`** is what the model reads — it is part of the system prompt of
+ * every run, so it costs tokens on every call: keep skills short and factual.
+ */
+export type AgentSkill = {
+    /** Kebab-case identifier, unique per agent. */
+    name: string;
+    /** What the skill does and when to use it (≤ 1024 characters). */
+    description: string;
+    /** License name or reference to a bundled license file. */
+    license?: string;
+    /** Environment requirements (≤ 500 characters). */
+    compatibility?: string;
+    /** Arbitrary key-value pairs — metadata only, never injected. */
+    metadata?: Record<string, any>;
+    /**
+     * Tools the skill may use. Parsed and served by `getSkills()`, **not enforced**
+     * by the run (a skill is always in the prompt — there is no activation to scope).
+     */
+    allowedTools?: string[];
+    /** The markdown body — injected as-is, frontmatter stripped. */
+    content: string;
+    /** Where it came from, relative to the tenant directory. */
+    source: string;
 };
 
 /**
@@ -787,6 +952,13 @@ export type AgentConfig = {
     /** Identifier — required, unique per tenant. */
     id?: string;
     name?: string;
+    /**
+     * What this prompt **is** — a free string (`'2026-09-24'`, `'v3'`, a commit).
+     *
+     * Like a workflow's `version`, it is served by `info` and written on every audit
+     * entry, so an answer can be traced back to the prompt that produced it.
+     */
+    version?: string;
     /** What the agent is for — required (served by `info`, read by humans). */
     description?: string;
     instructions: AgentInstructions;
@@ -795,6 +967,30 @@ export type AgentConfig = {
     memory?: AgentMemory;
     /** Max model calls per run (default 5). */
     maxSteps?: number;
+    /** Default deadline for one tool call, in ms — see `AgentTool.timeoutMs`. */
+    toolTimeoutMs?: number;
+    /** Run the tools of one step in parallel by default — see `AgentCallOptions`. */
+    parallelTools?: boolean;
+    /** Store a failed run's conversation by default — see `AgentCallOptions`. */
+    savePartial?: boolean;
+    /**
+     * Other agents exposed to this one **as tools** — the model decides when to
+     * delegate: `agents: [researcher]` (an agent definition, usually the default
+     * export of another agent file).
+     *
+     * Each one becomes a tool named after its `id`, described by its `description`,
+     * taking `{ input }` and answering with the sub-agent's text. A local tool with
+     * the same name wins.
+     */
+    agents?: AgentConfig | AgentConfig[];
+    /**
+     * Remote **MCP servers** whose tools this agent may use: `['https://host/mcp']`
+     * or `{ docs: 'https://docs/mcp' }` (the name is for the logs).
+     *
+     * Connected once, at first use. A remote tool keeps its name; a tool the agent
+     * declares itself wins over a remote one of the same name.
+     */
+    mcp?: string[] | Record<string, string>;
     /** Default tool choice for every run (default `'auto'`). */
     toolChoice?: AgentToolChoice;
     /** Default reasoning for every run (default off) — overridable per call. */
@@ -805,6 +1001,24 @@ export type AgentConfig = {
      * round stores several messages, so count is a proxy, not a measure).
      */
     lastMessages?: number;
+    /**
+     * **Markdown documents injected into the system prompt** of every run —
+     * resolved once at load, from `{tenant.dir}`:
+     *
+     * ```ts
+     * define.Agent({
+     *   skills: ['./docs/*.md', './guide/ml.md', /^runbooks\/.*\.md$/],
+     * })
+     * ```
+     *
+     * Each file carries a frontmatter header (`name`, `description`, `license`,
+     * `compatibility`, `metadata`, `allowed-tools`) and its body is what the model
+     * reads. A file that is not markdown is skipped (logged); a malformed skill
+     * refuses **the agent** at load — the others keep loading. See `AgentSkill`.
+     */
+    skills?: AgentSkillSource[];
+    /** @internal — resolved from `skills` by the loader. */
+    _skills_?: AgentSkill[];
     /**
      * The agent's durable scratchpad — see `AgentWorkingMemory`. Needs a store that
      * supports it (the three built-in ones do) and, for the default scope, a

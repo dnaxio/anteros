@@ -55,6 +55,45 @@ export type RestClientOptions = {
     };
 };
 
+/**
+ * What a client reports to its listeners.
+ *
+ * - `error` — **every** failure: a server error (with its `code`/`status`/`meta`), a
+ *   network failure (`SDK_NETWORK_ERROR`), a stream that failed mid-flight.
+ * - `unauthorized` — the same error, when the server answered **401**. Emitted **in
+ *   addition to** `error`, so an application reacts to a dead token without matching
+ *   on a string.
+ *
+ * A request the caller **aborted** (`AbortSignal`) reports nothing: cancelling is not
+ * a failure, and the throw is unchanged.
+ */
+export type SdkEvent = "error" | "unauthorized";
+
+/**
+ * The error every SDK method throws — and the object handed to a listener.
+ *
+ * ```ts
+ * api.on("unauthorized", () => api.logout());
+ *
+ * api.on("error", (err) => {
+ *   if (err.code === "INVALID_TOKEN") redirectToLogin();
+ * });
+ * ```
+ */
+export type AnterosError = Error & {
+    /** Stable code — the server's (`COLLECTION_NOT_FOUND`, `INVALID_TOKEN`…) or the SDK's (`SDK_NETWORK_ERROR`). */
+    code?: string;
+    /** HTTP status; absent when the request never reached the server. */
+    status?: number;
+    /** Whatever the server attached (a field list, a slug…). */
+    meta?: any;
+    /** The underlying failure — the `fetch` `TypeError`, an `AbortError`… */
+    cause?: any;
+};
+
+/** A listener registered with `on` / `once`. */
+export type SdkListener = (error: AnterosError) => void;
+
 
 export type FindOptions = {
     $limit?: number;

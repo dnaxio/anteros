@@ -1,4 +1,4 @@
-import type { RestRequestOptions } from "../types/rest";
+import type { AnterosError, RestRequestOptions } from "../types/rest";
 import type {
     AgentAttachment,
     AgentInfo,
@@ -103,11 +103,13 @@ class Agent<T = any> {
     #id: string;
     #post: Post;
     #raw: Raw;
+    #onError?: (error: AnterosError) => void;
 
-    constructor(id: string, post: Post, raw: Raw) {
+    constructor(id: string, post: Post, raw: Raw, onError?: (error: AnterosError) => void) {
         this.#id = id;
         this.#post = post;
         this.#raw = raw;
+        this.#onError = onError;
     }
 
     /** The agent id used in the URL. */
@@ -201,6 +203,9 @@ class Agent<T = any> {
                     if (payload?.type === "error") {
                         const error: any = new Error(payload.message ?? "The agent stream failed");
                         error.code = payload.code;
+                        // The response headers were fine: this one only exists mid-stream,
+                        // so the client would never see it — report it like any other
+                        this.#onError?.(error);
                         throw error;
                     }
 

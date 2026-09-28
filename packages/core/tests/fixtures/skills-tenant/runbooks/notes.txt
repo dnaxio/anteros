@@ -1,0 +1,2 @@
+This file is not markdown — a regex that walks the tenant picks it up, and the
+loader must skip it (logged) instead of taking the agent down.

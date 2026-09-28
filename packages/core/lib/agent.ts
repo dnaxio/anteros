@@ -3,6 +3,8 @@ import { toJsonSchema, validateWithSchema } from "./jsonSchema";
 import { InMemoryAgentMemory, trimMessages } from "./agentMemory";
 import { forMemory, resolveAttachments } from "./attachment";
 import { normalizeMessages, serializeToolResult } from "./messages";
+import { mcpToolsFor } from "./mcpClient";
+import { skillsBlock } from "./skills";
 import {
     EMPTY_USAGE,
     resolveProvider,
@@ -26,6 +28,8 @@ import type {
     AgentMemoryState,
     AgentMessage,
     AgentOptions,
+    AgentPendingApproval,
+    AgentSkill,
     AgentTextPart,
     AgentThinkingBlock,
     AgentThread,
@@ -33,9 +37,11 @@ import type {
     AgentStreamChunk,
     AgentStreamResult,
     AgentStep,
+    AgentStructuredOutput,
     AgentTool,
     AgentToolCall,
     AgentToolContext,
+    AgentToolMessage,
     AgentToolResultEntry,
     AgentTools,
     AgentUsage,
@@ -329,6 +335,103 @@ export { InMemoryAgentMemory };
 
 // ─── The agent ───────────────────────────────────────────────────────────
 
+/**
+ * Give up on a tool after `ms` — the promise is abandoned, not cancelled: a tool
+ * that must really stop has to watch `ctx.signal` (which carries the same deadline).
+ */
+async function withTimeout<T>(work: Promise<T>, ms: number, name: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        return await Promise.race([
+            work,
+            new Promise<never>((_resolve, reject) => {
+                timer = setTimeout(
+                    () => reject(new AppError(
+                        `Tool '${name}' timed out after ${ms}ms`,
+                        { status: 504, code: "AGENT_TOOL_TIMEOUT" },
+                    )),
+                    ms,
+                );
+            }),
+        ]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
+
+/**
+ * The tool calls the conversation has not answered yet — the ones of its last
+ * assistant turn that carries calls, minus the `tool` turns that follow. That is
+ * exactly what a paused run left behind, and what a resume has to resolve.
+ */
+function unansweredToolCalls(messages: AgentMessage[]): AgentToolCall[] {
+    for (let index = messages.length - 1; index >= 0; index--) {
+        const message = messages[index]!;
+        if (message.role !== "assistant" || !message.toolCalls?.length) continue;
+        const answered = new Set(
+            messages.slice(index + 1)
+                .filter((turn): turn is AgentToolMessage => turn.role === "tool" && !!turn.toolCallId)
+                .map((turn) => turn.toolCallId),
+        );
+        return message.toolCalls.filter((call) => !answered.has(call.id));
+    }
+    return [];
+}
+
+/** The `tool` turn a result becomes in the conversation — one shape, one place. */
+function toolTurnFor(result: AgentToolResultEntry): AgentMessage {
+    return {
+        role: "tool",
+        toolCallId: result.id,
+        name: result.name,
+        content: serializeToolResult(result),
+        isError: !!result.error,
+    };
+}
+
+/**
+ * The agents another agent may call, **exposed as tools** — the model decides when
+ * to delegate, exactly like any other tool.
+ *
+ * The sub-agent is built per call, bound to the **calling** `rest`: its own tools then
+ * run with the right tenant, session and transaction.
+ */
+function subAgentTools(
+    declared: AgentConfig | AgentConfig[] | undefined,
+    rest: InstanceType<typeof useRest> | undefined,
+    tenant: string | undefined,
+): Array<[string, AgentTool]> {
+    const definitions = !declared ? [] : Array.isArray(declared) ? declared : [declared];
+    const out: Array<[string, AgentTool]> = [];
+
+    for (const definition of definitions) {
+        const id = definition?.id;
+        if (!id || out.some(([name]) => name === id)) continue;
+
+        out.push([id, {
+            id,
+            description: definition.description ?? `Delegate to the '${id}' agent.`,
+            inputSchema: {
+                type: "object",
+                properties: {
+                    input: { type: "string", description: "What to ask the agent." },
+                    thread: { type: "string", description: "Its memory thread, when the agent has a memory." },
+                    resource: { type: "string", description: "Its caller identity, when the agent has a memory." },
+                },
+                required: ["input"],
+                additionalProperties: false,
+            },
+            execute: async ({ input, thread, resource }: any) => {
+                const sub = new Agent(definition, { rest, tenant });
+                const answer = await sub.generate(input, { thread, resource });
+                return answer.text;
+            },
+        }]);
+    }
+
+    return out;
+}
+
 type RunOptions = {
     input: AgentInput;
     call: AgentCallOptions;
@@ -489,6 +592,16 @@ class Agent {
         return this.#tools.delete(name);
     }
 
+    // ── Skills ───────────────────────────────────────────────────────────
+
+    /**
+     * The resolved skills, in prompt order (by name). Read-only: they are resolved
+     * once at load, from the files `skills` points at — a run reads no file.
+     */
+    getSkills(): AgentSkill[] {
+        return this.#config._skills_ ?? [];
+    }
+
     // ── Memory ───────────────────────────────────────────────────────────
 
     getMemory(): AgentMemory | undefined {
@@ -610,12 +723,16 @@ class Agent {
     }
 
     /** What a store needs to know — the client, the tenant, the caller. */
-    #memoryCtx(resourceId?: string): AgentMemoryContext {
+    #memoryCtx(resourceId?: string, threadId?: string): AgentMemoryContext {
         return {
             agentId: this.#config.id,
             tenant: this._tenant_,
             rest: this.#rest,
             resourceId,
+            // The store and the thread are on the **run** context only: that is what a
+            // processor needs to cache something per thread
+            ...(threadId ? { thread: threadId } : {}),
+            ...(this.#config.memory ? { memory: this.#config.memory } : {}),
         };
     }
 
@@ -748,11 +865,14 @@ class Agent {
         return {
             id: this.#config.id,
             name: this.getName(),
+            /** What this prompt is — the version an audit entry carries. */
+            version: this.#config.version,
             description: this.#config.description,
             tenant: this._tenant_,
             provider: { ...this.getProvider(), compatible: this.#config.provider.compatible ?? "openai" },
             instructions: typeof this.#config.instructions === "string" ? this.#config.instructions : "[dynamic]",
             tools: [...this.#tools.keys()],
+            skills: this.getSkills().map((skill) => ({ name: skill.name, description: skill.description })),
             maxSteps: this.#config.maxSteps ?? DEFAULT_MAX_STEPS,
             toolChoice: this.#config.toolChoice ?? "auto",
             thinking: this.#config.thinking ?? false,
@@ -881,12 +1001,27 @@ class Agent {
     /**
      * The tools of one run — `true` (all), `false` (none), an array of **names**
      * (an allow-list) or extra tools to merge in.
+     *
+     * The declared agents and the **remote MCP servers** are resolved here, before the
+     * allow-list is applied, so every rule below treats them like any other tool.
      */
-    #collectTools(requested?: boolean | string[] | AgentTools): Map<string, AgentTool> {
-        // `tools: false` — the run answers directly
+    async #collectTools(requested?: boolean | string[] | AgentTools): Promise<Map<string, AgentTool>> {
+        // `tools: false` — the run answers directly (and no remote is even contacted)
         if (requested === false) return new Map();
 
         const tools = new Map(this.#tools);
+
+        // The other agents this one may delegate to
+        for (const [name, tool] of subAgentTools(this.#config.agents, this.#rest, this._tenant_)) {
+            if (!tools.has(name)) tools.set(name, tool);
+        }
+
+        // The remote MCP servers — connected on the first run that needs them, and
+        // memoized per server. A tool the agent declares itself wins over a remote one.
+        for (const tool of await mcpToolsFor(this.#config.mcp)) {
+            const name = tool.id ?? tool.name;
+            if (name && !tools.has(name)) tools.set(name, tool);
+        }
 
         // `tools: ['forecast', 'echo']` — only these (an unknown name is ignored:
         // tool availability may legitimately vary between callers)
@@ -1019,6 +1154,7 @@ class Agent {
         tools: Map<string, AgentTool>,
         step: number,
         signal: AbortSignal,
+        timeoutMs?: number,
     ): Promise<AgentToolResultEntry> {
         const started = performance.now();
         const entry: AgentToolResultEntry = { id: call.id, name: call.name, args: call.args, durationMs: 0 };
@@ -1039,21 +1175,32 @@ class Agent {
             return done();
         }
 
+        // The deadline an outbound call must respect: the run's signal **and** the
+        // tool's own, so a cooperative tool can abort itself instead of being abandoned
+        const timeout = tool.timeoutMs ?? timeoutMs;
+        const toolSignal = timeout && timeout > 0
+            ? AbortSignal.any([signal, AbortSignal.timeout(timeout)])
+            : signal;
+
         const ctx: AgentToolContext = {
             rest: this.#rest,
             agent: this,
             tenant: this._tenant_,
             toolCallId: call.id,
             step,
-            signal,
+            signal: toolSignal,
             error: fn.error,
         };
 
         try {
-            entry.result = tool.execute
-                ? await tool.execute(value, ctx)
+            const work: Promise<any> = tool.execute
+                ? tool.execute(value, ctx)
                 // MCP tools take the framework's own context shape
-                : await tool.exec!({ ...ctx, args: value, c: (this.#rest as any)?.c });
+                : tool.exec!({ ...ctx, args: value, c: (this.#rest as any)?.c });
+
+            entry.result = timeout && timeout > 0
+                ? await withTimeout(work, timeout, call.name)
+                : await work;
             return done();
         } catch (err: any) {
             entry.error = err?.message ?? String(err);
@@ -1065,13 +1212,18 @@ class Agent {
         const { input, call, streaming, controller } = run;
         const emit = run.emit;
 
-        const tools = this.#collectTools(call.tools);
+        const tools = await this.#collectTools(call.tools);
         const provider = this.#provider(call.provider);
         const adapter = resolveProvider(provider);
 
-        const structured = call.structuredOutput ?? (call.schema ? { schema: call.schema } : undefined);
+        const structured: AgentStructuredOutput | undefined = call.structuredOutput ?? (call.schema ? { schema: call.schema } : undefined);
         const schema = structured?.schema;
         const jsonSchema = schema ? await toJsonSchema(schema) : undefined;
+        // The name a provider accepts is `[a-zA-Z0-9_-]{1,64}` — an agent id is not
+        // always that (`support.billing` is not)
+        const schemaName = (structured?.name ?? this.#config.id ?? "response")
+            .replace(/[^a-zA-Z0-9_-]+/g, "_")
+            .slice(0, 64) || "response";
 
         // `memory: { thread, resource }` (the Mastra-style shorthand) wins over the
         // flat `thread` / `resource` options — both name the same thing, and the
@@ -1080,23 +1232,33 @@ class Agent {
         const resource = call.memory?.resource ?? call.memory?.resourceId ?? call.resource ?? call.resourceId;
         const signal = call.signal ? AbortSignal.any([call.signal, controller.signal]) : controller.signal;
 
-        const history = thread && this.#config.memory
+        // Per-tool deadline and tool parallelism: the call wins over the declaration
+        const toolTimeout = call.toolTimeoutMs ?? this.#config.toolTimeoutMs;
+        const parallel = call.parallelTools ?? this.#config.parallelTools ?? false;
+        const savePartial = call.savePartial ?? this.#config.savePartial ?? false;
+
+        // Resuming a paused run: the conversation is the caller's — the paused step is
+        // resolved from it instead of being asked of the model again
+        const resuming = call.resume ? await normalizeMessages(call.resume.messages) : undefined;
+
+        const history = resuming ?? (thread && this.#config.memory
             ? [...(await this.#config.memory.get(thread, this.#memoryCtx(resource)))]
-            : [];
+            : []);
 
         // What the caller wants the run to **know**: injected after the thread
         // history and before the question, and saved with the rest of the
         // conversation. A trailing assistant turn is legitimate ("continue from
         // here"), so the block is not forced to end on a user turn.
-        const injected = call.messages ? await normalizeMessages(call.messages) : [];
+        const injected = !resuming && call.messages ? await normalizeMessages(call.messages) : [];
 
         // What this run **adds to the thread** — the injected turns and the input,
         // with the attachments on the turn being asked. The history window and the
         // `load` processors only shape the prompt: neither reaches the store.
-        const additions: AgentMessage[] = [...injected, ...(await normalizeMessages(input))];
+        // A resumed run adds nothing: its input **is** the conversation it was given.
+        const additions: AgentMessage[] = resuming ? [] : [...injected, ...(await normalizeMessages(input))];
 
         // Attachments of this run — read now, attached to the turn being asked
-        if (call.files) {
+        if (!resuming && call.files) {
             const parts = await resolveAttachments(call.files, { baseDir: call.filesBaseDir });
             if (parts.length) attachToTurn(additions, parts);
         }
@@ -1106,7 +1268,7 @@ class Agent {
         const window = call.lastMessages ?? this.#config.lastMessages;
         const replay = window && window > 0 ? trimMessages(history, window) : history;
 
-        const memoryCtx = this.#memoryCtx(resource);
+        const memoryCtx = this.#memoryCtx(resource, thread);
         let messages: AgentMessage[] = [...replay, ...additions];
 
         // Memory processors, `load` side: they see exactly what the model will see
@@ -1114,6 +1276,12 @@ class Agent {
         messages = await applyProcessors(this.#config.processors, "load", messages, memoryCtx);
 
         let system = call.instructions ?? await this.resolveInstructions({ thread, resource });
+
+        // The skills are part of the instructions, and they never change: injected
+        // **before** the working memory (which a run rewrites) so the prefix of the
+        // prompt stays stable — and cacheable — across calls
+        const skills = this.#config._skills_;
+        if (skills?.length) system += `\n\n${skillsBlock(skills)}`;
 
         // The scratchpad is part of the prompt, right after the instructions
         const stateKey = this.#workingMemoryKey({ thread, resource });
@@ -1151,8 +1319,34 @@ class Agent {
         const specs = await this.#toolSpecs(tools);
         const offeredIds = [...tools.keys()];
 
+        // A paused run left tool calls unanswered: they are resolved here, from the
+        // caller's decisions, and the loop then continues from the completed step —
+        // the model is never asked again for the step it already produced
+        const pending: AgentPendingApproval[] = [];
+        if (resuming) {
+            for (const toolCall of unansweredToolCalls(messages)) {
+                const tool = tools.get(toolCall.name);
+                const decision = call.resume!.decisions?.[toolCall.id];
+                // Undecided: the run pauses again, and nothing runs
+                if (tool?.approval && decision === undefined) {
+                    pending.push({ toolCallId: toolCall.id, name: toolCall.name, args: toolCall.args });
+                    continue;
+                }
+                const result: AgentToolResultEntry = decision === false
+                    ? { id: toolCall.id, name: toolCall.name, args: toolCall.args, durationMs: 0, error: "Refused by the caller" }
+                    : await this.#executeTool(toolCall, tools, 0, signal, toolTimeout);
+                const turn = toolTurnFor(result);
+                messages.push(turn);
+                additions.push({ ...turn });
+                allToolCalls.push(toolCall);
+                allToolResults.push(result);
+                emit?.({ type: "tool_result", toolResult: result });
+            }
+        }
+
         try {
-            for (let step = 0; step < maxSteps; step++) {
+            // Nothing to ask the model while a decision is pending
+            for (let step = 0; !pending.length && step < maxSteps; step++) {
                 if (signal.aborted) {
                     finishReason = "aborted";
                     break;
@@ -1166,6 +1360,11 @@ class Agent {
                     thinking,
                     signal,
                     json: !!schema,
+                    // What the provider can really enforce: `json_schema` on
+                    // OpenAI-compatible gateways, a forced tool on Anthropic
+                    ...(jsonSchema
+                        ? { jsonSchema: { name: schemaName, ...(structured?.description ? { description: structured.description } : {}), schema: jsonSchema } }
+                        : {}),
                 };
 
                 const turn = streaming && emit
@@ -1206,21 +1405,44 @@ class Agent {
                     break;
                 }
 
-                for (const toolCall of turn.toolCalls) {
-                    const result = await this.#executeTool(toolCall, tools, step, signal);
-                    current.toolResults.push(result);
-                    allToolResults.push(result);
-                    const toolTurn: AgentMessage = {
-                        role: "tool",
+                // A tool that needs a decision stops the run **before anything runs**: a
+                // step is all-or-nothing, because every call of an assistant turn must be
+                // answered before the conversation can go back to the model
+                const waiting = turn.toolCalls.filter(
+                    (toolCall) => tools.get(toolCall.name)?.approval && call.resume?.decisions?.[toolCall.id] === undefined,
+                );
+                if (waiting.length) {
+                    pending.push(...waiting.map((toolCall) => ({
                         toolCallId: toolCall.id,
                         name: toolCall.name,
-                        content: serializeToolResult(result),
-                        isError: !!result.error,
-                    };
+                        args: toolCall.args,
+                    })));
+                    break;
+                }
+
+                // The tools of one step: sequential by default (two writes must not
+                // interleave), together when the caller asks for it. The results are
+                // attached in the model's order either way.
+                const entries: AgentToolResultEntry[] = [];
+                if (parallel) {
+                    entries.push(...await Promise.all(
+                        turn.toolCalls.map((toolCall) => this.#executeTool(toolCall, tools, step, signal, toolTimeout)),
+                    ));
+                } else {
+                    for (const toolCall of turn.toolCalls) {
+                        entries.push(await this.#executeTool(toolCall, tools, step, signal, toolTimeout));
+                    }
+                }
+
+                turn.toolCalls.forEach((toolCall, index) => {
+                    const result = entries[index]!;
+                    current.toolResults.push(result);
+                    allToolResults.push(result);
+                    const toolTurn = toolTurnFor(result);
                     messages.push(toolTurn);
                     additions.push({ ...toolTurn });
                     emit?.({ type: "tool_result", toolResult: result });
-                }
+                });
 
                 steps.push(current);
                 await call.onStepFinish?.(current);
@@ -1232,13 +1454,21 @@ class Agent {
             if (signal.aborted) {
                 finishReason = "aborted";
             } else {
+                // Keep what the run produced before it died: the tokens are paid, and a
+                // run that leaves no trace makes the caller pay them twice
+                if (savePartial && thread && this.#config.memory && !call.memory?.readOnly) {
+                    await this.#persist(thread, [...history, ...additions], memoryCtx).catch(() => {});
+                }
                 throw err;
             }
         }
 
+        // A run that paused for a decision has no answer to validate
+        if (pending.length) finishReason = "approval_required";
+
         // Structured output — one repair turn, then give up with a stable code.
         let object: T | undefined;
-        if (schema) {
+        if (schema && !pending.length) {
             const attempt = extractJson(text);
             let candidate: any = attempt.value;
             let failure = attempt.error;
@@ -1260,6 +1490,7 @@ class Agent {
                     temperature: 0,
                     signal,
                     json: true,
+                    ...(jsonSchema ? { jsonSchema: { name: schemaName, schema: jsonSchema } } : {}),
                 });
 
                 usage = addUsage(usage, turn.usage);
@@ -1286,17 +1517,12 @@ class Agent {
             object = candidate as T;
         }
 
-        if (thread && this.#config.memory && !call.memory?.readOnly) {
+        // A paused run stores **nothing**: the caller resumes with the conversation it
+        // was handed back, and an assistant turn with unanswered calls would poison the
+        // thread for the protocol
+        if (thread && this.#config.memory && !call.memory?.readOnly && !pending.length) {
             try {
-                // `save` processors run last: they see what the run produced, and a
-                // throw keeps the whole conversation out of the store (a guardrail)
-                const stored = await applyProcessors(
-                    this.#config.processors,
-                    "save",
-                    [...history, ...additions], // the whole thread — never the window
-                    memoryCtx,
-                );
-                await this.#config.memory.save(thread, lightenForMemory(stored), memoryCtx);
+                await this.#persist(thread, [...history, ...additions], memoryCtx);
             } catch (err: any) {
                 console.error(`The conversation of thread '${thread}' was not saved: ${err?.message}`);
             }
@@ -1312,7 +1538,18 @@ class Agent {
             usage,
             finishReason,
             messages: [...history, ...additions],
+            ...(pending.length ? { pendingApprovals: pending } : {}),
         };
+    }
+
+    /**
+     * Store the thread. The `save` processors run last — they see what the run
+     * produced, and a throw keeps the whole conversation out of the store (that is
+     * the documented guardrail).
+     */
+    async #persist(thread: string, messages: AgentMessage[], ctx: AgentMemoryContext): Promise<void> {
+        const stored = await applyProcessors(this.#config.processors, "save", messages, ctx);
+        await this.#config.memory!.save(thread, lightenForMemory(stored), ctx);
     }
 }
 

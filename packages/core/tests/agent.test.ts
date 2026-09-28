@@ -1116,9 +1116,11 @@ describe("agent structured output", () => {
         const object = await agent.generateObject("Weather?", { schema });
 
         expect(object).toEqual({ city: "Paris", celsius: 21 });
-        // The schema was injected in the prompt and asked for a JSON object
+        // The schema travels twice: in the prompt, and in the field the gateway really
+        // validates against (`response_format.json_schema`, see `agent-provider.test.ts`)
         expect(request(provider, 0).body.messages[0].content).toContain("JSON Schema");
-        expect(request(provider, 0).body.response_format).toEqual({ type: "json_object" });
+        expect(request(provider, 0).body.response_format.type).toBe("json_schema");
+        expect(request(provider, 0).body.response_format.json_schema.schema).toBeDefined();
     });
 
     it("repairs an invalid answer with one extra turn", async () => {

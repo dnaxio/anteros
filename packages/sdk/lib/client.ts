@@ -1,7 +1,15 @@
 import { Agent } from "./agents";
 import { Vars } from "./vars";
 import { cleanDeep } from "../utils";
-import type { ApiAction, PublicConfig, RestClientOptions, RestRequestOptions } from "../types/rest";
+import type {
+    AnterosError,
+    ApiAction,
+    PublicConfig,
+    RestClientOptions,
+    RestRequestOptions,
+    SdkEvent,
+    SdkListener,
+} from "../types/rest";
 
 /** Build a URL from the server, the tenant and path segments. */
 function joinURL(...parts: string[]): string {
@@ -36,6 +44,8 @@ class Client {
     #persistToken: boolean;
     #tokenStorageKey: string;
     protected defaultParams: RestClientOptions["defaultParams"];
+    /** Listeners, by event — see `on('error')`. */
+    #listeners = new Map<SdkEvent, Set<SdkListener>>();
 
     constructor(options: RestClientOptions) {
         this.#server = options.server.replace(/\/+$/, "");
@@ -104,6 +114,77 @@ class Client {
         return { ...this.#headers, ...(extra ?? {}) };
     }
 
+    // ── Events ───────────────────────────────────────────────────────────
+
+    /**
+     * Listen to what this client goes through — the failures, and the ones the server
+     * refused with a 401 (see `SdkEvent`).
+     *
+     * ```ts
+     * const api = new Anteros({ server, tenant });
+     *
+     * // A dead token: disconnect, and let the UI route to the login page
+     * api.on('unauthorized', () => { api.logout(); router.push('/login'); });
+     *
+     * // Anything else, by stable code — never by parsing a message
+     * api.on('error', (err) => console.warn(err.code, err.status, err.message));
+     * ```
+     *
+     * The listener receives the **same** error the call throws (a listener is not a
+     * replacement for `try`/`catch`), and a listener that throws is ignored rather
+     * than masking it. `off(event)` removes one handler, `off(event)` with no handler
+     * removes all of them.
+     */
+    on(event: SdkEvent, listener: SdkListener): this {
+        this.#handlers(event).add(listener);
+        return this;
+    }
+
+    /** Same, once — the listener is removed before it runs. */
+    once(event: SdkEvent, listener: SdkListener): this {
+        const wrapper: SdkListener = (error) => {
+            this.off(event, wrapper);
+            listener(error);
+        };
+        return this.on(event, wrapper);
+    }
+
+    /** Remove a listener — or every listener of that event when none is given. */
+    off(event: SdkEvent, listener?: SdkListener): this {
+        const handlers = this.#handlers(event);
+        if (listener) handlers.delete(listener);
+        else handlers.clear();
+        return this;
+    }
+
+    /** How many listeners an event has — what a UI uses to avoid registering twice. */
+    listenerCount(event: SdkEvent): number {
+        return this.#listeners.get(event)?.size ?? 0;
+    }
+
+    #handlers(event: SdkEvent): Set<SdkListener> {
+        if (event !== "error" && event !== "unauthorized") {
+            // A typo would register a listener that never fires: fail loudly instead
+            throw new Error(`Unknown SDK event '${event}' — this client emits 'error' and 'unauthorized'`);
+        }
+        let handlers = this.#listeners.get(event);
+        if (!handlers) {
+            handlers = new Set();
+            this.#listeners.set(event, handlers);
+        }
+        return handlers;
+    }
+
+    #emit(event: SdkEvent, error: AnterosError): void {
+        for (const listener of this.#listeners.get(event) ?? []) {
+            try {
+                listener(error);
+            } catch {
+                // A listener must never mask the error it was handed
+            }
+        }
+    }
+
     // ── URL builders — one per family (`/api/:tenant/<family>/…`) ────────
 
     protected buildUrl(collection: string, action: ApiAction, query?: Record<string, any>): string {
@@ -139,7 +220,7 @@ class Client {
 
     protected async handleResponse<T>(res: Response): Promise<T> {
         const payload = await this.readPayload(res);
-        if (!res.ok) throw this.buildError(res, payload);
+        if (!res.ok) throw this.#fail(res, payload);
         return payload as T;
     }
 
@@ -153,7 +234,7 @@ class Client {
      * Build the error every SDK method throws: `message`, `code`, `meta` and
      * `status` — never a string to parse.
      */
-    protected buildError(res: Response, payload: any): Error {
+    protected buildError(res: Response, payload: any): AnterosError {
         const isJson = !!payload && typeof payload === "object";
         const error: any = new Error(
             (isJson && payload.message) || res.statusText || "Request failed",
@@ -166,16 +247,47 @@ class Client {
         return error;
     }
 
+    /** Build the error of a refused response, **report it**, and hand it back. */
+    #fail(res: Response, payload: any): AnterosError {
+        const error = this.buildError(res, payload);
+        this.#emit("error", error);
+        if (res.status === 401) this.#emit("unauthorized", error);
+        return error;
+    }
+
+    /**
+     * Every request goes through here — the **one** place that sees a failure, so a
+     * listener registered with `on('error')` cannot miss one.
+     *
+     * A caller abort (`AbortSignal`) is not reported: cancelling is not a failure.
+     * Everything else is — a transport failure (`SDK_NETWORK_ERROR`, with the original
+     * error as `cause`) or a response the server refused (`#fail`).
+     */
+    async #send(url: string, init: RequestInit): Promise<Response> {
+        let res: Response;
+        try {
+            res = await fetch(url, init);
+        } catch (err: any) {
+            if (err?.name === "AbortError") throw err;
+            const error: AnterosError = new Error(err?.message ?? "Network request failed");
+            error.code = "SDK_NETWORK_ERROR";
+            error.cause = err;
+            this.#emit("error", error);
+            throw error;
+        }
+
+        if (!res.ok) throw this.#fail(res, await this.readPayload(res));
+        return res;
+    }
+
     /** Raw POST for the streaming path — the response is error-checked, not parsed. */
     protected async postRaw(url: string, body: unknown, options: RestRequestOptions = {}): Promise<Response> {
-        const res = await fetch(url, {
+        return this.#send(url, {
             method: "POST",
             headers: this.headers({ "Content-Type": "application/json", ...(options.headers ?? {}) }),
             body: body !== undefined ? JSON.stringify(body) : undefined,
             signal: options.signal,
         });
-        if (!res.ok) throw this.buildError(res, await this.readPayload(res));
-        return res;
     }
 
     protected async postJson<TResponse = unknown>(
@@ -184,7 +296,7 @@ class Client {
         options: RestRequestOptions = {},
     ): Promise<TResponse> {
         const requestBody = options.cleanDeep && body !== undefined ? cleanDeep(body) : body;
-        const res = await fetch(url, {
+        const res = await this.#send(url, {
             method: "POST",
             headers: this.headers({ "Content-Type": "application/json", ...(options.headers ?? {}) }),
             body: requestBody !== undefined ? JSON.stringify(requestBody) : undefined,
@@ -200,12 +312,12 @@ class Client {
         formData: FormData,
         signal?: AbortSignal,
     ): Promise<TResponse> {
-        const res = await fetch(url, { method: "POST", headers: this.headers(), body: formData, signal });
+        const res = await this.#send(url, { method: "POST", headers: this.headers(), body: formData, signal });
         return this.handleResponse<TResponse>(res);
     }
 
     protected async remove<TResponse = unknown>(url: string, signal?: AbortSignal): Promise<TResponse> {
-        const res = await fetch(url, { method: "DELETE", headers: this.headers(), signal });
+        const res = await this.#send(url, { method: "DELETE", headers: this.headers(), signal });
         return this.handleResponse<TResponse>(res);
     }
 
@@ -224,6 +336,9 @@ class Client {
             id,
             (action, body, options) => this.postJson<any>(this.buildAgentUrl(id, action, options?.query), body, options ?? {}),
             (action, body, options) => this.postRaw(this.buildAgentUrl(id, action, options?.query), body, options ?? {}),
+            // A stream that fails **after** its headers are in (the server sends the
+            // error as an SSE event) is reported here too
+            (error) => this.#emit("error", error),
         );
     }
 
@@ -246,7 +361,7 @@ class Client {
      */
     async getConfig(): Promise<PublicConfig> {
         const url = joinURL(this.#server, "_dnax", "config", this.#tenant);
-        const res = await fetch(url, { method: "GET", headers: this.headers() });
+        const res = await this.#send(url, { method: "GET", headers: this.headers() });
         return this.handleResponse<PublicConfig>(res);
     }
 }

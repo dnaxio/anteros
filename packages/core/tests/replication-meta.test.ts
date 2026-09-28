@@ -42,6 +42,8 @@ beforeAll(async () => {
                 // Opt-in retention, so the destination's copy is pruned the same way
                 audit: { retention: "30d" },
                 replication: {
+                    // These cases exercise the scan engine (meta collections, exclude)
+                    mode: "scan",
                     runOnBoot: false,
                     schedule: { interval: "1h" },
                     destinations: [{ id: "backup", uri: ALL_T_DEST }],
@@ -52,6 +54,7 @@ beforeAll(async () => {
                 dir: DIR,
                 database: { uri: OFF_T_DB },
                 replication: {
+                    mode: "scan",
                     runOnBoot: false,
                     schedule: { interval: "1h" },
                     exclude: ["audit", "workflows", "locks", "replication", "vars", "memory"],

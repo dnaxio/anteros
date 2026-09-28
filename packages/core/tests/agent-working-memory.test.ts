@@ -397,6 +397,8 @@ describe("working memory — Anthropic", () => {
 
 describe("working memory — the registry exposes nothing new by accident", () => {
     it("keeps `agents.memory` as the only store factory", () => {
-        expect(Object.keys(agents.memory).sort()).toEqual(["InMemory", "Mongo", "Redis"]);
+        // `summarize` is the one deliberate addition: a **processor** factory (it needs
+        // your model and your prompt), not a store
+        expect(Object.keys(agents.memory).sort()).toEqual(["InMemory", "Mongo", "Redis", "summarize"]);
     });
 });

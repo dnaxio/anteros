@@ -6,6 +6,21 @@ export type ReplicationSchedule =
     | { interval: string | number };
 
 /**
+ * How replication detects changes (default: `'changeStream'`).
+ *
+ * - `'changeStream'` — tails the MongoDB oplog through change streams: real-time,
+ *   exact position (a **resume token**, no `key` to scan), and **native deletes**
+ *   (including the ones no hook can see: a TTL expiry on `_audit_` / `_workflows_`).
+ *   Requires a replica set or a sharded cluster; on a standalone source the engine
+ *   logs it once and falls back to `'scan'`. `schedule` is then ignored (the stream
+ *   is continuous), `key`/`batchSize` only size the initial backfill, and `lookback`
+ *   is unnecessary (a resume token has no clock skew).
+ * - `'scan'` — the historical engine: a periodic scan of the source on the `key`
+ *   date field, with `lookback` and applicative delete tombstones.
+ */
+export type ReplicationMode = "changeStream" | "scan";
+
+/**
  * Initial synchronization mode — how replication starts when no `_replication_`
  * state exists yet.
  * - `"full"` — backfill everything (default)
@@ -46,16 +61,29 @@ export type ReplicationMetaName = 'audit' | 'workflows' | 'locks' | 'replication
 export type ReplicationConfig = {
     /** Enable/disable replication for this scope (default: true when `destinations` is non-empty). */
     enabled?: boolean;
-    /** Scheduling — `{ cron }` or `{ interval }` (default: every 5 minutes). */
+    /**
+     * Change-detection mode (default: `'changeStream'`, auto-fallback to `'scan'`
+     * when the source is a standalone `mongod`). See {@link ReplicationMode}.
+     */
+    mode?: ReplicationMode;
+    /**
+     * Scheduling — `{ cron }` or `{ interval }` (default: every 5 minutes).
+     * **Ignored in `changeStream` mode**: the change stream is continuous.
+     */
     schedule?: ReplicationSchedule;
-    /** Date key used for incremental replication (default: `'updatedAt'`). */
+    /**
+     * Date key used to read the source (default: `'updatedAt'`). In `'scan'` mode it
+     * is the change-detection key (it must be updated on every write); in
+     * `'changeStream'` mode it only drives the initial backfill / catch-up run.
+     */
     key?: string;
     /**
      * Rewind the cursor by this many milliseconds on each run, so documents
      * written slightly out of order (clock skew) are not missed (default: 0).
+     * Ignored in `changeStream` mode — a resume token has no clock skew.
      */
     lookback?: number;
-    /** Documents transferred per batch (default: 1000). */
+    /** Documents transferred per batch — scan batch, and backfill batch (default: 1000). */
     batchSize?: number;
     /** Run a first replication right after boot (default: true). */
     runOnBoot?: boolean;
@@ -93,7 +121,7 @@ export type CollectionReplicationConfig = {
     initialSync?: ReplicationInitialSync;
 };
 
-export type ReplicationStatus = "idle" | "running" | "success" | "error";
+export type ReplicationStatus = "idle" | "running" | "success" | "watching" | "error";
 
 /** Cursor of the last replicated document — `value` is the date key, `id` the tie-breaker. */
 export type ReplicationCursor = {
@@ -118,7 +146,16 @@ export type ReplicationState = {
     destination: string;
     collection: string;
     key: string;
+    /** Change-detection mode this state was written by (absent = legacy `'scan'`). */
+    mode?: ReplicationMode;
+    /** Scan position — `mode: 'scan'` only. */
     cursor: ReplicationCursor;
+    /**
+     * Change-stream position (`mode: 'changeStream'` only) — the oplog resume token
+     * of the last applied event. This is the whole cursor in that mode: no date key,
+     * no tie-breaker, and it survives inserts/updates/deletes alike.
+     */
+    resumeToken?: any;
     status: ReplicationStatus;
     lastRunAt: Date | null;
     lastError: string | null;

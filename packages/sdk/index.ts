@@ -9,6 +9,7 @@ import { cleanDeep } from "./utils";
 
 export { Rest, Anteros, Collection, Files, Service, Vars, Agent, cleanDeep };
 export type {
+    AnterosError,
     ApiAction,
     FileResult,
     FindOptions,
@@ -17,6 +18,8 @@ export type {
     RestClientOptions,
     RestQueryOptions,
     RestRequestOptions,
+    SdkEvent,
+    SdkListener,
     UploadOptions,
 } from "./types/rest";
 export type { VarEntry, VarsAllOptions, VarsScopeOptions, VarsSetOptions } from "./types/vars";

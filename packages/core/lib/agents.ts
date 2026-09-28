@@ -3,8 +3,10 @@ import path from "path";
 import fs from "fs/promises";
 import { cfg } from "../server/config";
 import { Agent } from "./agent";
-import { InMemoryAgentMemory, MongoAgentMemory, RedisAgentMemory } from "./agentMemory";
+import { InMemoryAgentMemory, MongoAgentMemory, RedisAgentMemory, summarize } from "./agentMemory";
 import { importDefinition } from "./load";
+import { resolveSkills } from "./skills";
+import { closeMcpClients } from "./mcpClient";
 import { logger } from "../utils/logger";
 import type { useRest } from "../database/rest";
 import type { AgentDefinition, TenantAgents } from "../types/agent";
@@ -23,6 +25,8 @@ const definitions: AgentDefinition[] = [];
 async function syncAgents(): Promise<void> {
     registry.clear();
     definitions.length = 0;
+    // A re-scan reconnects the remote MCP servers (they are cached per URL)
+    await closeMcpClients().catch(() => {});
     const memories: Array<{ _tenant_: string; collection: string }> = [];
 
     for (const tenant of cfg.tenants ?? []) {
@@ -48,7 +52,23 @@ async function syncAgents(): Promise<void> {
             }
 
             try {
-                const instance = new Agent({ ...definition, id }, { tenant: tenant.id });
+                // `skills` are read **once**, here: a run injects the documents into
+                // its prompt, it never touches the filesystem
+                const baseDir = path.join(process.cwd(), tenant.dir);
+                const skills = await resolveSkills(definition.skills, { baseDir, agentId: id });
+
+                // A referenced sub-agent brings its own declaration: its `skills` are
+                // resolved here too, so delegating is the same as running it directly
+                // (and still never reads a file at run time)
+                for (const referenced of definition.agents
+                    ? (Array.isArray(definition.agents) ? definition.agents : [definition.agents])
+                    : []) {
+                    if (referenced && !referenced._skills_?.length) {
+                        referenced._skills_ = await resolveSkills(referenced.skills, { baseDir, agentId: referenced.id });
+                    }
+                }
+
+                const instance = new Agent({ ...definition, id, _skills_: skills }, { tenant: tenant.id });
                 registry.set(key, instance);
                 definitions.push(instance.getConfig());
 
@@ -144,6 +164,9 @@ const agents = {
         InMemory: InMemoryAgentMemory,
         Mongo: MongoAgentMemory,
         Redis: RedisAgentMemory,
+        // A `load` processor, not a store: it compacts a thread with **your** model
+        // and prompt. Every store above is a backend; this one shapes the prompt.
+        summarize,
     },
 };
 

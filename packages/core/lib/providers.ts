@@ -1,4 +1,5 @@
 import { AppError } from "./error";
+import { logger } from "../utils/logger";
 import type {
     AgentCompatible,
     AgentMediaPart,
@@ -48,6 +49,12 @@ export type ModelChatRequest = {
     signal?: AbortSignal;
     /** Ask for a JSON object (OpenAI-compatible providers: `response_format`). */
     json?: boolean;
+    /**
+     * Ask for a JSON object **matching this schema** — what the provider can really
+     * enforce: `response_format.json_schema` on OpenAI-compatible gateways, a forced
+     * tool on Anthropic (which has no such field). Takes precedence over `json`.
+     */
+    jsonSchema?: { name: string; description?: string; schema: any };
 };
 
 export type ModelChatResponse = {
@@ -335,6 +342,14 @@ function thinkingOf(thinking?: AgentThinking): { effort: "low" | "medium" | "hig
     return { effort, budgetTokens };
 }
 
+/** The maximum, forced-tool name an Anthropic run uses for structured output. */
+const SCHEMA_TOOL = "structured_output";
+/**
+ * A gateway that does not know `response_format.json_schema` refuses the request
+ * with a 400 that names it — that is the only case we downgrade for.
+ */
+const SCHEMA_UNSUPPORTED = /response_format|json_schema|json mode/i;
+
 /** `tool_choice` — the one place the two vocabularies differ. */
 function openaiToolChoice(choice?: AgentToolChoice): any | undefined {
     if (!choice || choice === "auto") return undefined;
@@ -510,7 +525,7 @@ function openaiAdapter(provider: AgentProvider, compatible: AgentCompatible): Mo
         ...(provider.headers ?? {}),
     });
 
-    const body = (req: ModelChatRequest, stream: boolean): any => {
+    const body = (req: ModelChatRequest, stream: boolean, downgrade = false): any => {
         const payload: any = {
             model: provider.model,
             messages: openaiMessages(req.system, req.messages),
@@ -525,7 +540,20 @@ function openaiAdapter(provider: AgentProvider, compatible: AgentCompatible): Mo
         const temperature = req.temperature ?? options.temperature;
         if (temperature !== undefined) payload.temperature = temperature;
         if (options.topP !== undefined) payload.top_p = options.topP;
-        if (req.json) payload.response_format = { type: "json_object" };
+        // `json_schema` is the real constraint (the gateway validates against it);
+        // `json_object` only says "an object" and leaves the shape to the prompt
+        if (req.jsonSchema && !downgrade) {
+            payload.response_format = {
+                type: "json_schema",
+                json_schema: {
+                    name: req.jsonSchema.name,
+                    ...(req.jsonSchema.description ? { description: req.jsonSchema.description } : {}),
+                    schema: req.jsonSchema.schema,
+                },
+            };
+        } else if (req.json) {
+            payload.response_format = { type: "json_object" };
+        }
         if (stream) {
             payload.stream = true;
             payload.stream_options = { include_usage: true };
@@ -533,17 +561,42 @@ function openaiAdapter(provider: AgentProvider, compatible: AgentCompatible): Mo
         return payload;
     };
 
+    /**
+     * POST the request, downgrading a rejected `json_schema` **once**. OpenAI-compatible
+     * gateways are of very uneven quality: one that refuses the field still answers
+     * `json_object`, and the schema is then only enforced by the prompt and the repair
+     * turn — better than failing the run.
+     */
+    const post = async (req: ModelChatRequest, stream: boolean): Promise<Response> => {
+        const send = (downgrade: boolean) => fetchWithRetry(url, {
+            method: "POST",
+            headers: headers(),
+            body: JSON.stringify(body(req, stream, downgrade)),
+            signal: req.signal,
+        }, provider, compatible);
+
+        const response = await send(false);
+        if (response.ok || !req.jsonSchema || response.status !== 400) return response;
+
+        const text = await response.text().catch(() => "");
+        // Not about the schema — hand the error back as it came
+        if (!SCHEMA_UNSUPPORTED.test(text)) {
+            return new Response(text, { status: response.status, headers: { "Content-Type": "application/json" } });
+        }
+
+        logger.file("warn", "agent: provider refused json_schema, retrying with json_object", {
+            model: provider.model,
+            provider: compatible,
+        });
+        return send(true);
+    };
+
     return {
         compatible,
         model: provider.model,
 
         async chat(req) {
-            const response = await fetchWithRetry(url, {
-                method: "POST",
-                headers: headers(),
-                body: JSON.stringify(body(req, false)),
-                signal: req.signal,
-            }, provider, compatible);
+            const response = await post(req, false);
 
             if (!response.ok) {
                 const text = await response.text().catch(() => "");
@@ -577,12 +630,7 @@ function openaiAdapter(provider: AgentProvider, compatible: AgentCompatible): Mo
         },
 
         async *chatStream(req) {
-            const response = await fetchWithRetry(url, {
-                method: "POST",
-                headers: headers(),
-                body: JSON.stringify(body(req, true)),
-                signal: req.signal,
-            }, provider, compatible);
+            const response = await post(req, true);
 
             if (!response.ok || !response.body) {
                 const text = await response.text().catch(() => "");
@@ -646,6 +694,13 @@ function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible):
         ...(provider.headers ?? {}),
     });
 
+    /**
+     * Does this run ask for a schema, and can Anthropic honour it? A forced tool is
+     * incompatible with extended thinking (the API refuses `tool_choice` then) — the
+     * schema is still asked for in the prompt, and the repair turn still validates.
+     */
+    const wantsSchema = (req: ModelChatRequest): boolean => !!req.jsonSchema && !thinkingOf(req.thinking);
+
     const body = (req: ModelChatRequest, stream: boolean): any => {
         const converted = anthropicMessages(req.messages);
         const system = [req.system, converted.system].filter(Boolean).join("\n\n");
@@ -661,10 +716,27 @@ function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible):
                 ? thinking.budgetTokens + 1_024
                 : maxTokens,
         };
-        if (system) payload.system = system;
-        if (req.tools?.length) {
-            payload.tools = anthropicToolSpecs(req.tools);
-            const toolChoice = anthropicToolChoice(req.toolChoice);
+        if (system) {
+            // A prompt-cache breakpoint: everything up to here (instructions, skills,
+            // working memory, tools) is billed once instead of on every run
+            payload.system = options.cache
+                ? [{ type: "text", text: system, cache_control: { type: "ephemeral" } }]
+                : system;
+        }
+
+        // The Messages API has no `response_format`: the schema is carried by a tool
+        // the model is **forced** to call, and the adapter turns that call into text
+        const schemaTool = wantsSchema(req)
+            ? [{ name: SCHEMA_TOOL, description: "Return the answer as a JSON object matching the schema.", input_schema: req.jsonSchema!.schema }]
+            : [];
+        const specs = [...(req.tools?.length ? anthropicToolSpecs(req.tools) : []), ...schemaTool];
+        if (specs.length) {
+            payload.tools = options.cache
+                ? [...specs.slice(0, -1), { ...specs[specs.length - 1]!, cache_control: { type: "ephemeral" } }]
+                : specs;
+            const toolChoice = schemaTool.length
+                ? { type: "tool", name: SCHEMA_TOOL }
+                : anthropicToolChoice(req.toolChoice);
             if (toolChoice) payload.tool_choice = toolChoice;
         }
         if (thinking) payload.thinking = { type: "enabled", budget_tokens: thinking.budgetTokens };
@@ -699,7 +771,7 @@ function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible):
 
             const raw: any = await response.json();
             const blocks: any[] = Array.isArray(raw?.content) ? raw.content : [];
-            const toolCalls = blocks
+            const calls = blocks
                 .filter((block) => block?.type === "tool_use")
                 .map((block: any, index: number) => ({
                     id: block?.id ?? `toolu_${index}`,
@@ -707,8 +779,15 @@ function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible):
                     argsText: JSON.stringify(block?.input ?? {}),
                 }));
 
+            // The forced schema tool **is** the answer: it becomes the text, so the
+            // runtime never sees a tool call it would try to execute
+            const forced = wantsSchema(req) ? calls.find((call) => call.name === SCHEMA_TOOL) : undefined;
+            const toolCalls = forced ? calls.filter((call) => call !== forced) : calls;
+
             return {
-                text: blocks.filter((block) => block?.type === "text").map((block) => block.text).join(""),
+                text: forced
+                    ? forced.argsText
+                    : blocks.filter((block) => block?.type === "text").map((block) => block.text).join(""),
                 toolCalls,
                 // The raw blocks are kept: a tool round must echo the **signed** ones back
                 ...(blocks.some((block) => block?.type === "thinking" || block?.type === "redacted_thinking")
@@ -731,6 +810,8 @@ function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible):
             // Thinking blocks, accumulated by index — signatures included, so the run
             // can echo them back if the model then asks for a tool
             const thinking = new Map<number, any>();
+            // Index of the forced schema tool, whose deltas are the answer itself
+            let schemaBlock: number | null = null;
 
             const response = await fetchWithRetry(url, {
                 method: "POST",
@@ -770,6 +851,12 @@ function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible):
                         const block = payload?.content_block;
                         const index = payload?.index ?? 0;
                         if (block?.type === "tool_use") {
+                            // A forced schema call streams its JSON like any tool call — and
+                            // is surfaced as text instead, see `chat()`
+                            if (wantsSchema(req) && block.name === SCHEMA_TOOL) {
+                                schemaBlock = index;
+                                break;
+                            }
                             yield {
                                 type: "tool_call",
                                 index,
@@ -799,6 +886,11 @@ function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible):
                             block.signature = delta.signature;
                             thinking.set(index, block);
                         } else if (delta?.type === "input_json_delta" && delta.partial_json) {
+                            // The schema tool's JSON is the answer, token by token
+                            if (index === schemaBlock) {
+                                yield { type: "text", text: delta.partial_json };
+                                break;
+                            }
                             yield { type: "tool_call", index, argsText: delta.partial_json };
                         }
                         break;

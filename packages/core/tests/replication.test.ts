@@ -26,6 +26,8 @@ beforeAll(async () => {
             dir: "src",
             database: { uri: SRC_DB },
             replication: {
+                // These cases exercise the scan engine (cursor, tombstones, initial sync)
+                mode: "scan",
                 runOnBoot: false,
                 schedule: { interval: "1h" },
                 destinations: [{ id: DEST_ID, uri: DEST_DB }],
