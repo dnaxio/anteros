@@ -76,7 +76,7 @@ import type {
  * const { text } = await agents.get('weather')!.generate('Weather in Paris?')
  * ```
  *
- * The provider is declared inline — `{ model, apiKey, compatible }` — with no
+ * The provider is declared inline — `{ model, apiKey, protocol }` — with no
  * SDK: `'openai'` (the default, and every OpenAI-compatible gateway) or
  * `'anthropic'`.
  */
@@ -862,6 +862,9 @@ class Agent {
 
     /** Serializable view — never exposes the API key. */
     toJSON(): Record<string, any> {
+        // `protocol` is canonical: the deprecated `compatible` alias is normalized
+        // away here, so the API, the SDK and the audit only ever see one field.
+        const { compatible, ...provider } = this.getProvider();
         return {
             id: this.#config.id,
             name: this.getName(),
@@ -869,7 +872,7 @@ class Agent {
             version: this.#config.version,
             description: this.#config.description,
             tenant: this._tenant_,
-            provider: { ...this.getProvider(), compatible: this.#config.provider.compatible ?? "openai" },
+            provider: { ...provider, protocol: this.#config.provider.protocol ?? compatible ?? "openai" },
             instructions: typeof this.#config.instructions === "string" ? this.#config.instructions : "[dynamic]",
             tools: [...this.#tools.keys()],
             skills: this.getSkills().map((skill) => ({ name: skill.name, description: skill.description })),

@@ -9,6 +9,6 @@ export default define.Agent({
     id: "incomplete",
     description: "Carries a skill that does not follow the format.",
     instructions: "Nothing to see here.",
-    provider: { model: "claude-test", compatible: "anthropic", apiKey: "fixture-key" },
+    provider: { model: "claude-test", protocol: "anthropic", apiKey: "fixture-key" },
     skills: ["./broken/no-name.md"],
 });

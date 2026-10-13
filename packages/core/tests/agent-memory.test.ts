@@ -336,7 +336,7 @@ describe("agent memory — end to end", () => {
             id: "memo",
             description: "A test agent.",
             instructions: "You are a test agent.",
-            provider: { model: "test-model", apiKey: "test-key", compatible: "openai", baseUrl: provider.url, options: { retries: 0 } },
+            provider: { model: "test-model", apiKey: "test-key", protocol: "openai", baseUrl: provider.url, options: { retries: 0 } },
             memory,
         } as any);
         agent.setRest(rest);
@@ -371,7 +371,7 @@ describe("agent memory — end to end", () => {
             id: "shorthand",
             description: "A test agent.",
             instructions: "You are a test agent.",
-            provider: { model: "test-model", apiKey: "test-key", compatible: "openai", baseUrl: provider.url, options: { retries: 0 } },
+            provider: { model: "test-model", apiKey: "test-key", protocol: "openai", baseUrl: provider.url, options: { retries: 0 } },
             memory: new MongoAgentMemory({ collection: MEMORY }),
         } as any);
         agent.setRest(rest);
@@ -397,7 +397,7 @@ describe("agent memory — end to end", () => {
             id: "preview",
             description: "A test agent.",
             instructions: "You are a test agent.",
-            provider: { model: "test-model", apiKey: "test-key", compatible: "openai", baseUrl: provider.url, options: { retries: 0 } },
+            provider: { model: "test-model", apiKey: "test-key", protocol: "openai", baseUrl: provider.url, options: { retries: 0 } },
             memory: new MongoAgentMemory({ collection: MEMORY }),
         } as any);
         agent.setRest(rest);
@@ -416,7 +416,7 @@ describe("agent memory — end to end", () => {
             id: "plain",
             description: "x",
             instructions: "x",
-            provider: { model: "m", compatible: "openai", apiKey: "k" },
+            provider: { model: "m", protocol: "openai", apiKey: "k" },
         } as any);
         expect(await agent.listThreads()).toEqual([]);
 
@@ -424,7 +424,7 @@ describe("agent memory — end to end", () => {
             id: "minimal",
             description: "x",
             instructions: "x",
-            provider: { model: "m", compatible: "openai", apiKey: "k" },
+            provider: { model: "m", protocol: "openai", apiKey: "k" },
             // A custom store only has to implement get / save / clear
             memory: { get: () => [], save: () => { }, clear: () => { } },
         } as any);
@@ -599,7 +599,7 @@ describe("agents.memory.Redis", () => {
             id: "redis-agent",
             description: "A test agent.",
             instructions: "You are a test agent.",
-            provider: { model: "test-model", apiKey: "test-key", compatible: "openai", baseUrl: provider.url, options: { retries: 0 } },
+            provider: { model: "test-model", apiKey: "test-key", protocol: "openai", baseUrl: provider.url, options: { retries: 0 } },
             memory: new RedisAgentMemory({ client }),
         } as any);
         agent._tenant_ = "v1";

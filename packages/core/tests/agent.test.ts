@@ -63,7 +63,7 @@ function makeAgent(
         provider: {
             model: "test-model",
             apiKey: "test-key",
-            compatible: "openai",
+            protocol: "openai",
             // Deterministic by default: a test must not wait on the retry backoff
             options: { retries: 0, ...options },
             ...provider,
@@ -81,7 +81,7 @@ describe("agent … files", () => {
             provider: {
                 model: "test-model",
                 apiKey: "test-key",
-                compatible: "openai",
+                protocol: "openai",
                 options: { retries: 0 },
                 ...providerOverrides,
             },
@@ -228,7 +228,7 @@ describe("agent … tools & thinking options", () => {
             provider: {
                 model: "test-model",
                 apiKey: "test-key",
-                compatible: "openai",
+                protocol: "openai",
                 options: { retries: 0 },
                 ...providerOverrides,
             },
@@ -307,7 +307,7 @@ describe("agent … tools & thinking options", () => {
         expect(request(provider, 1).body.tool_choice).toBe("auto");
 
         const anthropic = track(fakeProvider(() => anthropicText("ok")));
-        const forced = toolAgent({ compatible: "anthropic", baseUrl: anthropic.url }, { toolChoice: { name: "forecast" } });
+        const forced = toolAgent({ protocol: "anthropic", baseUrl: anthropic.url }, { toolChoice: { name: "forecast" } });
         await forced.generate("hi");
         expect(request(anthropic, 0).body.tool_choice).toEqual({ type: "tool", name: "forecast" });
         await forced.generate("hi", { toolChoice: "auto" });
@@ -347,7 +347,7 @@ describe("agent … tools & thinking options", () => {
     it("maps `thinking` to a real budget on Anthropic, and raises max_tokens above it", async () => {
         const provider = track(fakeProvider(() => anthropicText("ok")));
         const agent = toolAgent(
-            { compatible: "anthropic", baseUrl: provider.url, options: { retries: 0, maxTokens: 2000, temperature: 0.5 } },
+            { protocol: "anthropic", baseUrl: provider.url, options: { retries: 0, maxTokens: 2000, temperature: 0.5 } },
         );
 
         await agent.generate("hi", { thinking: true });
@@ -377,7 +377,7 @@ describe("agent … tools & thinking options", () => {
             stop_reason: "tool_use",
             usage: A_USAGE,
         })));
-        const agent = toolAgent({ compatible: "anthropic", baseUrl: provider.url });
+        const agent = toolAgent({ protocol: "anthropic", baseUrl: provider.url });
 
         await agent.generate("Weather?", { thinking: 'medium' });
 
@@ -409,7 +409,7 @@ describe("agent … tools & thinking options", () => {
                 stop_reason: "end_turn",
                 usage: A_USAGE,
             })));
-        const agent = toolAgent({ compatible: "anthropic", baseUrl: provider.url });
+        const agent = toolAgent({ protocol: "anthropic", baseUrl: provider.url });
 
         const result = await agent.generate("go", { thinking: true });
 
@@ -430,7 +430,7 @@ describe("agent … tools & thinking options", () => {
             JSON.stringify({ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "Answer" } }),
             JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 3 } }),
         ])));
-        const agent = toolAgent({ compatible: "anthropic", baseUrl: provider.url });
+        const agent = toolAgent({ protocol: "anthropic", baseUrl: provider.url });
 
         const stream = agent.stream("hi", { thinking: true });
         const kinds: string[] = [];
@@ -621,7 +621,7 @@ describe("Agent", () => {
         const agent = makeAgent({}, {}, { temperature: 0.2, maxTokens: 1000 });
         const declared = {
             model: "test-model",
-            compatible: "openai" as const,
+            protocol: "openai" as const,
             options: { retries: 0, temperature: 0.2, maxTokens: 1000 },
         };
 
@@ -831,7 +831,7 @@ describe("agent.generate", () => {
         delete Bun.env.ANTHROPIC_API_KEY;
 
         try {
-            const agent = makeAgent({}, { compatible: "anthropic", apiKey: undefined, baseUrl: provider.url });
+            const agent = makeAgent({}, { protocol: "anthropic", apiKey: undefined, baseUrl: provider.url });
             await expect(agent.generate("hi")).rejects.toMatchObject({ code: "AGENT_PROVIDER_NO_API_KEY" });
 
             Bun.env.ANTHROPIC_API_KEY = "from-env";
@@ -849,10 +849,10 @@ describe("agent.generate", () => {
 
 // ─── Anthropic ───────────────────────────────────────────────────────────
 
-describe("agent with an Anthropic-compatible provider", () => {
+describe("agent speaking the Anthropic protocol", () => {
     it("puts the system prompt out of band and returns the text", async () => {
         const provider = track(fakeProvider(() => anthropicText("Bonjour")));
-        const agent = makeAgent({}, { compatible: "anthropic", baseUrl: provider.url });
+        const agent = makeAgent({}, { protocol: "anthropic", baseUrl: provider.url });
 
         const result = await agent.generate("salut");
 
@@ -869,7 +869,7 @@ describe("agent with an Anthropic-compatible provider", () => {
         const provider = track(fakeProvider((_body, _req, hits) =>
             hits === 1 ? anthropicTool("forecast", { city: "Lyon" }) : anthropicText("Lyon: 21°C")));
 
-        const agent = makeAgent({ tools: { forecast: forecastTool() } }, { compatible: "anthropic", baseUrl: provider.url });
+        const agent = makeAgent({ tools: { forecast: forecastTool() } }, { protocol: "anthropic", baseUrl: provider.url });
         const result = await agent.generate("Weather in Lyon?");
 
         expect(result.text).toBe("Lyon: 21°C");
@@ -888,7 +888,7 @@ describe("agent with an Anthropic-compatible provider", () => {
 
     it("streams text deltas and merges the partial usage", async () => {
         const provider = track(fakeProvider(() => anthropicStream(["Bon", "jour"])));
-        const agent = makeAgent({}, { compatible: "anthropic", baseUrl: provider.url });
+        const agent = makeAgent({}, { protocol: "anthropic", baseUrl: provider.url });
 
         const stream = agent.stream("salut");
         let text = "";

@@ -120,7 +120,8 @@ export type AgentInfo = {
     tenant?: string;
     provider: {
         model: string;
-        compatible?: "openai" | "anthropic";
+        /** Wire protocol the agent speaks — `'openai'` (default) or `'anthropic'`. */
+        protocol?: "openai" | "anthropic";
         baseUrl?: string;
         headers?: Record<string, string>;
         options?: Record<string, any>;

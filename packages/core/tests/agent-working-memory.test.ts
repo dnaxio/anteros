@@ -36,7 +36,7 @@ function makeAgent(overrides: Record<string, any> = {}, provider: Record<string,
         provider: {
             model: "test-model",
             apiKey: "test-key",
-            compatible: "openai",
+            protocol: "openai",
             options: { retries: 0 },
             ...provider,
         },
@@ -385,7 +385,7 @@ describe("working memory — Anthropic", () => {
         const provider = track(fakeProvider(() => anthropicText("ok")));
         const agent = makeAgent(
             { memory: new InMemoryAgentMemory(), workingMemory: { template: "# Memo\n- x:" } },
-            { compatible: "anthropic", baseUrl: provider.url },
+            { protocol: "anthropic", baseUrl: provider.url },
         );
 
         await agent.generate("hi", { thread: "t1", resource: "u1" });

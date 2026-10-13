@@ -12,7 +12,7 @@ export default define.Agent({
     id: "docs",
     description: "Answers from the tenant's own documentation.",
     instructions: "Answer from the documentation you were given.",
-    provider: { model: "claude-test", compatible: "anthropic", apiKey: "fixture-key" },
+    provider: { model: "claude-test", protocol: "anthropic", apiKey: "fixture-key" },
     skills: [
         "./docs/*.md",
         "./guide/ml.md",

@@ -13,7 +13,7 @@ export default define.Agent({
     instructions: "You are a fixture agent.",
     provider: {
         model: "test-model",
-        compatible: "openai",
+        protocol: "openai",
         apiKey: "test-key",
         baseUrl: Bun.env.AGENT_API_TEST_URL ?? "http://127.0.0.1:1",
         options: { retries: 0 },

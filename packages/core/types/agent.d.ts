@@ -10,7 +10,14 @@ import type { Agent } from "../lib/agent";
  * `'openai'` (the default) also covers every OpenAI-compatible gateway
  * (Groq, Mistral, OpenRouter, Ollama, LM Studio, vLLM…) — only `baseUrl` changes.
  */
-export type AgentCompatible = "openai" | "anthropic";
+export type AgentProtocol = "openai" | "anthropic";
+
+/**
+ * @deprecated Renamed to `AgentProtocol` — the field was named after a property
+ * of the remote endpoint, when what it really selects is the shape of the
+ * request and response on the wire.
+ */
+export type AgentCompatible = AgentProtocol;
 
 /**
  * Model provider — **where** the agent's reasoning comes from: the model, the
@@ -18,21 +25,30 @@ export type AgentCompatible = "openai" | "anthropic";
  *
  * ```ts
  * provider: { model: 'gpt-4o-mini', apiKey: 'sk-…' }                       // OpenAI
- * provider: { model: 'claude-sonnet-4-5', apiKey: 'sk-ant-…', compatible: 'anthropic' }
- * provider: { model: 'llama3.1', compatible: 'openai', baseUrl: 'http://localhost:11434/v1' }
+ * provider: { model: 'claude-sonnet-4-5', apiKey: 'sk-ant-…', protocol: 'anthropic' }
+ * provider: { model: 'llama3.1', protocol: 'openai', baseUrl: 'http://localhost:11434/v1' }
  * ```
  *
  * The key falls back to the environment when omitted:
  * `ANTEROS_AI_API_KEY`, then `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` according to
- * `compatible`. It is therefore never required in the source.
+ * `protocol`. It is therefore never required in the source.
  */
 export type AgentProvider = {
     /** Model id sent to the API (e.g. `gpt-4o-mini`, `claude-sonnet-4-5`). */
     model: string;
     /** API key — falls back to the environment (see above). */
     apiKey?: string;
-    /** Wire protocol (default `'openai'`). */
-    compatible?: AgentCompatible;
+    /**
+     * Wire protocol of the endpoint (default `'openai'`). `'openai'` is the
+     * Chat Completions API — the one every OpenAI-compatible gateway
+     * (Groq, Mistral, Ollama…) speaks too — `'anthropic'` is the Messages API.
+     */
+    protocol?: AgentProtocol;
+    /**
+     * @deprecated Alias of `protocol`, kept so a definition written before the
+     * rename keeps working. `protocol` wins when both are set.
+     */
+    compatible?: AgentProtocol;
     /** API root override — default `https://api.openai.com/v1` or `https://api.anthropic.com`. */
     baseUrl?: string;
     /** Extra headers sent with every request. */

@@ -11,6 +11,6 @@ export default define.Agent({
     id: "chat",
     description: "Fixture agent whose memory lives in a tenant-named collection.",
     instructions: "Fixture agent — no model call is ever made in these tests.",
-    provider: { model: "test-model", compatible: "openai", apiKey: "fixture" },
+    provider: { model: "test-model", protocol: "openai", apiKey: "fixture" },
     memory: new agents.memory.Mongo({ collection: AGENT_THREADS }),
 });

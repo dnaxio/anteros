@@ -9,7 +9,7 @@ export default define.Agent({
     name: "Weather Agent",
     description: "Answers weather questions with a tool call",
     instructions: "You are a concise weather assistant.",
-    provider: { model: "test-model", compatible: "openai", apiKey: "fixture-key" },
+    provider: { model: "test-model", protocol: "openai", apiKey: "fixture-key" },
     tools: {
         forecast: define.Tool({
             id: "forecast",

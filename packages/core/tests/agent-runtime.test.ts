@@ -42,7 +42,7 @@ function makeAgent(
         provider: {
             model: "test-model",
             apiKey: "test-key",
-            compatible: "openai",
+            protocol: "openai",
             options: { retries: 0, ...options },
             ...provider,
         },

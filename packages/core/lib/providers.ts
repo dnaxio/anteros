@@ -1,7 +1,7 @@
 import { AppError } from "./error";
 import { logger } from "../utils/logger";
 import type {
-    AgentCompatible,
+    AgentProtocol,
     AgentMediaPart,
     AgentMessage,
     AgentProvider,
@@ -83,18 +83,19 @@ export type ModelStreamEvent =
     | { type: "finish"; finishReason: string };
 
 export type ModelAdapter = {
-    compatible: AgentCompatible;
+    /** The wire protocol this adapter speaks. */
+    protocol: AgentProtocol;
     model: string;
     chat(req: ModelChatRequest): Promise<ModelChatResponse>;
     chatStream(req: ModelChatRequest): AsyncGenerator<ModelStreamEvent, void, unknown>;
 };
 
-const DEFAULT_BASE_URL: Record<AgentCompatible, string> = {
+const DEFAULT_BASE_URL: Record<AgentProtocol, string> = {
     openai: "https://api.openai.com/v1",
     anthropic: "https://api.anthropic.com",
 };
 
-const ENV_API_KEY: Record<AgentCompatible, string[]> = {
+const ENV_API_KEY: Record<AgentProtocol, string[]> = {
     openai: ["ANTEROS_AI_API_KEY", "OPENAI_API_KEY"],
     anthropic: ["ANTEROS_AI_API_KEY", "ANTHROPIC_API_KEY"],
 };
@@ -107,25 +108,33 @@ const EMPTY_USAGE: AgentUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 
 
 // ─── Configuration resolution ────────────────────────────────────────────
 
-function resolveCompatible(provider: AgentProvider): AgentCompatible {
-    const compatible = provider.compatible ?? "openai";
-    if (compatible !== "openai" && compatible !== "anthropic") {
-        throw new AppError(`Unknown provider 'compatible': '${compatible}' — expected 'openai' or 'anthropic'`, {
+/**
+ * The wire protocol to speak. `protocol` is canonical; `compatible` is the
+ * deprecated alias kept for definitions written before the rename — `protocol`
+ * wins when both are set, so an override never silently loses to the old field.
+ */
+function resolveProtocol(provider: AgentProvider): AgentProtocol {
+    const protocol = provider.protocol ?? provider.compatible ?? "openai";
+    if (protocol !== "openai" && protocol !== "anthropic") {
+        throw new AppError(`Unknown provider 'protocol': '${protocol}' — expected 'openai' or 'anthropic'`, {
             status: 500,
             code: "AGENT_PROVIDER_INVALID",
         });
     }
-    return compatible;
+    return protocol;
 }
 
-function resolveApiKey(provider: AgentProvider, compatible: AgentCompatible): string {
+/** @deprecated Renamed to `resolveProtocol`. */
+const resolveCompatible = resolveProtocol;
+
+function resolveApiKey(provider: AgentProvider, protocol: AgentProtocol): string {
     if (provider.apiKey) return provider.apiKey;
-    for (const name of ENV_API_KEY[compatible]) {
+    for (const name of ENV_API_KEY[protocol]) {
         const value = Bun.env?.[name] ?? process.env?.[name];
         if (value) return value;
     }
     throw new AppError(
-        `No API key for provider '${provider.model}' (compatible: ${compatible}) — pass \`provider.apiKey\` or set ${ENV_API_KEY[compatible].join(" / ")}`,
+        `No API key for provider '${provider.model}' (protocol: ${protocol}) — pass \`provider.apiKey\` or set ${ENV_API_KEY[protocol].join(" / ")}`,
         { status: 500, code: "AGENT_PROVIDER_NO_API_KEY" },
     );
 }
@@ -135,10 +144,10 @@ function resolveApiKey(provider: AgentProvider, compatible: AgentCompatible): st
  * (`http://localhost:11434` → `http://localhost:11434/v1` for OpenAI-compatible
  * servers), an explicit path is used verbatim.
  */
-function resolveBaseUrl(provider: AgentProvider, compatible: AgentCompatible): string {
-    const raw = provider.baseUrl ?? DEFAULT_BASE_URL[compatible];
+function resolveBaseUrl(provider: AgentProvider, protocol: AgentProtocol): string {
+    const raw = provider.baseUrl ?? DEFAULT_BASE_URL[protocol];
     const trimmed = raw.replace(/\/+$/, "");
-    if (compatible !== "openai") return trimmed;
+    if (protocol !== "openai") return trimmed;
     try {
         const url = new URL(trimmed);
         if (url.pathname === "" || url.pathname === "/") url.pathname = "/v1";
@@ -387,10 +396,10 @@ function normalizeFinishReason(reason: string | null | undefined): string {
     }
 }
 
-function mapUsage(raw: any, compatible: AgentCompatible): AgentUsage {
+function mapUsage(raw: any, protocol: AgentProtocol): AgentUsage {
     if (!raw) return { ...EMPTY_USAGE };
-    const input = compatible === "anthropic" ? raw.input_tokens : raw.prompt_tokens;
-    const output = compatible === "anthropic" ? raw.output_tokens : raw.completion_tokens;
+    const input = protocol === "anthropic" ? raw.input_tokens : raw.prompt_tokens;
+    const output = protocol === "anthropic" ? raw.output_tokens : raw.completion_tokens;
     const inputTokens = Number(input ?? 0);
     const outputTokens = Number(output ?? 0);
     return {
@@ -422,7 +431,7 @@ async function fetchWithRetry(
     url: string,
     init: RequestInit,
     provider: AgentProvider,
-    compatible: AgentCompatible,
+    protocol: AgentProtocol,
 ): Promise<Response> {
     const options = provider.options ?? {};
     const retries = options.retries ?? DEFAULT_RETRIES;
@@ -440,7 +449,7 @@ async function fetchWithRetry(
                 lastError = new AppError(`Provider error (${response.status}): ${providerErrorMessage(body, response.status)}`, {
                     status: 502,
                     code: "AGENT_PROVIDER_ERROR",
-                    reason: { provider: compatible, status: response.status },
+                    reason: { provider: protocol, status: response.status },
                 });
             } else {
                 return response;
@@ -502,26 +511,26 @@ async function* sseData(body: ReadableStream<Uint8Array>): AsyncGenerator<string
 }
 
 /** An error event sent by the provider in the middle of a stream. */
-function streamError(payload: any, compatible: AgentCompatible): AppError | null {
+function streamError(payload: any, protocol: AgentProtocol): AppError | null {
     const message = payload?.error?.message ?? (typeof payload?.error === "string" ? payload.error : null);
     if (!message) return null;
     return new AppError(`Provider stream error: ${message}`, {
         status: 502,
         code: "AGENT_PROVIDER_ERROR",
-        reason: { provider: compatible },
+        reason: { provider: protocol },
     });
 }
 
 // ─── OpenAI-compatible adapter ───────────────────────────────────────────
 
-function openaiAdapter(provider: AgentProvider, compatible: AgentCompatible): ModelAdapter {
-    const baseUrl = resolveBaseUrl(provider, compatible);
+function openaiAdapter(provider: AgentProvider, protocol: AgentProtocol): ModelAdapter {
+    const baseUrl = resolveBaseUrl(provider, protocol);
     const url = `${baseUrl}/chat/completions`;
     const options = provider.options ?? {};
 
     const headers = (): Record<string, string> => ({
         "Content-Type": "application/json",
-        Authorization: `Bearer ${resolveApiKey(provider, compatible)}`,
+        Authorization: `Bearer ${resolveApiKey(provider, protocol)}`,
         ...(provider.headers ?? {}),
     });
 
@@ -573,7 +582,7 @@ function openaiAdapter(provider: AgentProvider, compatible: AgentCompatible): Mo
             headers: headers(),
             body: JSON.stringify(body(req, stream, downgrade)),
             signal: req.signal,
-        }, provider, compatible);
+        }, provider, protocol);
 
         const response = await send(false);
         if (response.ok || !req.jsonSchema || response.status !== 400) return response;
@@ -586,13 +595,13 @@ function openaiAdapter(provider: AgentProvider, compatible: AgentCompatible): Mo
 
         logger.file("warn", "agent: provider refused json_schema, retrying with json_object", {
             model: provider.model,
-            provider: compatible,
+            provider: protocol,
         });
         return send(true);
     };
 
     return {
-        compatible,
+        protocol,
         model: provider.model,
 
         async chat(req) {
@@ -603,7 +612,7 @@ function openaiAdapter(provider: AgentProvider, compatible: AgentCompatible): Mo
                 throw new AppError(`Provider error (${response.status}): ${providerErrorMessage(text, response.status)}`, {
                     status: 502,
                     code: "AGENT_PROVIDER_ERROR",
-                    reason: { provider: compatible, status: response.status },
+                    reason: { provider: protocol, status: response.status },
                 });
             }
 
@@ -624,7 +633,7 @@ function openaiAdapter(provider: AgentProvider, compatible: AgentCompatible): Mo
                     : {}),
                 toolCalls,
                 finishReason: normalizeFinishReason(choice?.finish_reason),
-                usage: mapUsage(raw?.usage, compatible),
+                usage: mapUsage(raw?.usage, protocol),
                 raw,
             };
         },
@@ -637,7 +646,7 @@ function openaiAdapter(provider: AgentProvider, compatible: AgentCompatible): Mo
                 throw new AppError(`Provider error (${response.status}): ${providerErrorMessage(text, response.status)}`, {
                     status: 502,
                     code: "AGENT_PROVIDER_ERROR",
-                    reason: { provider: compatible, status: response.status },
+                    reason: { provider: protocol, status: response.status },
                 });
             }
 
@@ -649,7 +658,7 @@ function openaiAdapter(provider: AgentProvider, compatible: AgentCompatible): Mo
                 } catch {
                     continue;
                 }
-                const error = streamError(payload, compatible);
+                const error = streamError(payload, protocol);
                 if (error) throw error;
 
                 const choice = payload?.choices?.[0];
@@ -673,7 +682,7 @@ function openaiAdapter(provider: AgentProvider, compatible: AgentCompatible): Mo
                         };
                     }
                 }
-                if (payload?.usage) yield { type: "usage", usage: mapUsage(payload.usage, compatible) };
+                if (payload?.usage) yield { type: "usage", usage: mapUsage(payload.usage, protocol) };
                 if (choice?.finish_reason) yield { type: "finish", finishReason: normalizeFinishReason(choice.finish_reason) };
             }
         },
@@ -682,14 +691,14 @@ function openaiAdapter(provider: AgentProvider, compatible: AgentCompatible): Mo
 
 // ─── Anthropic adapter ───────────────────────────────────────────────────
 
-function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible): ModelAdapter {
-    const baseUrl = resolveBaseUrl(provider, compatible);
+function anthropicAdapter(provider: AgentProvider, protocol: AgentProtocol): ModelAdapter {
+    const baseUrl = resolveBaseUrl(provider, protocol);
     const url = `${baseUrl}/v1/messages`;
     const options = provider.options ?? {};
 
     const headers = (): Record<string, string> => ({
         "Content-Type": "application/json",
-        "x-api-key": resolveApiKey(provider, compatible),
+        "x-api-key": resolveApiKey(provider, protocol),
         "anthropic-version": "2023-06-01",
         ...(provider.headers ?? {}),
     });
@@ -749,7 +758,7 @@ function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible):
     };
 
     return {
-        compatible,
+        protocol,
         model: provider.model,
 
         async chat(req) {
@@ -758,14 +767,14 @@ function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible):
                 headers: headers(),
                 body: JSON.stringify(body(req, false)),
                 signal: req.signal,
-            }, provider, compatible);
+            }, provider, protocol);
 
             if (!response.ok) {
                 const text = await response.text().catch(() => "");
                 throw new AppError(`Provider error (${response.status}): ${providerErrorMessage(text, response.status)}`, {
                     status: 502,
                     code: "AGENT_PROVIDER_ERROR",
-                    reason: { provider: compatible, status: response.status },
+                    reason: { provider: protocol, status: response.status },
                 });
             }
 
@@ -801,7 +810,7 @@ function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible):
                     }
                     : {}),
                 finishReason: normalizeFinishReason(raw?.stop_reason),
-                usage: mapUsage(raw?.usage, compatible),
+                usage: mapUsage(raw?.usage, protocol),
                 raw,
             };
         },
@@ -818,14 +827,14 @@ function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible):
                 headers: headers(),
                 body: JSON.stringify(body(req, true)),
                 signal: req.signal,
-            }, provider, compatible);
+            }, provider, protocol);
 
             if (!response.ok || !response.body) {
                 const text = await response.text().catch(() => "");
                 throw new AppError(`Provider error (${response.status}): ${providerErrorMessage(text, response.status)}`, {
                     status: 502,
                     code: "AGENT_PROVIDER_ERROR",
-                    reason: { provider: compatible, status: response.status },
+                    reason: { provider: protocol, status: response.status },
                 });
             }
 
@@ -836,7 +845,7 @@ function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible):
                 } catch {
                     continue;
                 }
-                const error = streamError(payload, compatible);
+                const error = streamError(payload, protocol);
                 if (error) throw error;
 
                 switch (payload?.type) {
@@ -908,7 +917,7 @@ function anthropicAdapter(provider: AgentProvider, compatible: AgentCompatible):
                         throw new AppError(`Provider stream error: ${payload?.error?.message ?? "unknown"}`, {
                             status: 502,
                             code: "AGENT_PROVIDER_ERROR",
-                            reason: { provider: compatible },
+                            reason: { provider: protocol },
                         });
                 }
             }
@@ -934,15 +943,17 @@ function resolveProvider(provider: AgentProvider): ModelAdapter {
     if (!provider?.model) {
         throw new AppError("`provider.model` is required", { status: 500, code: "AGENT_PROVIDER_INVALID" });
     }
-    const compatible = resolveCompatible(provider);
-    return compatible === "anthropic"
-        ? anthropicAdapter(provider, compatible)
-        : openaiAdapter(provider, compatible);
+    const protocol = resolveProtocol(provider);
+    return protocol === "anthropic"
+        ? anthropicAdapter(provider, protocol)
+        : openaiAdapter(provider, protocol);
 }
 
 export {
     EMPTY_USAGE,
     DEFAULT_MAX_TOKENS,
+    resolveProtocol,
+    /** @deprecated Renamed to `resolveProtocol`. */
     resolveCompatible,
     resolveApiKey,
     resolveBaseUrl,

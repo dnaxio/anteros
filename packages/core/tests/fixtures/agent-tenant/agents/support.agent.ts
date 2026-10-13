@@ -5,5 +5,5 @@ export default define.Agent({
     id: "support",
     description: "Answers support questions.",
     instructions: "You are a support agent.",
-    provider: { model: "claude-test", compatible: "anthropic", apiKey: "fixture-key" },
+    provider: { model: "claude-test", protocol: "anthropic", apiKey: "fixture-key" },
 });

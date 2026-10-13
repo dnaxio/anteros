@@ -61,6 +61,75 @@ function stripReadOnlyUpdate(col: any, body: any) {
     }
 }
 
+/**
+ * The collections a request pulls documents **into** its response — an `$include`
+ * on `find`/`findOne`, a `$lookup` / `$graphLookup` anywhere in an `aggregate`
+ * pipeline (`$facet` branches and nested lookups included).
+ *
+ * Returns the path each joined document lands at, paired with the target
+ * collection's `api.privateFields`. `func.omit` only knows the *queried*
+ * collection's matchers, so a joined document — which carries the *included*
+ * collection's fields — has to be masked separately, at its own path.
+ */
+function embeddedPrivateFields(col: any, body: any): Array<{ path: string[]; keys: (string | RegExp)[] }> {
+    const found: Array<{ path: string[]; keys: (string | RegExp)[] }> = [];
+
+    const keysOf = (slug: string): (string | RegExp)[] =>
+        (cfg.collections?.find((c) => c.slug === slug && c._tenant_ === col._tenant_)?.api?.privateFields) ?? [];
+
+    const push = (slug: string, path?: string) => {
+        if (!path) return;
+        const keys = keysOf(slug);
+        if (keys.length) found.push({ path: path.split('.'), keys });
+    };
+
+    // find / findOne — `$include`
+    for (const inc of body?.params?.$include ?? []) {
+        if (typeof inc === 'string') {
+            const field = col.fields?.find((f: any) => f.name === inc);
+            if (field?.relation?.to) push(field.relation.to, inc);
+        } else if (inc?.from) {
+            push(inc.from, inc.as || inc.localField);
+        }
+    }
+
+    // aggregate — every `$lookup` / `$graphLookup`, nested ones included
+    const walk = (stages: any, prefix: string) => {
+        if (!Array.isArray(stages)) return;
+        for (const stage of stages) {
+            if (!stage || typeof stage !== 'object') continue;
+            const lookup = stage.$lookup ?? stage.$graphLookup;
+            if (lookup?.from && typeof lookup.as === 'string') {
+                const path = prefix ? `${prefix}.${lookup.as}` : lookup.as;
+                push(lookup.from, path);
+                walk(lookup.pipeline, path);
+            }
+            if (stage.$facet && typeof stage.$facet === 'object') {
+                for (const branch of Object.values(stage.$facet)) walk(branch, prefix);
+            }
+        }
+    };
+    walk(body?.pipeline, '');
+
+    return found;
+}
+
+/**
+ * Apply `func.omit` **at `path` only**, walking through arrays (a `$include` of a
+ * `hasMany`). Each node on the way is shallow-copied, so a cached result is never
+ * mutated in place.
+ */
+function omitAtPath(node: any, path: string[], keys: (string | RegExp)[]): any {
+    if (node === null || node === undefined) return node;
+    if (Array.isArray(node)) return node.map((item) => omitAtPath(item, path, keys));
+    if (typeof node !== 'object') return node;
+
+    const [head, ...rest] = path;
+    if (!head || !(head in node)) return node;
+
+    return { ...node, [head]: rest.length ? omitAtPath(node[head], rest, keys) : func.omit(node[head], keys) };
+}
+
 // ─── Access control ─────────────────────────────────────────────────────────
 // `evaluateAccess` / `errorResponse` / `getAccessToken` live in `./access`
 // (shared with the agents API).
@@ -313,9 +382,13 @@ function initializeApi(app: Hono<{ Variables: HonoVariables }>) {
                 response = await handler(rest, collection, body);
             }
 
-            // Strip private fields from response
+            // Strip private fields from response — the queried collection's own,
+            // then each collection it embeds via `$include` / `$lookup`
             if (privateFields.length > 0) {
                 response = func.omit(response!, privateFields, fieldOrder);
+            }
+            for (const { path, keys } of embeddedPrivateFields(col, body)) {
+                response = omitAtPath(response, path, keys);
             }
 
             return c.json(response);

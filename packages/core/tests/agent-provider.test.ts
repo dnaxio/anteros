@@ -45,7 +45,7 @@ function makeAgent(
         provider: {
             model: "test-model",
             apiKey: "test-key",
-            compatible: "openai",
+            protocol: "openai",
             options: { retries: 0, ...options },
             ...provider,
         },
@@ -136,7 +136,7 @@ describe("structured output on an OpenAI-compatible gateway", () => {
 describe("structured output on Anthropic", () => {
     it("forces a schema tool, and turns its call back into the answer", async () => {
         const provider = track(fakeProvider(() => anthropicTool("structured_output", { priority: "high" })));
-        const agent = makeAgent({}, { compatible: "anthropic", baseUrl: provider.url });
+        const agent = makeAgent({}, { protocol: "anthropic", baseUrl: provider.url });
 
         const result = await agent.generate("Triage this", { schema: priority });
 
@@ -153,7 +153,7 @@ describe("structured output on Anthropic", () => {
 
     it("keeps the agent's own tools, and the schema tool beside them", async () => {
         const provider = track(fakeProvider(() => anthropicTool("structured_output", { priority: "low" })));
-        const agent = makeAgent({ tools: { forecast: tool() } }, { compatible: "anthropic", baseUrl: provider.url });
+        const agent = makeAgent({ tools: { forecast: tool() } }, { protocol: "anthropic", baseUrl: provider.url });
 
         await agent.generate("Triage this", { schema: priority });
 
@@ -163,7 +163,7 @@ describe("structured output on Anthropic", () => {
 
     it("does not force a tool when extended thinking is on, and still parses", async () => {
         const provider = track(fakeProvider(() => anthropicText('{"priority":"high"}')));
-        const agent = makeAgent({}, { compatible: "anthropic", baseUrl: provider.url });
+        const agent = makeAgent({}, { protocol: "anthropic", baseUrl: provider.url });
 
         const result = await agent.generate("Triage this", { schema: priority, thinking: true });
 
@@ -185,7 +185,7 @@ describe("structured output on Anthropic", () => {
             JSON.stringify({ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 7 } }),
             JSON.stringify({ type: "message_stop" }),
         ])));
-        const agent = makeAgent({}, { compatible: "anthropic", baseUrl: provider.url });
+        const agent = makeAgent({}, { protocol: "anthropic", baseUrl: provider.url });
 
         const stream = agent.stream("Triage this", { schema: priority });
         const chunks: any[] = [];
@@ -203,7 +203,7 @@ describe("structured output on Anthropic", () => {
 describe("prompt cache", () => {
     it("marks the stable prefix on Anthropic — system and last tool", async () => {
         const provider = track(fakeProvider(() => anthropicText("ok")));
-        const agent = makeAgent({ tools: { forecast: tool() } }, { compatible: "anthropic", baseUrl: provider.url }, { cache: true });
+        const agent = makeAgent({ tools: { forecast: tool() } }, { protocol: "anthropic", baseUrl: provider.url }, { cache: true });
 
         await agent.generate("hi");
 
@@ -214,7 +214,7 @@ describe("prompt cache", () => {
 
     it("leaves the payload alone when it is not asked for", async () => {
         const provider = track(fakeProvider(() => anthropicText("ok")));
-        const agent = makeAgent({ tools: { forecast: tool() } }, { compatible: "anthropic", baseUrl: provider.url });
+        const agent = makeAgent({ tools: { forecast: tool() } }, { protocol: "anthropic", baseUrl: provider.url });
 
         await agent.generate("hi");
 
@@ -230,5 +230,59 @@ describe("prompt cache", () => {
         await agent.generate("hi");
 
         expect(request(provider, 0).body.messages[0]).toEqual({ role: "system", content: "You are a test agent." });
+    });
+});
+
+describe("provider protocol", () => {
+    /** An agent whose provider is exactly what is passed — no injected default. */
+    function providerAgent(provider: Record<string, any>) {
+        return new Agent({
+            id: "test",
+            description: "A test agent.",
+            instructions: "You are a test agent.",
+            provider: { model: "test-model", apiKey: "test-key", options: { retries: 0 }, ...provider },
+        } as any);
+    }
+
+    it("calls the Messages API when `protocol: 'anthropic'`", async () => {
+        const provider = track(fakeProvider(() => anthropicText("ok")));
+        const agent = providerAgent({ protocol: "anthropic", baseUrl: provider.url });
+
+        await agent.generate("hi");
+
+        expect(request(provider, 0).path).toBe("/v1/messages");
+    });
+
+    it("still accepts the deprecated `compatible` alias", async () => {
+        const provider = track(fakeProvider(() => anthropicText("ok")));
+        const agent = providerAgent({ compatible: "anthropic", baseUrl: provider.url });
+
+        await agent.generate("hi");
+
+        expect(request(provider, 0).path).toBe("/v1/messages");
+    });
+
+    it("lets `protocol` win when the deprecated alias is set too", async () => {
+        const provider = track(fakeProvider(() => openaiText("ok")));
+        const agent = providerAgent({ compatible: "anthropic", protocol: "openai", baseUrl: provider.url });
+
+        await agent.generate("hi");
+
+        // A bare host gets `/v1` appended by the OpenAI adapter
+        expect(request(provider, 0).path).toBe("/v1/chat/completions");
+    });
+
+    it("normalizes to `protocol` in the serializable view, never leaking the alias", () => {
+        const agent = providerAgent({ compatible: "anthropic" });
+
+        const info = agent.toJSON();
+        expect(info.provider.protocol).toBe("anthropic");
+        expect(info.provider.compatible).toBeUndefined();
+    });
+
+    it("refuses an unknown protocol with `AGENT_PROVIDER_INVALID`", async () => {
+        const agent = providerAgent({ protocol: "gemini" });
+
+        await expect(agent.generate("hi")).rejects.toThrow(/Unknown provider 'protocol'/);
     });
 });

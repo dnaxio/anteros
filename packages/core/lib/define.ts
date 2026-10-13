@@ -181,7 +181,7 @@ export function Workflow<TData = any>(workflow: WorkflowDefinition<TData>): Work
  *   id: 'weather',
  *   description: 'Answers weather questions with a live forecast.',
  *   instructions: 'You are a concise weather assistant.',
- *   provider: { model: 'gpt-4o-mini', compatible: 'openai' },
+ *   provider: { model: 'gpt-4o-mini', protocol: 'openai' },
  *   tools: { forecast },
  * })
  * ```

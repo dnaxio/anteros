@@ -52,7 +52,7 @@ beforeAll(() => {
                         agent: {
                             id: agentId,
                             name: "Support",
-                            provider: { model: "gpt-4o-mini", compatible: "openai" },
+                            provider: { model: "gpt-4o-mini", protocol: "openai" },
                             instructions: "…",
                             tools: ["echo"],
                             maxSteps: 5,

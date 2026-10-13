@@ -180,7 +180,7 @@ describe("agents HTTP API — actions", () => {
         expect(res.body.agent.id).toBe("assistant");
         expect(res.body.agent.tools).toEqual(["echo"]);
         expect(res.body.agent.provider.model).toBe("test-model");
-        expect(res.body.agent.provider.compatible).toBe("openai");
+        expect(res.body.agent.provider.protocol).toBe("openai");
         expect(res.body.agent.maxSteps).toBe(3);
         expect(res.body.agent.memory).toBe(true);
         expect(JSON.stringify(res.body)).not.toContain("test-key");
