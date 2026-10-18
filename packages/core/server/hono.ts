@@ -18,6 +18,7 @@ import { initializeAgents } from "./agents";
 import { initializeMcp } from "./mcp";
 import { getGlobalMiddlewares } from "../lib/middleware";
 import { jwt } from "../utils/func";
+import { DEFAULT_REDACT_KEYS, isSensitiveKey, redactKeys } from "../lib/redact";
 import { AppError } from "../lib/error";
 import { getMetrics } from "./metrics";
 import { logger } from "../utils/logger";
@@ -29,13 +30,32 @@ import type { HonoVariables } from "./env";
  */
 export function collectHeaders(h: Headers): Record<string, string[]> {
     const EXCLUDE = ['authorization', 'cookie', 'proxy-authorization', 'set-cookie'];
+    const keys = redactKeys() ?? new Set(DEFAULT_REDACT_KEYS.map((key) => key.toLowerCase()));
     const out: Record<string, string[]> = {};
     for (const [name, value] of h.entries()) {
         const key = name.toLowerCase();
-        if (EXCLUDE.includes(key)) continue;
+        if (EXCLUDE.includes(key) || isSensitiveKey(key, keys)) continue;
         out[key] = [value];
     }
     return out;
+}
+
+/** Redact sensitive query-string parameters before they reach the access log. */
+export function redactUri(uri: string): string {
+    const separator = uri.indexOf('?');
+    if (separator === -1) return uri;
+    const pathname = uri.slice(0, separator);
+    const keys = redactKeys() ?? new Set(DEFAULT_REDACT_KEYS.map((key) => key.toLowerCase()));
+    const params = new URLSearchParams(uri.slice(separator + 1));
+    let changed = false;
+    for (const name of [...params.keys()]) {
+        if (isSensitiveKey(name, keys)) {
+            params.set(name, '[redacted]');
+            changed = true;
+        }
+    }
+    if (!changed) return uri;
+    return `${pathname}?${params.toString()}`;
 }
 
 // ─── Redis-backed rate limiting (C3) ─────────────────────────────────────────
@@ -231,7 +251,7 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
             const conn = c.get('connInfo');
             const token = c.get('token');
             const url = new URL(c.req.raw.url);
-            const uri = url.pathname + url.search;
+            const uri = redactUri(url.pathname + url.search);
             const ip = c.get('clientIp') ?? 'unknown';
             const remoteIp = conn?.remote?.address ?? null;
             const remotePort = conn?.remote?.port ?? null;
@@ -286,6 +306,19 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
         allowList: cfg.server?.ipRestriction?.allowList || [],
     }))
 
+    // Cross-Origin-Resource-Policy — the API keeps `same-origin` by default, but a
+    // served file must be embeddable by the app even when it lives on another origin
+    // (an `<img>` is a no-cors request: only CORP can block it). Registered before
+    // `secureHeaders` so this middleware writes the final value after it.
+    const securityCorp = cfg.server.security?.crossOriginResourcePolicy ?? 'same-origin';
+    const fileCorp = cfg.server.files?.crossOriginResourcePolicy ?? 'cross-origin';
+    app.use(async (c, next) => {
+        await next();
+        const segments = c.req.path.split('/');
+        const isFile = segments[1] === 'api' && segments[3] === 'files';
+        c.header('Cross-Origin-Resource-Policy', isFile ? fileCorp : securityCorp);
+    });
+
     // security headers
     app.use(secureHeaders({
         strictTransportSecurity: true,
@@ -294,13 +327,24 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
         xXssProtection: true,
         referrerPolicy: true,
         removePoweredBy: true,
+        // Hono defaults CORP to `same-origin`; configurable (see `server.security`)
+        crossOriginResourcePolicy: securityCorp,
     }))
 
 
-    // body limit
-    app.use(bodyLimit({
-        maxSize: cfg.server.body?.maxSize ?? 1024 * 1024 * 100, // 100MB
-    }));
+    // Body limit — 16MB default for normal requests; the upload route gets the
+    // per-file allowance (100MB default) plus multipart overhead so a 100MB file
+    // is actually uploadable. `server.body.maxSize` raises both.
+    const DEFAULT_BODY_BYTES = 16 * 1024 * 1024;
+    const DEFAULT_UPLOAD_BYTES = 100 * 1024 * 1024;
+    const isUploadPath = (path: string) => /^\/api\/[^/]+\/upload\/[^/]+\/?$/.test(path);
+    app.use((c, next) => {
+        const configured = cfg.server.body?.maxSize ?? DEFAULT_BODY_BYTES;
+        const maxSize = isUploadPath(c.req.path)
+            ? Math.max(configured, DEFAULT_UPLOAD_BYTES + 1024 * 1024)
+            : configured;
+        return bodyLimit({ maxSize })(c, next);
+    });
 
     // ── Health & metrics (built-in, zero dependency) ──
     app.get('/health', (c) => {
@@ -389,6 +433,29 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
             return await next();
         })
     })
+
+    // Tenant-bound tokens (#35) — a JWT carrying a `tenant` claim only opens that
+    // tenant's routes. `requireTenantClaim` rejects claim-less (legacy) tokens once set.
+    app.use(async (c, next) => {
+        const token = (c as any).get('token') as { decoded: Record<string, unknown> | null; provided?: boolean } | undefined;
+        const claim = token?.decoded?.['tenant'] ?? token?.decoded?.['_tenant_'] ?? token?.decoded?.['tenant_id'];
+        // `c.req.param()` is not reliable inside a global middleware — read the path.
+        const segments = c.req.path.split('/').filter(Boolean);
+        const tenantId = segments[0] === 'api'
+            ? segments[1]
+            : segments[0] === '_dnax' && segments[1] === 'config'
+                ? segments[2]
+                : undefined;
+
+        if (token?.provided && claim === undefined && cfg.server.jwt?.requireTenantClaim === true) {
+            return c.json({ message: 'Tenant claim required', code: 'TENANT_CLAIM_REQUIRED' }, 401);
+        }
+        if (claim !== undefined && tenantId !== undefined && String(claim) !== tenantId) {
+            return c.json({ message: 'Token does not belong to this tenant', code: 'TENANT_MISMATCH' }, 401);
+        }
+
+        await next();
+    });
 
     // Global user-defined middlewares — has access to requestCtxStorage, asyncContextStorage, etc.
     for (const mw of getGlobalMiddlewares()) {

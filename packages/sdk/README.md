@@ -32,7 +32,7 @@ const api = new Anteros({
   server: "https://api.example.com",
   tenant: "my-tenant",
   token: {
-    persist: true,        // auto-save token in localStorage
+    persist: true,        // auto-save token in localStorage (scoped per server+tenant)
     storageKey: "anteros_token",
   },
 });
@@ -79,9 +79,11 @@ new Rest(options: RestClientOptions)      // flat (same options)
 | `server`          | `string`                 | Base URL of the Anteros server |
 | `tenant`          | `string`                 | Tenant identifier |
 | `headers`         | `Record<string, string>` | Default headers sent with every request |
+| `credentials`     | `RequestCredentials`     | `fetch` credentials mode — `'include'` for cookie-based auth |
+| `timeoutMs`       | `number`                 | Request timeout in ms (default: `0` = disabled; prefer an explicit value for CRUD, keep `0` for long agent runs/streams) |
 | `token`           | `object`                 | Token persistence settings |
-| `token.persist`   | `boolean`                | Persist token in `localStorage` (default: `true`) |
-| `token.storageKey`| `string`                 | localStorage key (default: `"anteros_token"`) |
+| `token.persist`   | `boolean`                | Persist token in `localStorage` (default: `true`; prefer `false` when XSS matters) |
+| `token.storageKey`| `string`                 | Base localStorage key (default: `"anteros_token"`), **automatically scoped by server + tenant** |
 
 ### Collections (CRUD)
 

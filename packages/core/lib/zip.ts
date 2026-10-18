@@ -23,9 +23,17 @@ const SIGNATURE = {
 /** Zip entries are never larger than this in a document we read — sanity guard. */
 const MAX_EOCD_SCAN = 65_535 + 22; // the folder comment cap + the record itself
 
+/**
+ * Decompressed-entry ceiling (#41) — mirrors `MAX_FILE_BYTES` (attachment.ts) and
+ * stops a deflate bomb: a 20 KB archive can otherwise expand to gigabytes.
+ */
+const MAX_ENTRY_BYTES = 10 * 1024 * 1024;
+
 type Entry = {
     method: number;
     compressedSize: number;
+    /** Declared size after inflation — checked before we allocate anything. */
+    uncompressedSize: number;
     localOffset: number;
 };
 
@@ -67,17 +75,18 @@ function openZip(buffer: Uint8Array): ZipArchive {
 
         const method = view.getUint16(offset + 10, true);
         const compressedSize = view.getUint32(offset + 20, true);
+        const uncompressedSize = view.getUint32(offset + 24, true);
         const nameLength = view.getUint16(offset + 28, true);
         const extraLength = view.getUint16(offset + 30, true);
         const commentLength = view.getUint16(offset + 32, true);
         const localOffset = view.getUint32(offset + 42, true);
 
-        if (compressedSize === 0xffffffff || localOffset === 0xffffffff) {
+        if (compressedSize === 0xffffffff || uncompressedSize === 0xffffffff || localOffset === 0xffffffff) {
             throw bad("ZIP64 archives are not supported");
         }
 
         const name = new TextDecoder().decode(buffer.subarray(offset + 46, offset + 46 + nameLength));
-        entries.set(name, { method, compressedSize, localOffset });
+        entries.set(name, { method, compressedSize, uncompressedSize, localOffset });
         offset += 46 + nameLength + extraLength + commentLength;
     }
 
@@ -98,9 +107,20 @@ function openZip(buffer: Uint8Array): ZipArchive {
             const data = buffer.subarray(start, start + entry.compressedSize);
             if (start + entry.compressedSize > buffer.length) throw bad(`truncated entry '${name}'`);
 
+            // The declared size is a first guard — before inflating anything.
+            if (entry.uncompressedSize > MAX_ENTRY_BYTES) {
+                throw bad(`entry '${name}' expands beyond the ${MAX_ENTRY_BYTES / 1024 / 1024}MB limit`);
+            }
+
             // 0 = stored, 8 = deflate — the only two methods Office writes
             if (entry.method === 0) return data;
-            if (entry.method === 8) return new Uint8Array(inflateRawSync(data));
+            if (entry.method === 8) {
+                try {
+                    return new Uint8Array(inflateRawSync(data, { maxOutputLength: MAX_ENTRY_BYTES }));
+                } catch {
+                    throw bad(`entry '${name}' expands beyond the ${MAX_ENTRY_BYTES / 1024 / 1024}MB limit`);
+                }
+            }
             throw bad(`unsupported compression method ${entry.method} for '${name}'`);
         },
     };

@@ -147,6 +147,15 @@ describe("agent … files", () => {
         expect(content).not.toContain("%PDF-1.7");
     });
 
+    it("refuses a path that escapes the base directory", async () => {
+        const provider = track(fakeProvider(() => openaiText("ok")));
+        const agent = attachmentAgent({ baseUrl: provider.url });
+
+        await expect(agent.generate("hi", { files: ["../../../package.json"] }))
+            .rejects.toMatchObject({ code: "AGENT_FILE_INVALID" });
+        expect(provider.hits()).toBe(0);
+    });
+
     it("refuses an unreadable file before calling the model", async () => {
         const provider = track(fakeProvider(() => openaiText("ok")));
         const agent = attachmentAgent({ baseUrl: provider.url });
@@ -615,6 +624,13 @@ describe("Agent", () => {
         expect(json).not.toContain("super-secret");
         expect(json).toContain("test-model");
         expect(agent.toJSON().tools).toEqual(["forecast"]);
+    });
+
+    it("never exposes sensitive provider headers in getProvider() / toJSON()", () => {
+        const agent = makeAgent({}, { headers: { "x-api-key": "header-secret", "x-team": "core" } });
+
+        expect(agent.getProvider().headers).toEqual({ "x-team": "core" });
+        expect(JSON.stringify(agent.toJSON())).not.toContain("header-secret");
     });
 
     it("keeps the provider's options under `provider.options`", () => {

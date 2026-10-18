@@ -1,22 +1,16 @@
-import { describe, it, expect, afterAll } from "bun:test";
+import { describe, it, expect } from "bun:test";
 import { normalizeMessages } from "../lib/messages";
 import { MAX_FILE_BYTES } from "../lib/attachment";
 
-/** A tiny local file server — the `file: { url }` path downloads through `fetch`. */
-const servers: Array<ReturnType<typeof Bun.serve>> = [];
-function serve(body: Uint8Array | string, contentType = "application/pdf") {
-    const server = Bun.serve({
-        port: 0,
-        hostname: "127.0.0.1",
-        fetch: () => new Response(body as any, { headers: { "Content-Type": contentType } }),
-    });
-    servers.push(server);
-    return `http://127.0.0.1:${server.port}/report.pdf`;
+/**
+ * Remote files (`file: { url }`) are fetched server-side: only **public HTTPS**
+ * targets are accepted (issue #30). `fetch` is stubbed — no network in the suite.
+ */
+function stubFetch(handler: (url: string) => Response | Promise<Response>): () => void {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: any) => handler(String(input))) as unknown as typeof fetch;
+    return () => { globalThis.fetch = original; };
 }
-
-afterAll(() => {
-    for (const server of servers) server.stop(true);
-});
 
 const first = async (input: any) => (await normalizeMessages(input))[0] as any;
 
@@ -74,18 +68,73 @@ describe("normalizeMessages — content parts", () => {
         expect(message).toEqual({ role: "system", content: "a\nb" });
     });
 
-    it("downloads a remote file and inlines it as base64", async () => {
-        const url = serve("%PDF-1.7 payload");
-        const [message] = await normalizeMessages([
-            { role: "user", content: [{ type: "file", url, name: "invoice.pdf" }] },
-        ] as any);
+    it("downloads a public HTTPS file and inlines it as base64", async () => {
+        const restore = stubFetch(() => new Response("%PDF-1.7 payload", {
+            headers: { "Content-Type": "application/pdf" },
+        }));
+        try {
+            const [message] = await normalizeMessages([
+                { role: "user", content: [{ type: "file", url: "https://8.8.8.8/report.pdf", name: "invoice.pdf" }] },
+            ] as any);
 
-        const part: any = (message as any).content[0];
-        expect(part.type).toBe("file");
-        expect(part.name).toBe("invoice.pdf");
-        // The URL is gone — the payload travels as base64, which every provider takes
-        expect(part.url).toBeUndefined();
-        expect(Buffer.from(part.data, "base64").toString()).toBe("%PDF-1.7 payload");
+            const part: any = (message as any).content[0];
+            expect(part.type).toBe("file");
+            expect(part.name).toBe("invoice.pdf");
+            // The URL is gone — the payload travels as base64, which every provider takes
+            expect(part.url).toBeUndefined();
+            expect(Buffer.from(part.data, "base64").toString()).toBe("%PDF-1.7 payload");
+        } finally {
+            restore();
+        }
+    });
+
+    it("refuses remote files that are not public HTTPS (SSRF)", async () => {
+        const cases = [
+            "http://8.8.8.8/report.pdf",             // plain HTTP
+            "https://127.0.0.1/report.pdf",          // loopback
+            "https://10.0.0.1/report.pdf",           // RFC1918
+            "https://172.16.0.1/report.pdf",         // RFC1918
+            "https://192.168.1.1/report.pdf",        // RFC1918
+            "https://169.254.169.254/latest",        // cloud metadata
+            "https://[::1]/report.pdf",              // IPv6 loopback
+            "https://[fe80::1]/report.pdf",          // IPv6 link-local
+            "https://localhost/report.pdf",          // resolves to loopback
+            "https://user:pass@8.8.8.8/report.pdf",  // credentials in the URL
+        ];
+        for (const url of cases) {
+            const error: any = await normalizeMessages([
+                { role: "user", content: [{ type: "file", url, name: "x.pdf" }] },
+            ] as any).catch((err) => err);
+            expect({ url, code: error.code }).toEqual({ url, code: "AGENT_FILE_INVALID" });
+        }
+    });
+
+    it("refuses a redirect that lands on a private address", async () => {
+        const restore = stubFetch(() => new Response(null, {
+            status: 302,
+            headers: { location: "https://127.0.0.1/secret.pdf" },
+        }));
+        try {
+            const error: any = await normalizeMessages([
+                { role: "user", content: [{ type: "file", url: "https://8.8.8.8/report.pdf", name: "x.pdf" }] },
+            ] as any).catch((err) => err);
+            expect(error.code).toBe("AGENT_FILE_INVALID");
+        } finally {
+            restore();
+        }
+    });
+
+    it("reports an unreachable remote file without echoing the network error", async () => {
+        const restore = stubFetch(() => new Response("nope", { status: 404 }));
+        try {
+            const error: any = await normalizeMessages([
+                { role: "user", content: [{ type: "file", url: "https://8.8.8.8/missing.pdf", name: "x.pdf" }] },
+            ] as any).catch((err) => err);
+            expect(error.code).toBe("AGENT_FILE_NOT_FOUND");
+            expect(error.message).not.toContain("404");
+        } finally {
+            restore();
+        }
     });
 
     it("leaves a remote image as a URL — the provider fetches it", async () => {
@@ -107,12 +156,19 @@ describe("normalizeMessages — content parts", () => {
         }
     });
 
-    it("refuses a file that is too large", async () => {
-        const url = serve(new Uint8Array(MAX_FILE_BYTES + 1));
-        const error: any = await normalizeMessages([
-            { role: "user", content: [{ type: "file", url, name: "huge.pdf" }] },
-        ] as any).catch((err) => err);
-        expect(error.code).toBe("AGENT_FILE_TOO_LARGE");
+    it("refuses a streamed remote file that is too large", async () => {
+        const body = new Uint8Array(MAX_FILE_BYTES + 1);
+        const restore = stubFetch(() => new Response(new ReadableStream({
+            start(controller) { controller.enqueue(body); controller.close(); },
+        })));
+        try {
+            const error: any = await normalizeMessages([
+                { role: "user", content: [{ type: "file", url: "https://8.8.8.8/huge.pdf", name: "huge.pdf" }] },
+            ] as any).catch((err) => err);
+            expect(error.code).toBe("AGENT_FILE_TOO_LARGE");
+        } finally {
+            restore();
+        }
     });
 });
 

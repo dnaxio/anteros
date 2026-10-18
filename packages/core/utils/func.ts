@@ -912,6 +912,24 @@ function clone<T>(data: T): T {
 const MAX_REGEX_LENGTH = 1000;
 const MAX_IN_ARRAY_SIZE = 10000;
 
+/** Filter operators a client must never reach MongoDB with (JS execution). */
+const FORBIDDEN_MATCH_KEYS = ['$where', '$expr', '$accumulator', '$function'];
+
+/** Bound and sanitize a raw Mongo filter (#45) — same rules as `find`.
+ *  Used by internal methods that accept a filter directly (`findOneAndUpdate`,
+ *  `bulkWrite`, `bulkUpdate`, `countDocuments`). */
+function assertSafeFilter(filter: unknown): void {
+    if (filter === null || filter === undefined || typeof filter !== 'object') return;
+    const forbidden = hasUnauthorizedKeys(filter, FORBIDDEN_MATCH_KEYS);
+    if (forbidden.length > 0) {
+        throw new AppError('Unauthorized match keys: ' + forbidden.join(', '), {
+            code: 'UNAUTHORIZED_MATCH_KEYS',
+            status: 400,
+        });
+    }
+    boundMatchOperators(filter);
+}
+
 function boundMatchOperators(node: unknown): void {
     if (node === null || node === undefined) return;
 
@@ -1240,6 +1258,8 @@ function parseDuration(value: string | number): number | null {
 }
 
 export {
+    assertSafeFilter,
+    boundMatchOperators,
     buildPipeline,
     reorder,
     omit,

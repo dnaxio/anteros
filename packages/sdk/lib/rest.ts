@@ -1,5 +1,6 @@
 import { Client } from "./client";
 import type { FileResult, FindOptions, RestRequestOptions } from "../types/rest";
+import { assertUpdateOperators, assertUploadSize, toFormValue } from "../utils";
 
 /**
  * The **original** client — the flat surface, unchanged.
@@ -32,6 +33,11 @@ class Rest extends Client {
     ): Promise<{ token: string; data: TData }> {
         this.clearToken(); // a fresh login never reuses the previous token
         const res = await this.request<{ token: string; data: TData }>(collection, "login", { payload }, options);
+        if (res?.token !== undefined && typeof res.token !== "string") {
+            const error = new Error("The login response does not contain a string token") as Error & { code: string };
+            error.code = "SDK_INVALID_LOGIN";
+            throw error;
+        }
         if (res?.token) this.setToken(res.token);
         return res;
     }
@@ -105,6 +111,7 @@ class Rest extends Client {
         update: TUpdate,
         options?: RestRequestOptions,
     ): Promise<T> {
+        assertUpdateOperators(update);
         const extra = this.defaultParams?.updateOne ?? {};
         return this.request<T>(collection, "updateOne", { id, update, ...extra }, options);
     }
@@ -115,6 +122,7 @@ class Rest extends Client {
         update: TUpdate,
         options?: RestRequestOptions,
     ): Promise<any> {
+        assertUpdateOperators(update);
         const extra = this.defaultParams?.updateMany ?? {};
         return this.request(collection, "updateMany", { ids, update, ...extra }, options);
     }
@@ -180,12 +188,16 @@ class Rest extends Client {
         },
     ): Promise<T | T[]> {
         const files = Array.isArray(file) ? file : [file];
+        assertUploadSize(files);
         const fieldName = opts?.fieldName ?? "file";
         const formData = new FormData();
         for (const entry of files) formData.append(fieldName, entry);
 
         if (data) {
-            for (const [key, value] of Object.entries(data)) formData.append(key, String(value));
+            for (const [key, value] of Object.entries(data)) {
+                const encoded = toFormValue(value);
+                if (encoded !== undefined) formData.append(key, encoded);
+            }
         }
 
         return this.postForm<T | T[]>(this.buildUploadUrl(collection), formData, opts?.signal);

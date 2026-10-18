@@ -1,4 +1,5 @@
 import { AppError, fn } from "./error";
+import { DEFAULT_REDACT_KEYS, isSensitiveKey, redactKeys } from "./redact";
 import { toJsonSchema, validateWithSchema } from "./jsonSchema";
 import { InMemoryAgentMemory, trimMessages } from "./agentMemory";
 import { forMemory, resolveAttachments } from "./attachment";
@@ -505,10 +506,18 @@ class Agent {
 
     // ── Provider ─────────────────────────────────────────────────────────
 
-    /** The provider as declared — the API key is **not** included. */
+    /** The provider as declared — the API key **and sensitive headers** are not included. */
     getProvider(): AgentProvider {
-        const { apiKey, ...rest } = this.#config.provider;
-        return { ...rest, options: { ...this.#config.provider.options } };
+        const { apiKey, headers, ...rest } = this.#config.provider;
+        const keys = redactKeys() ?? new Set(DEFAULT_REDACT_KEYS.map((key) => key.toLowerCase()));
+        const safeHeaders = headers
+            ? Object.fromEntries(Object.entries(headers).filter(([name]) => !isSensitiveKey(name, keys)))
+            : undefined;
+        return {
+            ...rest,
+            ...(safeHeaders && Object.keys(safeHeaders).length ? { headers: safeHeaders } : {}),
+            options: { ...this.#config.provider.options },
+        };
     }
 
     /** Sampling and transport options as declared (`provider.options`). */

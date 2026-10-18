@@ -1,4 +1,5 @@
 import path from "path";
+import { realpath, stat } from "node:fs/promises";
 import { AppError } from "./error";
 import { openZip, type ZipArchive } from "./zip";
 import type { AgentAttachment, AgentMediaPart, AgentTextPart } from "../types/agent";
@@ -217,10 +218,30 @@ export type NormalizedAttachment = {
  */
 async function materialize(attachment: AgentAttachment, baseDir: string): Promise<NormalizedAttachment> {
     if (typeof attachment === "string") {
-        const file = path.resolve(baseDir, attachment);
-        if (!(await Bun.file(file).exists())) {
-            throw new AppError(`Attachment '${attachment}' not found`, { status: 400, code: "AGENT_FILE_NOT_FOUND" });
+        // A path attachment is a **server-side** feature (scripts, in-process SDK):
+        // it may never escape `filesBaseDir` — not through `..`, not through an
+        // absolute path, and not through a symlink pointing outside (issue #29).
+        const root = path.resolve(baseDir);
+        const candidate = path.resolve(root, attachment);
+        if (candidate !== root && !candidate.startsWith(root + path.sep)) {
+            throw new AppError("Attachment path escapes the base directory", { status: 400, code: "AGENT_FILE_INVALID" });
         }
+
+        let file: string;
+        try {
+            file = await realpath(candidate);
+        } catch {
+            throw new AppError("Attachment not found", { status: 400, code: "AGENT_FILE_NOT_FOUND" });
+        }
+
+        const realRoot = await realpath(root).catch(() => root);
+        if (file !== realRoot && !file.startsWith(realRoot + path.sep)) {
+            throw new AppError("Attachment path escapes the base directory", { status: 400, code: "AGENT_FILE_INVALID" });
+        }
+        if (!(await stat(file)).isFile()) {
+            throw new AppError("Attachment is not a regular file", { status: 400, code: "AGENT_FILE_NOT_FOUND" });
+        }
+
         const bytes = new Uint8Array(await Bun.file(file).arrayBuffer());
         return { name: path.basename(file), mimeType: "", bytes };
     }

@@ -3,7 +3,6 @@ import { createApp, collectHeaders } from './hono'
 import { parseBootFlags, resolveCapabilities, conflictingBootFlags, offCapabilities, capabilitiesLabel, FULL_CAPABILITIES } from './flags'
 import type { BootCapabilities } from './flags'
 import type { ServerConfig } from '../types/config'
-import dayjs from 'dayjs';
 import pkg from '../package.json';
 import boxen from 'boxen';
 import "@colors/colors";
@@ -34,6 +33,13 @@ import { logger } from '../utils/logger';
 
 type BootAppOptions = ServerConfig & {
 
+}
+
+/** `YYYY-MM-DD HH:mm:ss` in **local** time — what the banner shows, from `Date` alone. */
+function stamp(date = new Date()): string {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
+        + `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 /**
@@ -104,7 +110,7 @@ function renderBanner(opts: {
 
     box += url ? `Url: ${url}`.gray.bold : `Url: none — no API`.yellow.bold;
     box += '\n\n';
-    box += `Last boot: 🔄 ${dayjs().format('YYYY-MM-DD HH:mm:ss')}`.gray;
+    box += `Last boot: 🔄 ${stamp()}`.gray;
 
     return boxen(box, {
         title: ` @anteros/core ${pkg.version}`,
@@ -378,7 +384,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
             // Sockets are disabled by not serving `/socket.io/` (below): without an
             // explicit `server.upgrade()` call no client can ever open a websocket.
             websocket: websocket,
-            maxRequestBodySize: 1024 * 1024 * 100, // 100MB
+            maxRequestBodySize: Math.max(cfg.server.body?.maxSize ?? 16 * 1024 * 1024, 101 * 1024 * 1024), // 16MB normal, 100MB+overhead uploads
         })
 
         // Register server for built-in metrics (GET /health)

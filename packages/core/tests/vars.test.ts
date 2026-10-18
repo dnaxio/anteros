@@ -48,7 +48,7 @@ describe("define.Vars", () => {
 describe("vars loading & seeding", () => {
     it("loads the definitions from vars/*.var.ts", () => {
         const namespaces = (cfg.vars ?? []).map((v) => v.namespace).sort();
-        expect(namespaces).toEqual(["config", "private"]);
+        expect(namespaces).toEqual(["config", "open", "private"]);
         expect((cfg.vars ?? []).every((v) => v._tenant_ === TEST_TENANT)).toBe(true);
     });
 

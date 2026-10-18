@@ -100,6 +100,16 @@ function redact(value: any, keys: Set<string>, depth = 0): any {
     return changed ? out : value
 }
 
+/**
+ * Redact secrets embedded in a **free-text** message (`password=…`, `token: …`).
+ * The key-based redactor cannot see those — audit error messages need this.
+ */
+const TEXT_SECRET = /((?:password|passwd|pwd|token|secret|api[_-]?key|authorization)\s*[:=]\s*)([^\s,;]+)/gi;
+
+function redactText(value: string): string {
+    return value.replace(TEXT_SECRET, "$1[redacted]");
+}
+
 /** Redact an audit payload — `input`, `result`, `meta` or `request` */
 function redactPayload(value: any): any {
     const keys = redactKeys()
@@ -113,5 +123,6 @@ export {
     redactKeys,
     isSensitiveKey,
     redactPayload,
+    redactText,
     redact,
 }

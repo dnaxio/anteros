@@ -11,8 +11,5 @@
   },
   "peerDependencies": {
     "typescript": "^6.0.3"
-  },
-  "dependencies": {
-    "ufo": "^1.6.3"
   }
 }

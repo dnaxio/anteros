@@ -299,6 +299,62 @@ function streamResponse(
     });
 }
 
+/** A file a caller may attach over HTTP — content only, never a server path. */
+type HttpAttachment = {
+    name?: string;
+    mimeType?: string;
+    data: string;
+    encoding?: "base64" | "utf8";
+};
+
+/**
+ * Validate the `files` field of the HTTP body (issue #29).
+ *
+ * Over HTTP a file is **content** — `{ name?, mimeType?, data, encoding? }`, base64
+ * or UTF-8 — never a server path. Path attachments are a server-side/in-process
+ * feature: accepting one here let any caller read a file the process could read
+ * (`files: ["../../../.env"]`), whose content then went to the model provider.
+ */
+function httpAttachments(input: unknown): HttpAttachment[] | undefined {
+    if (input === undefined) return undefined;
+    if (!Array.isArray(input)) {
+        throw new AppError("`files` must be an array of { name, data, encoding } objects", {
+            status: 400, code: "AGENT_FILES_INVALID",
+        });
+    }
+
+    return input.map((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+            throw new AppError("Each `files` entry must be an object — a server path is not accepted over HTTP", {
+                status: 400, code: "AGENT_FILES_INVALID",
+            });
+        }
+
+        const { name, mimeType, data, encoding } = entry as Record<string, unknown>;
+        if (typeof data !== "string") {
+            throw new AppError("Each `files` entry needs a `data` string (base64, or UTF-8 with `encoding: 'utf8'`)", {
+                status: 400, code: "AGENT_FILES_INVALID",
+            });
+        }
+        if (name !== undefined && typeof name !== "string") {
+            throw new AppError("A `files` entry `name` must be a string", { status: 400, code: "AGENT_FILES_INVALID" });
+        }
+        if (mimeType !== undefined && typeof mimeType !== "string") {
+            throw new AppError("A `files` entry `mimeType` must be a string", { status: 400, code: "AGENT_FILES_INVALID" });
+        }
+        if (encoding !== undefined && encoding !== "base64" && encoding !== "utf8") {
+            throw new AppError("A `files` entry `encoding` must be 'base64' or 'utf8'", { status: 400, code: "AGENT_FILES_INVALID" });
+        }
+
+        return {
+            ...(name !== undefined ? { name } : {}),
+            ...(mimeType !== undefined ? { mimeType } : {}),
+            data,
+            ...(encoding !== undefined ? { encoding } : {}),
+        } as HttpAttachment;
+    });
+}
+
 function initializeAgents(app: Hono<{ Variables: HonoVariables }>) {
     app.post(AGENT_PREFIX, async (c) => {
         const started = Date.now();
@@ -347,6 +403,8 @@ function initializeAgents(app: Hono<{ Variables: HonoVariables }>) {
             // A resume carries its own conversation: no input to ask for
             const needsInput = (action === 'generate' || action === 'stream' || action === 'object') && !body?.resume;
             const input = needsInput ? normalizeInput(body) : undefined;
+            // Files are content over HTTP — a server path is refused before the run
+            const files = httpAttachments(body?.files);
             // `memory: { thread, resource }` or the flat `thread` / `resource`
             const thread = resolveThread(body);
             const resource = resolveResource(body);
@@ -360,6 +418,7 @@ function initializeAgents(app: Hono<{ Variables: HonoVariables }>) {
                 thread,
                 // The deprecated alias, so a rule written against it keeps working
                 threadId: thread,
+                tenant: tenant_id,
             });
 
             const callOptions: AgentCallOptions = {
@@ -372,7 +431,7 @@ function initializeAgents(app: Hono<{ Variables: HonoVariables }>) {
                 ...(body?.messages ? { messages: body.messages as AgentInput } : {}),
                 // Stop the run when the client disconnects (no tokens past the wire)
                 signal: c.req.raw.signal,
-                ...(body?.files?.length ? { files: body.files } : {}),
+                ...(files?.length ? { files } : {}),
                 ...(body?.resume ? { resume: body.resume } : {}),
                 ...(readOnly ? { memory: { readOnly: true } } : {}),
             };

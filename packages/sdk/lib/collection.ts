@@ -1,4 +1,5 @@
 import type { FindOptions, RestClientOptions, RestRequestOptions } from "../types/rest";
+import { assertUpdateOperators } from "../utils";
 
 /** What the collection client calls to reach the wire — `Rest` owns the transport. */
 type Post = (action: string, body?: unknown, options?: RestRequestOptions) => Promise<any>;
@@ -53,6 +54,11 @@ class Collection<T = any> {
     ): Promise<{ token: string; data: TData }> {
         this.#onToken(undefined); // a fresh login never reuses the previous token
         const res = await this.#post("login", { payload }, options) as { token: string; data: TData };
+        if (res?.token !== undefined && typeof res.token !== "string") {
+            const error = new Error("The login response does not contain a string token") as Error & { code: string };
+            error.code = "SDK_INVALID_LOGIN";
+            throw error;
+        }
         if (res?.token) this.#onToken(res.token);
         return res;
     }
@@ -100,11 +106,13 @@ class Collection<T = any> {
     }
 
     async updateOne<TUpdate = any>(id: string, update: TUpdate, options?: RestRequestOptions): Promise<T> {
+        assertUpdateOperators(update);
         const extra = this.#defaults.updateOne ?? {};
         return this.#post("updateOne", { id, update, ...extra }, options) as Promise<T>;
     }
 
     async updateMany<TUpdate = any>(ids: string[], update: TUpdate, options?: RestRequestOptions): Promise<any> {
+        assertUpdateOperators(update);
         const extra = this.#defaults.updateMany ?? {};
         return this.#post("updateMany", { ids, update, ...extra }, options);
     }

@@ -11,6 +11,11 @@ import type {
     SdkListener,
 } from "../types/rest";
 
+/** Encode one dynamic path segment (collection, action, agent, filename…). */
+function segment(value: string | number): string {
+    return encodeURIComponent(String(value));
+}
+
 /** Build a URL from the server, the tenant and path segments. */
 function joinURL(...parts: string[]): string {
     return parts
@@ -43,6 +48,8 @@ class Client {
     #token?: string;
     #persistToken: boolean;
     #tokenStorageKey: string;
+    #credentials?: RequestCredentials;
+    #timeoutMs: number;
     protected defaultParams: RestClientOptions["defaultParams"];
     /** Listeners, by event — see `on('error')`. */
     #listeners = new Map<SdkEvent, Set<SdkListener>>();
@@ -52,13 +59,16 @@ class Client {
         this.#tenant = options.tenant;
         this.#headers = { ...(options.headers ?? {}) };
         this.#persistToken = options.token?.persist ?? true;
-        this.#tokenStorageKey = options.token?.storageKey ?? "anteros_token";
+        // Scope the storage key to the server **and** the tenant: a global key made a
+        // second client (another tenant, another server) pick the previous token.
+        const scope = `${this.#server}|${options.tenant}`;
+        this.#tokenStorageKey = `${options.token?.storageKey ?? "anteros_token"}:${scope}`;
+        this.#credentials = options.credentials;
+        this.#timeoutMs = options.timeoutMs ?? 0;
         this.defaultParams = options.defaultParams ?? {};
 
-        if (this.#persistToken && typeof globalThis !== "undefined" && "localStorage" in globalThis) {
-            const stored = globalThis.localStorage.getItem(this.#tokenStorageKey);
-            if (stored) this.setToken(stored);
-        }
+        const stored = this.#readStoredToken();
+        if (stored) this.setToken(stored);
     }
 
     // ── Configuration & token ────────────────────────────────────────────
@@ -83,22 +93,60 @@ class Client {
         return this.#tenant;
     }
 
+    /** The browser storage, if there is one — never throws (private mode, quota). */
+    #storage(): Storage | null {
+        try {
+            if (typeof globalThis === "undefined" || !("localStorage" in globalThis)) return null;
+            return (globalThis as any).localStorage ?? null;
+        } catch {
+            return null;
+        }
+    }
+
+    #readStoredToken(): string | null {
+        if (!this.#persistToken) return null;
+        try {
+            return this.#storage()?.getItem(this.#tokenStorageKey) ?? null;
+        } catch {
+            return null;
+        }
+    }
+
+    #writeStoredToken(token: string | undefined): void {
+        if (!this.#persistToken) return;
+        const storage = this.#storage();
+        if (!storage) return;
+        try {
+            if (token === undefined) storage.removeItem(this.#tokenStorageKey);
+            else storage.setItem(this.#tokenStorageKey, token);
+        } catch {
+            // A full/denied storage must never break the request path
+        }
+    }
+
     protected setToken(token: string | undefined) {
         if (!token) {
             this.#token = undefined;
             delete this.#headers.Authorization;
-            if (this.#persistToken && typeof globalThis !== "undefined" && "localStorage" in globalThis) {
-                globalThis.localStorage.removeItem(this.#tokenStorageKey);
-            }
+            this.#writeStoredToken(undefined);
             return;
         }
 
         this.#token = token;
         this.#headers.Authorization = `Bearer ${token}`;
+        this.#writeStoredToken(token);
+    }
 
-        if (this.#persistToken && typeof globalThis !== "undefined" && "localStorage" in globalThis) {
-            globalThis.localStorage.setItem(this.#tokenStorageKey, token);
-        }
+    /** A signal combining the caller's abort with the configured timeout. */
+    protected requestSignal(options?: RestRequestOptions): AbortSignal | undefined {
+        const timeoutMs = options?.timeoutMs ?? this.#timeoutMs;
+        const signals: AbortSignal[] = [];
+        if (options?.signal) signals.push(options.signal);
+        if (timeoutMs && timeoutMs > 0) signals.push(AbortSignal.timeout(timeoutMs));
+        if (!signals.length) return undefined;
+        if (signals.length === 1) return signals[0];
+        const any = (AbortSignal as any).any;
+        return typeof any === "function" ? any.call(AbortSignal, signals) : signals[0];
     }
 
     getToken(): string | undefined {
@@ -188,27 +236,27 @@ class Client {
     // ── URL builders — one per family (`/api/:tenant/<family>/…`) ────────
 
     protected buildUrl(collection: string, action: ApiAction, query?: Record<string, any>): string {
-        return this.#withQuery(joinURL(this.#server, "api", this.#tenant, "collections", collection, String(action)), query);
+        return this.#withQuery(joinURL(this.#server, "api", segment(this.#tenant), "collections", segment(collection), segment(String(action))), query);
     }
 
     protected buildUploadUrl(collection: string): string {
-        return joinURL(this.#server, "api", this.#tenant, "upload", collection);
+        return joinURL(this.#server, "api", segment(this.#tenant), "upload", segment(collection));
     }
 
     protected buildFileUrl(collection: string, filename: string): string {
-        return joinURL(this.#server, "api", this.#tenant, "files", collection, filename);
+        return joinURL(this.#server, "api", segment(this.#tenant), "files", segment(collection), segment(filename));
     }
 
     protected buildServiceUrl(service: string, action: string, query?: Record<string, any>): string {
-        return this.#withQuery(joinURL(this.#server, "api", this.#tenant, "services", service, action), query);
+        return this.#withQuery(joinURL(this.#server, "api", segment(this.#tenant), "services", segment(service), segment(action)), query);
     }
 
     protected buildVarsUrl(action: string, query?: Record<string, any>): string {
-        return this.#withQuery(joinURL(this.#server, "api", this.#tenant, "vars", action), query);
+        return this.#withQuery(joinURL(this.#server, "api", segment(this.#tenant), "vars", segment(action)), query);
     }
 
     protected buildAgentUrl(agent: string, action: string, query?: Record<string, any>): string {
-        return this.#withQuery(joinURL(this.#server, "api", this.#tenant, "agents", agent, action), query);
+        return this.#withQuery(joinURL(this.#server, "api", segment(this.#tenant), "agents", segment(agent), segment(action)), query);
     }
 
     #withQuery(url: string, query?: Record<string, any>): string {
@@ -224,10 +272,37 @@ class Client {
         return payload as T;
     }
 
+    /** 5 MB is already far beyond any API payload the SDK expects. */
+    static MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
+
     /** The parsed (or raw) body of a response, whichever the Content-Type announces. */
     protected async readPayload(res: Response): Promise<any> {
+        const length = Number(res.headers.get("content-length") ?? 0);
+        if (Number.isFinite(length) && length > Client.MAX_RESPONSE_BYTES) {
+            const error: AnterosError = new Error("The response is too large") as AnterosError;
+            error.code = "SDK_RESPONSE_TOO_LARGE";
+            error.status = res.status;
+            this.#emit("error", error);
+            throw error;
+        }
+
+        const text = await res.text();
+        if (text.length > Client.MAX_RESPONSE_BYTES) {
+            const error: AnterosError = new Error("The response is too large") as AnterosError;
+            error.code = "SDK_RESPONSE_TOO_LARGE";
+            error.status = res.status;
+            this.#emit("error", error);
+            throw error;
+        }
+
         const contentType = res.headers.get("Content-Type") || "";
-        return contentType.includes("application/json") ? await res.json() : await res.text();
+        if (!contentType.includes("application/json")) return text;
+        try {
+            return JSON.parse(text);
+        } catch {
+            // Invalid JSON: surface the raw text rather than a parser SyntaxError
+            return text;
+        }
     }
 
     /**
@@ -266,11 +341,17 @@ class Client {
     async #send(url: string, init: RequestInit): Promise<Response> {
         let res: Response;
         try {
-            res = await fetch(url, init);
+            res = await fetch(url, {
+                ...init,
+                ...(this.#credentials ? { credentials: this.#credentials } : {}),
+            });
         } catch (err: any) {
             if (err?.name === "AbortError") throw err;
-            const error: AnterosError = new Error(err?.message ?? "Network request failed");
-            error.code = "SDK_NETWORK_ERROR";
+            const timeout = err?.name === "TimeoutError";
+            const error: AnterosError = new Error(
+                timeout ? "The request timed out" : (err?.message ?? "Network request failed"),
+            );
+            error.code = timeout ? "SDK_TIMEOUT" : "SDK_NETWORK_ERROR";
             error.cause = err;
             this.#emit("error", error);
             throw error;
@@ -286,7 +367,7 @@ class Client {
             method: "POST",
             headers: this.headers({ "Content-Type": "application/json", ...(options.headers ?? {}) }),
             body: body !== undefined ? JSON.stringify(body) : undefined,
-            signal: options.signal,
+            signal: this.requestSignal(options),
         });
     }
 
@@ -300,7 +381,7 @@ class Client {
             method: "POST",
             headers: this.headers({ "Content-Type": "application/json", ...(options.headers ?? {}) }),
             body: requestBody !== undefined ? JSON.stringify(requestBody) : undefined,
-            signal: options.signal,
+            signal: this.requestSignal(options),
         });
 
         return this.handleResponse<TResponse>(res);
@@ -312,12 +393,17 @@ class Client {
         formData: FormData,
         signal?: AbortSignal,
     ): Promise<TResponse> {
-        const res = await this.#send(url, { method: "POST", headers: this.headers(), body: formData, signal });
+        // Never leak a global `Content-Type` into a multipart body: the boundary must be generated.
+        const headers = { ...this.headers() };
+        for (const key of Object.keys(headers)) {
+            if (key.toLowerCase() === "content-type") delete headers[key];
+        }
+        const res = await this.#send(url, { method: "POST", headers, body: formData, signal: this.requestSignal({ signal }) });
         return this.handleResponse<TResponse>(res);
     }
 
     protected async remove<TResponse = unknown>(url: string, signal?: AbortSignal): Promise<TResponse> {
-        const res = await this.#send(url, { method: "DELETE", headers: this.headers(), signal });
+        const res = await this.#send(url, { method: "DELETE", headers: this.headers(), signal: this.requestSignal({ signal }) });
         return this.handleResponse<TResponse>(res);
     }
 
@@ -360,8 +446,8 @@ class Client {
      * The public server configuration (non-sensitive) — `GET /_dnax/config/:tenant`.
      */
     async getConfig(): Promise<PublicConfig> {
-        const url = joinURL(this.#server, "_dnax", "config", this.#tenant);
-        const res = await this.#send(url, { method: "GET", headers: this.headers() });
+        const url = joinURL(this.#server, "_dnax", "config", segment(this.#tenant));
+        const res = await this.#send(url, { method: "GET", headers: this.headers(), signal: this.requestSignal() });
         return this.handleResponse<PublicConfig>(res);
     }
 }

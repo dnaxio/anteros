@@ -24,6 +24,8 @@ export type RestQueryOptions = {
 export type RestRequestOptions = {
     headers?: Record<string, string>;
     signal?: AbortSignal;
+    /** Request timeout for this call (overrides the client `timeoutMs`). */
+    timeoutMs?: number;
     query?: RestQueryOptions;
     /**
      * If true, cleans the body before sending (removes null, undefined, empty arrays, empty objects).
@@ -37,6 +39,10 @@ export type RestClientOptions = {
     server: string;
     tenant: string;
     headers?: Record<string, string>;
+    /** `fetch` credentials mode — `'include'` for cookie-based auth. */
+    credentials?: RequestCredentials;
+    /** Default request timeout in ms (default: 30 000; `0` disables it). */
+    timeoutMs?: number;
     token?: {
         persist?: boolean;
         storageKey?: string;

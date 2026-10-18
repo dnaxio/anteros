@@ -5,7 +5,7 @@ import { formatConfig, cfg } from "../server/config";
 import { syncTenants } from "../database/tenant";
 import { useRest } from "../database/rest";
 import { AUDIT_COLLECTION } from "../database/audit";
-import { REDACTED, redactPayload } from "../lib/redact";
+import { REDACTED, redactPayload, redactText } from "../lib/redact";
 
 const TENANT = "redact-test";
 const DB = "mongodb://localhost:27017/_AUDIT_REDACT_TEST";
@@ -255,5 +255,30 @@ describe("audit redaction — configuration", () => {
 
         const logged = await lastActivity("insertOne", since);
         expect(logged.operation.input.data.password).toBe(REDACTED);
+    });
+});
+
+describe("audit — error and token redaction (#40)", () => {
+    it("masks secrets embedded in a free-text error message", async () => {
+        await rest.audit.log({
+            action: "custom-redact",
+            collection: SLUG,
+            error: { message: "login failed password=supersecret token: abc123", code: "LOGIN_FAILED" },
+        });
+
+        const logged: any = await rest.db.collection(AUDIT_COLLECTION).findOne(
+            { "operation.action": "custom-redact" },
+            { sort: { ts: -1 } },
+        );
+        expect(logged).not.toBeNull();
+        expect(logged.operation.error.message).not.toContain("supersecret");
+        expect(logged.operation.error.message).not.toContain("abc123");
+        expect(logged.operation.error.message).toContain(REDACTED);
+    });
+
+    it("redacts the whole `token` object (its key is sensitive)", () => {
+        expect(redactPayload({ token: { decoded: { secret: "x", sub: "u1" } } }))
+            .toEqual({ token: REDACTED });
+        expect(redactText("ok")).toBe("ok");
     });
 });

@@ -1,5 +1,8 @@
 import { describe, it, expect } from "bun:test";
 import { deflateRawSync } from "node:zlib";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { openZip } from "../lib/zip";
 import { docxText, resolveAttachments, xlsxText, MAX_FILE_BYTES } from "../lib/attachment";
 import { openaiMessages, anthropicMessages } from "../lib/providers";
@@ -237,5 +240,65 @@ describe("attachments through a provider", () => {
             type: "document",
             source: { type: "base64", media_type: "application/pdf", data: "BBBB" },
         });
+    });
+});
+
+describe("resolveAttachments — path containment (issue #29)", () => {
+    const base = "packages/core/tests/fixtures/attachment";
+
+    it("still reads a path inside the base directory", async () => {
+        const parts = await resolveAttachments(["data.csv"], { baseDir: base });
+        expect(parts).toHaveLength(1);
+        expect((parts[0] as any).text).toContain("ref,total");
+    });
+
+    it("refuses a `..` path that escapes the base directory", async () => {
+        const error: any = await resolveAttachments(["../../../package.json"], { baseDir: base }).catch((err) => err);
+        expect(error.code).toBe("AGENT_FILE_INVALID");
+        expect(error.message).toContain("escapes the base directory");
+    });
+
+    it("refuses an absolute path outside the base directory", async () => {
+        const error: any = await resolveAttachments(["/etc/hosts"], { baseDir: base }).catch((err) => err);
+        expect(error.code).toBe("AGENT_FILE_INVALID");
+    });
+
+    it("refuses a symlink that points outside the base directory", async () => {
+        const dir = await mkdtemp(join(tmpdir(), "anteros-attach-"));
+        try {
+            await symlink("/etc/hosts", join(dir, "link.txt"));
+            const error: any = await resolveAttachments(["link.txt"], { baseDir: dir }).catch((err) => err);
+            expect(error.code).toBe("AGENT_FILE_INVALID");
+        } finally {
+            await rm(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("refuses a directory", async () => {
+        const dir = await mkdtemp(join(tmpdir(), "anteros-attach-"));
+        try {
+            const error: any = await resolveAttachments(["."], { baseDir: dir }).catch((err) => err);
+            expect(error.code).toBe("AGENT_FILE_NOT_FOUND");
+        } finally {
+            await rm(dir, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("zip — decompression bounds (#41)", () => {
+    it("refuses an entry whose declared inflated size exceeds the limit", () => {
+        const big = "a".repeat(10 * 1024 * 1024 + 1);
+        const bytes = makeZip({ "word/document.xml": big });
+        // The archive itself stays small (deflate), the entry expands past the cap.
+        expect(bytes.byteLength).toBeLessThan(10 * 1024 * 1024);
+
+        let error: any;
+        try {
+            openZip(bytes).read("word/document.xml");
+        } catch (err) {
+            error = err;
+        }
+        expect(error?.code).toBe("AGENT_FILE_INVALID");
+        expect(error?.message).toContain("expands beyond");
     });
 });

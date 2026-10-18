@@ -3,15 +3,30 @@
  * Kept out of the public surface on purpose.
  */
 
-/** Unbounded async queue — bridges a push producer with a pull consumer. */
+function streamError(code: string, message: string): Error & { code: string } {
+    const error = new Error(message) as Error & { code: string };
+    error.code = code;
+    return error;
+}
+
+/** Bridges a push producer with a pull consumer, with a hard cap (a malicious server must not OOM us). */
 export class AsyncQueue<T> {
     #items: T[] = [];
     #waiters: Array<() => void> = [];
     #closed = false;
     #error: any = null;
+    #maxItems: number;
+
+    constructor(maxItems = 100_000) {
+        this.#maxItems = Math.max(1, maxItems);
+    }
 
     push(item: T): void {
         if (this.#closed) return;
+        if (this.#items.length >= this.#maxItems) {
+            this.fail(streamError("SDK_STREAM_OVERFLOW", "The stream consumer is too slow (queue is full)"));
+            return;
+        }
         this.#items.push(item);
         for (const wake of this.#waiters.splice(0)) wake();
     }
@@ -31,8 +46,9 @@ export class AsyncQueue<T> {
 
     async next(): Promise<IteratorResult<T>> {
         for (;;) {
-            if (this.#error) throw this.#error;
+            // Drain what was already produced, then report the failure.
             if (this.#items.length) return { value: this.#items.shift() as T, done: false };
+            if (this.#error) throw this.#error;
             if (this.#closed) return { value: undefined as any, done: true };
             await new Promise<void>((resolve) => this.#waiters.push(resolve));
         }
@@ -75,6 +91,9 @@ export type ByteReader = {
     read(): Promise<{ value?: Uint8Array; done: boolean }>;
 };
 
+/** A single SSE event has no business being larger than this (server guard). */
+const MAX_EVENT_CHARS = 1_000_000;
+
 /** Read a `text/event-stream` body and yield the `data:` payloads. */
 export async function* sseData(
     source: ReadableStream<Uint8Array> | ByteReader,
@@ -105,6 +124,9 @@ export async function* sseData(
         if (done) break;
         if (value) buffer += decoder.decode(value, { stream: true });
         for (const data of take()) yield data;
+        if (buffer.length > MAX_EVENT_CHARS) {
+            throw streamError("SDK_STREAM_INVALID", "An SSE event exceeds the 1MB limit");
+        }
     }
 
     const tail = dataOf(buffer);

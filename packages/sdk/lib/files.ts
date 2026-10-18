@@ -1,4 +1,5 @@
 import type { FileResult, RestRequestOptions } from "../types/rest";
+import { assertUploadSize, toFormValue } from "../utils";
 
 /** What the files namespace calls to reach the wire — `Rest` owns the transport. */
 type PostForm = (collection: string, formData: FormData, signal?: AbortSignal) => Promise<any>;
@@ -51,12 +52,16 @@ class Files {
         },
     ): Promise<T | T[]> {
         const files = Array.isArray(file) ? file : [file];
+        assertUploadSize(files);
         const fieldName = opts?.fieldName ?? "file";
         const formData = new FormData();
         for (const entry of files) formData.append(fieldName, entry);
 
         if (data) {
-            for (const [key, value] of Object.entries(data)) formData.append(key, String(value));
+            for (const [key, value] of Object.entries(data)) {
+                const encoded = toFormValue(value);
+                if (encoded !== undefined) formData.append(key, encoded);
+            }
         }
 
         return this.#postForm(collection, formData, opts?.signal);

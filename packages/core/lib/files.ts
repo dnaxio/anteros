@@ -254,11 +254,22 @@ export async function handleUpload(options: UploadOptions): Promise<FileResult> 
     });
   }
 
-  // Validate MIME type
-  const mimetype = file.type || 'application/octet-stream';
-  if (col.upload?.allowedMimeTypes?.length && !col.upload.allowedMimeTypes.includes(mimetype)) {
-    throw new AppError(`MIME type '${mimetype}' not allowed`, {
-      code: 'MIMETYPE_NOT_ALLOWED', status: 400,
+  // Validate MIME type — compare the **base** type: a browser sends `text/html;charset=utf-8`
+  const mimetype = (file.type || 'application/octet-stream').split(';')[0]!.trim().toLowerCase();
+  if (col.upload?.allowedMimeTypes?.length) {
+    const allowed = col.upload.allowedMimeTypes.map((type: string) => type.split(';')[0]!.trim().toLowerCase());
+    if (!allowed.includes(mimetype)) {
+      throw new AppError(`MIME type '${mimetype}' not allowed`, {
+        code: 'MIMETYPE_NOT_ALLOWED', status: 400,
+      });
+    }
+  }
+
+  // Size first (#51): never buffer an oversized upload just to reject it later.
+  const maxSize = col.upload?.maxSize ?? 100 * 1024 * 1024; // 100MB per-file default
+  if (file.size > maxSize) {
+    throw new AppError(`File too large (max ${Math.round(maxSize / 1024 / 1024)}MB)`, {
+      code: 'FILE_TOO_LARGE', status: 413,
     });
   }
 
@@ -281,14 +292,6 @@ export async function handleUpload(options: UploadOptions): Promise<FileResult> 
   if (detected === 'image/svg+xml' && svgContainsScript(probe)) {
     throw new AppError('SVG with executable content is not allowed', {
       code: 'SVG_SCRIPT_NOT_ALLOWED', status: 400,
-    });
-  }
-
-  // Validate file size
-  const maxSize = col.upload?.maxSize ?? 10 * 1024 * 1024; // 10MB default
-  if (file.size > maxSize) {
-    throw new AppError(`File too large (max ${Math.round(maxSize / 1024 / 1024)}MB)`, {
-      code: 'FILE_TOO_LARGE', status: 413,
     });
   }
 
@@ -450,8 +453,11 @@ export async function handleServe(
     return { stream: new ReadableStream({ start(controller) { controller.enqueue(data); controller.close(); } }), mimetype: newMime, size: data.length };
   }
 
-  // Flaw 4: SVG is served as an attachment (never inline) to prevent stored XSS
-  if (isSvg) {
+  // #37: only raster images (and PDFs) may render inline. Anything else — HTML,
+  // SVG, JS, unknown — is served as a **download**, so an uploaded file can never
+  // execute on the API origin (stored XSS).
+  const INLINE_MIME = /^image\/(png|jpe?g|gif|webp|avif|bmp)$/i;
+  if (isSvg || !(INLINE_MIME.test(mimetype) || mimetype === 'application/pdf')) {
     return { stream, mimetype, attachment: true };
   }
 

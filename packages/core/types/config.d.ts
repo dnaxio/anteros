@@ -110,9 +110,42 @@ export type ServerConfig = {
             denyList?: IPRestrictionRule[];
             allowList?: IPRestrictionRule[];
         }
+        /**
+         * Security headers (Hono `secureHeaders`).
+         *
+         * `crossOriginResourcePolicy` sets `Cross-Origin-Resource-Policy` on the
+         * API responses. The default (`'same-origin'`) blocks another origin (a
+         * front served from a different host) from embedding them — an `<img
+         * src="https://api…">` then fails with `corp-not-same-origin`.
+         * Set `'cross-origin'` to allow embedding, or keep the default for an
+         * API only consumed by same-origin scripts.
+         */
+        security?: {
+            crossOriginResourcePolicy?: 'same-origin' | 'same-site' | 'cross-origin';
+        }
+        /**
+         * File serving (`GET /api/:tenant_id/files/:collection/:filename`).
+         */
+        files?: {
+            /**
+             * `Cross-Origin-Resource-Policy` on file responses (default:
+             * `'cross-origin'` — files are meant to be embedded by the app,
+             * possibly served from another origin). Set `'same-origin'` to
+             * forbid cross-origin embedding (tightest), or `'same-site'`.
+             */
+            crossOriginResourcePolicy?: 'same-origin' | 'same-site' | 'cross-origin';
+        }
         jwt?: {
             secret?: string;
             expiresIn?: string;
+            /**
+             * Reject a token that carries **no tenant claim** (default `false`).
+             *
+             * Tokens issued by the login action always carry `tenant` (the claim is
+             * injected by the framework). Legacy tokens issued before that change have
+             * no claim: set this to `true` once they have expired to require one.
+             */
+            requireTenantClaim?: boolean;
         }
         rateLimit?: {
             enabled?: boolean;

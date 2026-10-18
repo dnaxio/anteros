@@ -225,4 +225,4 @@ The server mounts **Socket.io** at `/socket.io/`. Route handlers receive the `io
 
 ## License
 
-See the parent repository for the project license.
+[MIT License](./LICENSE) — SPDX: `MIT`.

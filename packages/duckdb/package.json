@@ -1,0 +1,25 @@
+{
+  "name": "@anteros/duckdb",
+  "version": "0.0.1",
+  "main": "index.ts",
+  "module": "index.ts",
+  "description": "Anteros DuckDB — a DuckDB instance over the Quack protocol",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "files": [
+    "lib",
+    "types",
+    "index.ts",
+    "README.md"
+  ],
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "@duckdb/node-api": "^1.5.6-r.1"
+  }
+}

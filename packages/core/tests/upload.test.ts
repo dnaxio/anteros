@@ -6,6 +6,7 @@ import { syncTenants } from "../database/tenant";
 import { getFileCollection } from "../database/file";
 import { useRest } from "../database/rest";
 import { createApi } from "../lib/api";
+import { jwt } from "../utils/func";
 
 const TENANT = "up-test";
 const DB = "mongodb://localhost:27017/_DB_UP_TEST";
@@ -14,10 +15,11 @@ const SLUG = "photos";
 let rest: InstanceType<typeof useRest>;
 let server: any;
 let url = "";
+let token = "";
 
 beforeAll(async () => {
     formatConfig({
-        server: { port: 4000 },
+        server: { port: 4000, jwt: { secret: "upload-test-secret" } },
         tenants: [{ id: TENANT, dir: "up-tenant", database: { uri: DB } }],
     });
     await syncTenants();
@@ -27,13 +29,34 @@ beforeAll(async () => {
         _tenant_: TENANT,
         _isFileCollection_: true,
         slug: SLUG,
-        fields: [{ name: "label", type: "string" }, { name: "takenAt", type: "date" }],
-        upload: { allowedMimeTypes: ["image/png", "text/plain"], maxSize: 5 * 1024 * 1024 },
+        fields: [
+            { name: "label", type: "string" },
+            { name: "takenAt", type: "date" },
+            { name: "owner", type: "string" },
+        ],
+        upload: { allowedMimeTypes: ["image/png", "text/plain", "text/html"], maxSize: 5 * 1024 * 1024 },
+        storage: { driver: "disk" },
+        api: { access: { "*": true }, readOnlyFields: ["owner"] },
+    }, {
+        _tenant_: TENANT,
+        _isFileCollection_: true,
+        slug: "private-photos",
+        fields: [{ name: "label", type: "string" }],
+        upload: { allowedMimeTypes: ["image/png"], maxSize: 5 * 1024 * 1024 },
+        storage: { driver: "disk" },
+        api: { access: { upload: true, read: (ctx: any) => !!ctx.token?.value } },
+    }, {
+        _tenant_: TENANT,
+        _isFileCollection_: true,
+        slug: "large-photos",
+        fields: [{ name: "label", type: "string" }],
+        upload: { allowedMimeTypes: ["image/png"], maxSize: 100 * 1024 * 1024 },
         storage: { driver: "disk" },
         api: { access: { "*": true } },
     }];
 
     rest = new useRest({ internal: false, tenant_id: TENANT });
+    token = await jwt.sign({ sub: "upload-tester" });
     const app = createApp();
     server = Bun.serve({ port: 0, fetch: app.fetch });
     url = server.url.href.replace(/\/$/, "");
@@ -45,6 +68,8 @@ afterAll(async () => {
     try {
         const fs = await import("node:fs/promises");
         await fs.rm(`${process.cwd()}/storage/${TENANT}/${SLUG}`, { recursive: true, force: true });
+        await fs.rm(`${process.cwd()}/storage/${TENANT}/private-photos`, { recursive: true, force: true });
+        await fs.rm(`${process.cwd()}/storage/${TENANT}/large-photos`, { recursive: true, force: true });
     } catch {}
     try { server.stop(true); } catch {}
 });
@@ -267,5 +292,152 @@ describe("api.files — the in-process facade", () => {
         expect(result).toEqual({ message: "File deleted", ok: true });
         expect(await rest.findOne(SLUG, uploaded._id)).toBeNull();
         expect((await fs.readdir(dir)).some((name) => name.startsWith(uploaded._id))).toBe(false);
+    });
+});
+
+describe("upload — reserved metadata fields (#31)", () => {
+    async function statusFor(fields: Record<string, string>) {
+        const form = new FormData();
+        form.append("file", pngFile("reserved.png"));
+        for (const [key, value] of Object.entries(fields)) form.append(key, value);
+        const before = await rest.db.collection(SLUG).countDocuments();
+        const res = await fetch(`${url}/api/${TENANT}/upload/${SLUG}`, { method: "POST", body: form });
+        const body: any = await res.json();
+        const after = await rest.db.collection(SLUG).countDocuments();
+        return { status: res.status, code: body.code, before, after };
+    }
+
+    it("refuses a client-provided `_id` (path traversal vector)", async () => {
+        const result = await statusFor({ _id: "../../../../v1/routes/pwn" });
+        expect(result.status).toBe(400);
+        expect(result.code).toBe("UPLOAD_FIELD_RESERVED");
+        expect(result.after).toBe(result.before); // nothing written
+    });
+
+    it("refuses `_file` and server timestamps", async () => {
+        for (const field of ["_file", "createdAt", "updatedAt"]) {
+            const result = await statusFor({ [field]: "x" });
+            expect({ field, status: result.status, code: result.code })
+                .toEqual({ field, status: 400, code: "UPLOAD_FIELD_RESERVED" });
+        }
+    });
+
+    it("refuses `$`-prefixed metadata keys", async () => {
+        const result = await statusFor({ "$set": "x" });
+        expect(result.status).toBe(400);
+        expect(result.code).toBe("UPLOAD_FIELD_RESERVED");
+    });
+});
+
+describe("serve — inline only for safe images (#37)", () => {
+    async function uploadAndServe(file: File) {
+        const form = new FormData();
+        form.append("file", file);
+        const res = await fetch(`${url}/api/${TENANT}/upload/${SLUG}`, { method: "POST", body: form });
+        const uploaded: any = await res.json();
+        if (!uploaded?._file) throw new Error(`upload failed: ${res.status} ${JSON.stringify(uploaded)}`);
+        return fetch(`${url}${uploaded._file.url}`);
+    }
+
+    it("serves an uploaded HTML file as an attachment, never inline", async () => {
+        const html = new File(
+            [Buffer.from("<html><script>alert('xss')</script></html>")],
+            "evil.html",
+            { type: "text/html" },
+        );
+        const res = await uploadAndServe(html);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-disposition")).toMatch(/^attachment/i);
+        expect(res.headers.get("content-type")).toContain("text/html");
+    });
+
+    it("keeps a raster image inline", async () => {
+        const res = await uploadAndServe(pngFile("inline.png"));
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-disposition")).toBeNull();
+        expect(res.headers.get("content-type")).toContain("image/png");
+    });
+});
+
+describe("upload — declared/read-only metadata (#46)", () => {
+    it("refuses an undeclared metadata field", async () => {
+        const form = new FormData();
+        form.append("file", pngFile("unknown.png"));
+        form.append("nope", "x");
+        const res = await fetch(`${url}/api/${TENANT}/upload/${SLUG}`, { method: "POST", body: form });
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as any).code).toBe("UPLOAD_FIELD_UNKNOWN");
+    });
+
+    it("refuses a read-only metadata field", async () => {
+        const form = new FormData();
+        form.append("file", pngFile("readonly.png"));
+        form.append("owner", "someone-else");
+        const res = await fetch(`${url}/api/${TENANT}/upload/${SLUG}`, { method: "POST", body: form });
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as any).code).toBe("READONLY_FIELD");
+    });
+});
+
+describe("serve — cache policy follows the read rule (#49)", () => {
+    async function uploadTo(collection: string) {
+        const form = new FormData();
+        form.append("file", pngFile("cache.png"));
+        const res = await fetch(`${url}/api/${TENANT}/upload/${collection}`, { method: "POST", body: form });
+        return (await res.json()) as any;
+    }
+
+    it("caches publicly when `read` is `true`", async () => {
+        const uploaded = await uploadTo(SLUG);
+        const res = await fetch(`${url}${uploaded._file.url}`);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    });
+
+    it("never caches a token-dependent read rule", async () => {
+        const uploaded = await uploadTo("private-photos");
+        expect(uploaded._file?.url).toBeString();
+
+        const anonymous = await fetch(`${url}${uploaded._file.url}`);
+        expect(anonymous.status).toBe(401);
+
+        const res = await fetch(`${url}${uploaded._file.url}`, { headers: { Authorization: `Bearer ${token}` } });
+        expect(res.status).toBe(200);
+        expect(res.headers.get("cache-control")).toBe("private, no-store");
+        expect(res.headers.get("vary")).toContain("Authorization");
+    });
+});
+
+describe("upload — size is rejected before buffering (#51)", () => {
+    it("refuses a file larger than `upload.maxSize`", async () => {
+        const png = Buffer.from(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+            "base64",
+        );
+        const big = new File([Buffer.concat([png, Buffer.alloc(6 * 1024 * 1024)])], "big.png", { type: "image/png" });
+        const form = new FormData();
+        form.append("file", big);
+        const res = await fetch(`${url}/api/${TENANT}/upload/${SLUG}`, { method: "POST", body: form });
+        expect(res.status).toBe(413);
+        expect(((await res.json()) as any).code).toBe("FILE_TOO_LARGE");
+    });
+});
+
+describe("upload — 100MB per-file allowance, 16MB normal body (#51)", () => {
+    it("accepts a 20MB upload even though normal bodies default to 16MB", async () => {
+        const header = Buffer.from(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+            "base64",
+        );
+        const file = new File([header, Buffer.alloc(20 * 1024 * 1024)], "large.png", { type: "image/png" });
+        expect(file.size).toBeGreaterThan(16 * 1024 * 1024);
+
+        const form = new FormData();
+        form.append("file", file);
+        const res = await fetch(`${url}/api/${TENANT}/upload/large-photos`, { method: "POST", body: form });
+
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as any;
+        expect(body._file.size).toBe(file.size);
     });
 });

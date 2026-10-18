@@ -6,6 +6,29 @@ import type { MongoClientOptions, Db, ClientSession, UpdateOptions, UpdateFilter
  * Is a process still running **on this host**? `EPERM` means it exists but belongs
  * to another user — which still counts as alive.
  */
+/** Bulk operations embed their filter under the operation name — sanitize all of them (#45). */
+function assertBulkFilters(operations: any[]): void {
+    for (const operation of operations) {
+        func.assertSafeFilter(operation?.filter);
+        for (const value of Object.values(operation ?? {})) {
+            if (value && typeof value === "object") func.assertSafeFilter((value as any).filter);
+        }
+    }
+}
+
+/** `$rename` may not target a read-only field (#43) — the external API already refuses it. */
+function assertReadOnlyRename(col: any, update: any): void {
+    const rename = update?.$rename;
+    if (!rename || typeof rename !== "object") return;
+    const fields = (col?.api?.readOnlyFields ?? []) as (string | RegExp)[];
+    for (const target of Object.values(rename)) {
+        const name = String(target);
+        if (fields.some((field) => (typeof field === "string" ? field === name : field.test(name)))) {
+            throw new AppError(`Field '${name}' is read-only`, { status: 400, code: "READONLY_FIELD" });
+        }
+    }
+}
+
 function isProcessAlive(pid: number): boolean {
     if (!Number.isInteger(pid) || pid <= 0) return false;
     try {
@@ -27,7 +50,7 @@ import { getTenant } from "./tenant";
 import { getCollection, getCollectionKeys } from "./collection"
 import { AUDIT_COLLECTION } from "./audit"
 import { writeAuditFile } from "../lib/audit"
-import { redactPayload } from "../lib/redact"
+import { redactPayload, redactText } from "../lib/redact"
 import { summarizeAuditResult } from "../lib/auditResult"
 import { encryptFields, encryptUpdate } from "./field.crypto"
 import type { RestActions, BulkUpdateOperation, RestOptions, CursorOptions, TenantCache } from "../types/rest";
@@ -361,6 +384,7 @@ class MongoRest {
 
     @CheckIfCollectionExists()
     async watch(collection: string, pipeline: any[], options: ChangeStreamOptions): Promise<ChangeStream> {
+        func.boundMatchOperators(pipeline)
         // Audited with the parameters only — the change stream itself is a live object
         return this.#executeWithAudit('watch', collection, { pipeline, options }, async () => {
             const col = getCollection(collection, this.#tenant.id) as Collection
@@ -399,6 +423,7 @@ class MongoRest {
                 if (!isSafe.isSafe) {
                     throw isSafe.error;
                 }
+                func.boundMatchOperators(pipeline);
                 pipeline = func.toBson(pipeline, { col })
                 const meta: any = { action, collection, pipeline }
                 if (col.hooks?.beforeOperation) {
@@ -772,6 +797,7 @@ class MongoRest {
             }
 
             update = await func.buildInput(update)
+            assertReadOnlyRename(col, update)
             this._validate({ collection, action: action, update: update })
             // Field-level encryption: encrypt $set/$setOnInsert values for encrypted fields
             update = await encryptUpdate(col, update)
@@ -803,6 +829,7 @@ class MongoRest {
     @CheckIfCollectionExists()
     @CheckFilter()
     async findOneAndUpdate(collection: string, filter: Document, update: UpdateFilter<any>, options?: updateApiOptions): Promise<Document | null> {
+        func.assertSafeFilter(filter)
         const action = 'findOneAndUpdate' as ActionsApiList
         return this.#executeWithAudit(action, collection, { filter, update, options }, async () => {
             const col = getCollection(collection, this.#tenant.id) as Collection
@@ -881,6 +908,7 @@ class MongoRest {
                 update.$set = await func.buildInput(update.$set, { action: action, col: col })
             }
             update = await func.buildInput(update)
+            assertReadOnlyRename(col, update)
             this._validate({ collection, action: action, update: update })
             // Field-level encryption: encrypt $set/$setOnInsert values for encrypted fields
             update = await encryptUpdate(col, update)
@@ -968,6 +996,7 @@ class MongoRest {
     @CheckIfCollectionExists()
     @CheckBulkWriteOperations()
     async bulkWrite(collection: string, operations: AnyBulkWriteOperation[], options?: BulkWriteOptions): Promise<BulkWriteResult> {
+        assertBulkFilters(operations);
         const action = 'bulkWrite' as ActionsApiList
         return this.#executeWithAudit(action, collection, { count: operations.length }, async () => {
             for (let operation of operations) {
@@ -1034,6 +1063,7 @@ class MongoRest {
     @LogSlowQuery()
     @CheckIfCollectionExists()
     async bulkUpdate(collection: string, operations: BulkUpdateOperation[], options?: BulkWriteOptions): Promise<BulkWriteResult> {
+        assertBulkFilters(operations);
         const action = 'bulkUpdate' as ActionsApiList
         return this.#executeWithAudit(action, collection, { count: operations.length }, async () => {
             const col = getCollection(collection, this.#tenant.id) as Collection
@@ -1069,6 +1099,7 @@ class MongoRest {
     @LogSlowQuery()
     @CheckIfCollectionExists()
     async countDocuments(collection: string, query: any = {}): Promise<number> {
+        func.assertSafeFilter(query)
         const action = 'countDocuments' as ActionsApiList
         return this.#executeWithAudit(action, collection, { query }, async () => {
             // ⚠️ must pass the filter — countDocuments() without args counts the whole collection
@@ -1275,18 +1306,26 @@ class MongoRest {
                 // here (`server.audit.redact`), whatever wrote the entry — including a
                 // direct `rest.audit.addActivities()` call. Never store a password,
                 // token or secret in clear, in `_audit_` or in the local file.
-                const entries = activities.map((activity) => ({
-                    ...activity,
-                    // `request` (headers, query string) is attacker-controlled too — it
-                    // carries `x-api-key`, `?token=…`, … just like a payload
-                    request: redactPayload(activity?.request),
-                    meta: redactPayload(activity?.meta),
-                    operation: {
+                const entries = activities.map((activity) => {
+                    const operation: any = {
                         ...activity?.operation,
                         input: redactPayload(activity?.operation?.input),
                         result: redactPayload(activity?.operation?.result),
-                    },
-                }))
+                        error: redactPayload(activity?.operation?.error),
+                        token: redactPayload(activity?.operation?.token),
+                    };
+                    if (typeof operation.error?.message === "string") {
+                        operation.error = { ...operation.error, message: redactText(operation.error.message) };
+                    }
+                    return {
+                        ...activity,
+                        // `request` (headers, query string) is attacker-controlled too — it
+                        // carries `x-api-key`, `?token=…`, … just like a payload
+                        request: redactPayload(activity?.request),
+                        meta: redactPayload(activity?.meta),
+                        operation,
+                    };
+                })
                 await this.db.collection(AUDIT_COLLECTION).insertMany(entries)
                     .then(e => e)
                     .catch(err => {

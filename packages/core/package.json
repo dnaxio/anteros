@@ -4,6 +4,7 @@
   "version": "0.0.44",
   "type": "module",
   "description": "Anteros Core",
+  "license": "MIT",
   "private": false,
   "packageManager": "bun",
   "engines": {
@@ -22,16 +23,14 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@socket.io/bun-engine": "0.1.1",
     "bentocache": "1.6.1",
-    "boxen": "^8.0.1",
-    "dayjs": "1.11.21",
+    "boxen": "^9.0.0",
     "hono": "^4.13.1",
     "ioredis": "6.0.0",
-    "joi": "18.2.3",
+    "joi": "^18.3.0",
     "jose": "6.2.8",
     "mongodb": "7.5.0",
     "socket.io": "4.8.3",
     "tcp-port-used": "^1.0.3",
-    "ufo": "1.6.4",
     "zod": "^4.4.3"
   }
 }

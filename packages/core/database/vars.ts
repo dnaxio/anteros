@@ -50,6 +50,9 @@ function varId(scope: string | null, ns: string, key: string): string {
 
 function scopeToString(scope: any): string | null {
     if (scope === undefined || scope === null || scope === "") return null;
+    if (typeof scope === "object" && !(scope instanceof ObjectId)) {
+        throw new AppError("[vars] scope must be a string, a number or an id", { code: "VALIDATION_ERROR", status: 400 });
+    }
     return String(scope);
 }
 
@@ -91,7 +94,15 @@ function validateMeta(def: Compiled | undefined, meta: any): Record<string, any>
 /** Validate (and normalize) the scope value, using the namespace's `scope` field when declared. */
 function validateScope(def: Compiled | undefined, scope: any): any {
     if (scope === undefined || scope === null || scope === "") return null;
-    if (!def?.scope) return scope;
+    if (!def?.scope) {
+        // No declared scope: only a **primitive** may name one. Returning the raw
+        // value let a caller pass a Mongo operator (`{"$ne": null}`) that
+        // `findEntries` / `clear` then used as a filter — cross-scope read/delete.
+        if (typeof scope === "string") return scope;
+        if (typeof scope === "number" || typeof scope === "bigint") return String(scope);
+        if (typeof scope === "object" && scope instanceof ObjectId) return scope;
+        throw validationError(def?.namespace ?? "?", "scope must be a string or a number");
+    }
     const schema = fieldToSchema(def.scope);
     const { error, value } = schema!.validate(scope);
     if (error) throw validationError(def.namespace, `${def.scope.name} — ${error.message}`);
@@ -164,7 +175,16 @@ function createVars(tenantId: string, boundScope?: any): TenantVars {
     const findEntries = async (ns: string, opts?: VarsAllOptions): Promise<any[]> => {
         const scope = resolveScope(ns, opts);
         const where = opts?.where ?? {};
-        const metaFilter = Object.fromEntries(Object.entries(where).map(([k, v]) => [`meta.${k}`, v]));
+        const metaFilter: Record<string, any> = {};
+        for (const [field, value] of Object.entries(where)) {
+            if (field.startsWith("$")) throw validationError(ns, `invalid where field '${field}'`);
+            const primitive = value === null
+                || ["string", "number", "boolean", "bigint"].includes(typeof value)
+                || value instanceof Date
+                || value instanceof ObjectId;
+            if (!primitive) throw validationError(ns, `invalid where value for '${field}'`);
+            metaFilter[`meta.${field}`] = value;
+        }
         return await col().find({ ns, scope: scope.value, ...metaFilter, ...alive() }).toArray();
     };
 

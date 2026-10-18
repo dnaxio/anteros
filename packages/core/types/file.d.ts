@@ -50,7 +50,7 @@ export type FileCollection = {
         /** Allowed MIME types for upload.
          * @example ['image/jpeg', 'image/png', 'application/pdf'] */
         allowedMimeTypes?: string[];
-        /** Maximum file size in bytes. Default: 10MB */
+        /** Maximum file size in bytes. Default: 100MB (a larger body than `server.body.maxSize` still hits the request body limit) */
         maxSize?: number;
         /**
          * Image transformations (resize, format, etc.).

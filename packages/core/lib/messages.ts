@@ -1,4 +1,6 @@
 import { AppError } from "./error";
+import { isIP } from "node:net";
+import { lookup } from "node:dns/promises";
 import { MAX_FILE_BYTES } from "./attachment";
 import type {
     AgentAssistantMessage,
@@ -88,28 +90,158 @@ function checkAddress(part: AgentContentPart, role: string): void {
     throw invalid(`A \`${part.type}\` part of a ${role} message needs an \`https://\`, a \`data:\` URL or base64 \`data\``);
 }
 
+/** Remote files: public HTTPS only, bounded time and size — SSRF hardening (issue #30). */
+const REMOTE_FILE_TIMEOUT_MS = 10_000;
+const REMOTE_FILE_MAX_REDIRECTS = 3;
+
+/** Refuse an address that is not publicly routable (loopback, LAN, cloud metadata…). */
+function isPrivateAddress(address: string): boolean {
+    const plain = address.replace(/^\[|\]$/g, "").toLowerCase();
+    const family = isIP(plain);
+
+    if (family === 4) {
+        const [a, b] = plain.split(".").map(Number) as [number, number, number, number];
+        if (a === 0 || a === 10 || a === 127) return true;
+        if (a === 100 && b >= 64 && b <= 127) return true;          // CGNAT
+        if (a === 169 && b === 254) return true;                     // link-local, cloud metadata
+        if (a === 172 && b >= 16 && b <= 31) return true;
+        if (a === 192 && b === 168) return true;
+        if (a === 192 && b === 0) return true;                       // IETF / TEST-NET-1
+        if (a === 198 && (b === 18 || b === 19)) return true;        // benchmark
+        if (a === 198 && b === 51) return true;                      // TEST-NET-2
+        if (a === 203 && b === 0) return true;                       // TEST-NET-3
+        return a >= 224;                                             // multicast, reserved, broadcast
+    }
+
+    if (family === 6) {
+        if (plain.startsWith("::")) return true;                     // ::1, ::, ::ffff:… (IPv4-mapped)
+        if (plain.startsWith("fe80:")) return true;                  // link-local
+        if (/^f[cd][0-9a-f]{2}:/.test(plain)) return true;           // unique local fc00::/7
+        if (plain.startsWith("ff")) return true;                     // multicast
+        if (plain.startsWith("2001:db8")) return true;               // documentation
+        if (plain.startsWith("2002:")) return true;                  // 6to4
+        if (plain.startsWith("64:ff9b:")) return true;               // NAT64 — may map a private IPv4
+        return false;
+    }
+
+    return true; // not an IP: the caller resolves the hostname first
+}
+
+function remoteFileError(code: "AGENT_FILE_INVALID" | "AGENT_FILE_NOT_FOUND", message: string): AppError {
+    return new AppError(message, { status: 400, code });
+}
+
+/** Parse one hop: HTTPS, no credentials, and only public addresses. */
+async function assertPublicRemoteUrl(raw: string): Promise<URL> {
+    let url: URL;
+    try {
+        url = new URL(raw);
+    } catch {
+        throw remoteFileError("AGENT_FILE_INVALID", "The remote file URL is invalid");
+    }
+    if (url.protocol !== "https:") {
+        throw remoteFileError("AGENT_FILE_INVALID", "Remote files must use HTTPS");
+    }
+    if (url.username || url.password) {
+        throw remoteFileError("AGENT_FILE_INVALID", "Remote file URLs must not carry credentials");
+    }
+
+    const host = url.hostname.replace(/^\[|\]$/g, "");
+    if (!host) throw remoteFileError("AGENT_FILE_INVALID", "The remote file URL has no host");
+
+    if (isIP(host)) {
+        if (isPrivateAddress(host)) {
+            throw remoteFileError("AGENT_FILE_INVALID", "The remote file URL points to a private address");
+        }
+        return url;
+    }
+
+    let resolved: Array<{ address: string }>;
+    try {
+        resolved = await lookup(host, { all: true, verbatim: true });
+    } catch {
+        throw remoteFileError("AGENT_FILE_NOT_FOUND", "The remote file host could not be resolved");
+    }
+    if (!resolved.length || resolved.some(({ address }) => isPrivateAddress(address))) {
+        throw remoteFileError("AGENT_FILE_INVALID", "The remote file URL points to a private address");
+    }
+    return url;
+}
+
+/** Follows a redirect only after re-validating the target — no hop may reach a private address. */
+async function fetchRemoteFile(raw: string): Promise<Response> {
+    let current = raw;
+    for (let hop = 0; hop <= REMOTE_FILE_MAX_REDIRECTS; hop++) {
+        const url = await assertPublicRemoteUrl(current);
+
+        let response: Response;
+        try {
+            response = await fetch(url, {
+                redirect: "manual",
+                signal: AbortSignal.timeout(REMOTE_FILE_TIMEOUT_MS),
+            });
+        } catch {
+            throw remoteFileError("AGENT_FILE_NOT_FOUND", "The remote file could not be downloaded");
+        }
+
+        if (response.status >= 300 && response.status < 400) {
+            const location = response.headers.get("location");
+            if (!location) throw remoteFileError("AGENT_FILE_NOT_FOUND", "The remote file could not be downloaded");
+            current = new URL(location, url).href;
+            continue;
+        }
+        if (!response.ok) throw remoteFileError("AGENT_FILE_NOT_FOUND", "The remote file could not be downloaded");
+        return response;
+    }
+    throw remoteFileError("AGENT_FILE_INVALID", "The remote file redirects too many times");
+}
+
+/** Reads the body with a hard cap — from `Content-Length` and while streaming. */
+async function readRemoteBytes(response: Response): Promise<Uint8Array> {
+    const limit = MAX_FILE_BYTES;
+    const tooLarge = () => new AppError(
+        `The remote file exceeds the ${limit / 1024 / 1024}MB limit`,
+        { status: 413, code: "AGENT_FILE_TOO_LARGE" },
+    );
+
+    const declared = Number(response.headers.get("content-length") ?? "0");
+    if (Number.isFinite(declared) && declared > limit) throw tooLarge();
+    if (!response.body) return new Uint8Array(await response.arrayBuffer());
+
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            total += value.byteLength;
+            if (total > limit) {
+                await reader.cancel().catch(() => {});
+                throw tooLarge();
+            }
+            chunks.push(value);
+        }
+    } catch (err) {
+        if (err instanceof AppError) throw err;
+        throw remoteFileError("AGENT_FILE_NOT_FOUND", "The remote file could not be downloaded");
+    }
+
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+    }
+    return bytes;
+}
+
 /** A `file` part, with its remote payload fetched and inlined when there is one. */
 async function inlineRemoteFile(part: AgentMediaPart): Promise<AgentMediaPart> {
     if (part.type !== "file" || !isHttpUrl(part.url)) return part;
 
     const url = part.url!;
-    let bytes: Uint8Array;
-    try {
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        bytes = new Uint8Array(await response.arrayBuffer());
-    } catch (err: any) {
-        throw new AppError(`Cannot download '${url}': ${err?.message ?? "unreachable"}`, {
-            status: 400, code: "AGENT_FILE_NOT_FOUND",
-        });
-    }
-
-    if (bytes.byteLength > MAX_FILE_BYTES) {
-        throw new AppError(
-            `'${url}' is ${Math.round(bytes.byteLength / 1024 / 1024)}MB — the limit is ${MAX_FILE_BYTES / 1024 / 1024}MB`,
-            { status: 413, code: "AGENT_FILE_TOO_LARGE" },
-        );
-    }
+    const bytes = await readRemoteBytes(await fetchRemoteFile(url));
 
     const name = part.name ?? url.split("?")[0]!.split("/").pop() ?? "document.pdf";
     return { type: "file", name, ...(part.mimeType ? { mimeType: part.mimeType } : {}), data: Buffer.from(bytes).toString("base64") };

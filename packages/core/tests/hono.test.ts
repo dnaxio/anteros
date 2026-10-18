@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { createApp } from "../server/hono";
+import { createApp, collectHeaders, redactUri } from "../server/hono";
 import { cfg } from "../server/config";
 import { AppError } from "../lib/error";
 import { HTTPException } from "hono/http-exception";
@@ -13,6 +13,8 @@ function resetServerConfig() {
         ipRestriction: undefined,
         trustProxy: undefined,
         rateLimit: undefined,
+        security: undefined,
+        files: undefined,
     };
 }
 
@@ -138,6 +140,45 @@ describe("client IP resolution", () => {
 
 // ─── Health ──────────────────────────────────────────────────────────────
 
+describe("Cross-Origin-Resource-Policy", () => {
+    it("keeps API responses same-origin but lets served files be embedded", async () => {
+        const { url, server } = await bootAppWith((app) => {
+            app.get("/api/v1/files/photos/size/pic.png", () => new Response("image"));
+        });
+
+        const api = await fetch(`${url}/health`);
+        expect(api.headers.get("Cross-Origin-Resource-Policy")).toBe("same-origin");
+
+        // Files are meant to be embedded by another origin (an `<img>` in the front).
+        const file = await fetch(`${url}/api/v1/files/photos/size/pic.png`);
+        expect(file.headers.get("Cross-Origin-Resource-Policy")).toBe("cross-origin");
+
+        server.stop(true);
+    });
+
+    it("honours server.security.crossOriginResourcePolicy", async () => {
+        cfg.server = { ...cfg.server, security: { crossOriginResourcePolicy: "cross-origin" } };
+        const { url, server } = await bootAppWith(() => {});
+
+        const res = await fetch(`${url}/health`);
+        expect(res.headers.get("Cross-Origin-Resource-Policy")).toBe("cross-origin");
+
+        server.stop(true);
+    });
+
+    it("honours server.files.crossOriginResourcePolicy", async () => {
+        cfg.server = { ...cfg.server, files: { crossOriginResourcePolicy: "same-origin" } };
+        const { url, server } = await bootAppWith((app) => {
+            app.get("/api/v1/files/photos/size/pic.png", () => new Response("image"));
+        });
+
+        const res = await fetch(`${url}/api/v1/files/photos/size/pic.png`);
+        expect(res.headers.get("Cross-Origin-Resource-Policy")).toBe("same-origin");
+
+        server.stop(true);
+    });
+});
+
 describe("GET /health", () => {
     it("returns metrics + client ip", async () => {
         const { url, server } = await bootAppWith(() => {});
@@ -209,6 +250,45 @@ describe("rate limiting (in-memory)", () => {
         const server = Bun.serve({ port: 0, fetch: app.fetch });
         const res = await fetch(`${base(server)}/echo`);
         expect(res.status).toBe(200);
+        server.stop(true);
+    });
+});
+
+describe("access log sanitisation (#39)", () => {
+    it("removes sensitive headers", () => {
+        const headers = collectHeaders(new Headers({
+            authorization: "Bearer secret",
+            cookie: "sid=secret",
+            "x-api-key": "key-secret",
+            "x-team": "core",
+        }));
+        expect(headers["authorization"]).toBeUndefined();
+        expect(headers["cookie"]).toBeUndefined();
+        expect(headers["x-api-key"]).toBeUndefined();
+        expect(headers["x-team"]).toEqual(["core"]);
+    });
+
+    it("redacts sensitive query parameters", () => {
+        expect(redactUri("/api/v1/collections/users/find?token=secret&page=2"))
+            .toBe("/api/v1/collections/users/find?token=%5Bredacted%5D&page=2");
+        expect(redactUri("/health")).toBe("/health");
+        expect(redactUri("/x?query=hello")).toBe("/x?query=hello");
+    });
+});
+
+describe("body limit (#51)", () => {
+    it("rejects a request body over the 16MB default", async () => {
+        const { url, server } = await bootAppWith((app) => {
+            app.post("/echo", async (c) => c.json({ ok: true }));
+        });
+
+        const res = await fetch(`${url}/echo`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "x".repeat(17 * 1024 * 1024),
+        });
+        expect(res.status).toBe(413);
+
         server.stop(true);
     });
 });

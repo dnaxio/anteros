@@ -398,6 +398,27 @@ describe("agents HTTP API — actions", () => {
         expect(before).toBeLessThan(provider.hits());
     });
 
+    it("refuses a server path in `files` — content only over HTTP", async () => {
+        const before = provider.hits();
+        const invalid = [
+            ["../../../package.json"],
+            ["/etc/hosts"],
+            [{ name: "a.csv" }],
+            [{ name: "a.csv", data: 42 }],
+            [{ name: "a.csv", data: "AAAA", encoding: "hex" }],
+            "not-an-array",
+            [null],
+        ];
+
+        for (const files of invalid) {
+            const res = await json("assistant", "generate", { input: "hi", files });
+            expect({ files, status: res.status, code: res.body.code })
+                .toEqual({ files, status: 400, code: "AGENT_FILES_INVALID" });
+        }
+        // Nothing reached the model
+        expect(provider.hits()).toBe(before);
+    });
+
     it("refuses a file a model cannot read", async () => {
         const res = await json("assistant", "generate", {
             input: "hi",

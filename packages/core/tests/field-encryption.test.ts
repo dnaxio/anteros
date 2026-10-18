@@ -5,6 +5,7 @@ import { formatConfig, cfg } from "../server/config";
 import { syncTenants } from "../database/tenant";
 import { syncCollections } from "../database/collection";
 import { resolve } from "../utils/crypto";
+import { decryptFields } from "../database/field.crypto";
 
 const TENANT = "enc-test";
 const DB = "mongodb://localhost:27017/_DB_ENC_TEST";
@@ -74,7 +75,7 @@ describe("field-level encryption", () => {
 
         // explicit MANUAL decryption (utils.crypt.resolve())
         const cipher = resolve();
-        const dec = await cipher.decrypt<string>(one.ssn, true);
+        const dec = await cipher.decrypt<string>(one.ssn, true, "enc-test:patients:ssn");
         expect(dec).toBe("123-45-6789");
     });
 
@@ -147,7 +148,7 @@ describe("field-level encryption — encryptionOptions.path (json sub-paths)", (
 
         // manual decryption
         const cipher = resolve();
-        const zip = await cipher.decrypt<string>(list[0].address.zip, true);
+        const zip = await cipher.decrypt<string>(list[0].address.zip, true, "enc-test:patients:address");
         expect(zip).toBe("75000");
     });
 
@@ -181,7 +182,7 @@ describe("field-level encryption — encryptionOptions.path (json sub-paths)", (
         expect(up2.address.zip).toMatch(/^[A-Za-z0-9+/=]+$/);
         const raw = await rest.db.collection("patients").findOne({ _id: new ObjectId(doc._id) });
         const cipher = resolve();
-        expect(await cipher.decrypt<string>(raw!.address.zip, true)).toBe("06100");
+        expect(await cipher.decrypt<string>(raw!.address.zip, true, "enc-test:patients:address")).toBe("06100");
     });
 
     it("rejects $inc on an encrypted sub-path", async () => {
@@ -189,5 +190,48 @@ describe("field-level encryption — encryptionOptions.path (json sub-paths)", (
         await expect(
             rest.updateOne("patients", doc._id, { $inc: { "addresses.0.zip": 1 } as any })
         ).rejects.toThrow(/ENCRYPTED_FIELD_OPERATOR|not supported/);
+    });
+});
+
+describe("field-level encryption — AAD and path hardening (#44)", () => {
+    it("binds ciphertext to tenant:collection:field", async () => {
+        const doc: any = await rest.insertOne("patients", { name: "AAD", ssn: "555-55-5555" });
+        const raw = await rest.db.collection("patients").findOne({ _id: new ObjectId(doc._id) });
+        const cipher = resolve();
+
+        expect(await cipher.decrypt<string>(raw!.ssn, true, "enc-test:patients:ssn")).toBe("555-55-5555");
+        await expect(cipher.decrypt(raw!.ssn, true, "other-tenant:patients:ssn")).rejects.toThrow(/Decryption failed/);
+        await expect(cipher.decrypt(raw!.ssn, true, "enc-test:other:ssn")).rejects.toThrow(/Decryption failed/);
+    });
+
+    it("still decrypts legacy ciphertext without AAD", async () => {
+        const cipher = resolve();
+        const legacy = await cipher.encrypt(JSON.stringify("legacy-value")); // no AAD (pre-#44)
+        const out = await decryptFields({ _tenant_: TENANT, slug: "patients", fields: [{ name: "ssn", encryption: true }] } as any, { ssn: legacy });
+        expect(out.ssn).toBe("legacy-value");
+    });
+
+    it("decryptFields decrypts whole fields and configured sub-paths", async () => {
+        const doc: any = await rest.insertOne("patients", {
+            name: "Dec",
+            ssn: "777-77-7777",
+            profile: { city: "Paris" },
+            address: { zip: "75001", city: "Paris" },
+        });
+        const raw = await rest.db.collection("patients").findOne({ _id: new ObjectId(doc._id) });
+        const col = (cfg as any).collections[0];
+        const out = await decryptFields(col, raw);
+
+        expect(out.ssn).toBe("777-77-7777");
+        expect(out.profile).toEqual({ city: "Paris" });
+        expect(out.address.zip).toBe("75001");
+        expect(out.address.city).toBe("Paris");
+    });
+
+    it("refuses a sub-path write inside an `encryption: true` field", async () => {
+        const doc: any = await rest.insertOne("patients", { name: "Sub", ssn: "000-00-0000" });
+        await expect(
+            rest.updateOne("patients", doc._id, { $set: { "ssn.x": "plain" } as any }),
+        ).rejects.toThrow(/ENCRYPTED_FIELD_OPERATOR|sub-path/);
     });
 });

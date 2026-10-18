@@ -40,6 +40,23 @@ export function encryptedPaths(col: Collection | null): PathField[] {
         }));
 }
 
+/**
+ * AAD context (#44): a ciphertext is bound to its tenant, collection and field.
+ * Legacy ciphertexts (no AAD) still decrypt through the fallback in `decryptStored`.
+ */
+function fieldAad(col: Collection | null, name: string): string {
+    return `${col?._tenant_ ?? "?"}:${col?.slug ?? "?"}:${name}`;
+}
+
+/** Try the contextual AAD first, then the legacy no-AAD ciphertexts. */
+async function decryptStored(cipher: any, value: string, aad: string): Promise<any> {
+    try {
+        return await cipher.decrypt(value, true, aad);
+    } catch {
+        return cipher.decrypt(value, true);
+    }
+}
+
 function requireConfig(col: Collection | null, targets: string[]) {
     if (!cfg.server.encryption?.mode) {
         throw new AppError(
@@ -67,16 +84,16 @@ function setPath(obj: Record<string, any>, path: string, value: any): void {
 }
 
 /** Encrypt the values at `paths` inside a json value — object or array of json objects */
-async function encryptAt(cipher: any, value: any, paths: string[]): Promise<any> {
+async function encryptAt(cipher: any, value: any, paths: string[], aad: string): Promise<any> {
     if (Array.isArray(value)) {
-        return Promise.all(value.map((item) => encryptAt(cipher, item, paths)));
+        return Promise.all(value.map((item) => encryptAt(cipher, item, paths, aad)));
     }
     if (!value || typeof value !== "object") return value;
     const out: Record<string, any> = { ...value };
     for (const p of paths) {
         const v = getPath(out, p);
         if (v !== undefined && v !== null) {
-            setPath(out, p, await cipher.encrypt(JSON.stringify(v))); // JSON-wrap → decrypt(..., true) round-trips any value
+            setPath(out, p, await cipher.encrypt(JSON.stringify(v), aad)); // JSON-wrap → decrypt(..., true) round-trips any value
         }
     }
     return out;
@@ -99,14 +116,14 @@ export async function encryptFields(col: Collection | null, data: Record<string,
     for (const name of names) {
         const v = out[name];
         if (v !== undefined && v !== null) {
-            out[name] = await cipher.encrypt(JSON.stringify(v));
+            out[name] = await cipher.encrypt(JSON.stringify(v), fieldAad(col, name));
         }
     }
     // Path fields (encryptionOptions.path) — encrypt only the sub-path(s)
     for (const { name, paths } of pathFields) {
         const v = out[name];
         if (v !== undefined && v !== null) {
-            out[name] = await encryptAt(cipher, v, paths);
+            out[name] = await encryptAt(cipher, v, paths, fieldAad(col, name));
         }
     }
     return out;
@@ -125,6 +142,13 @@ export async function encryptUpdate(col: Collection | null, update: Record<strin
     // Resolve a $set key → whole-field | sub-path of a path-field | null (not encrypted)
     const resolveKey = (k: string): { kind: "whole" | "path"; field: string; sub: string | null; paths?: string[] } | null => {
         if (nameSet.has(k)) return { kind: "whole", field: k, sub: null };
+        // Writing a sub-path of a whole encrypted field would store plaintext inside it (#44).
+        if (names.some((name) => k.startsWith(name + "."))) {
+            throw new AppError(
+                `Field '${k}' is a sub-path of an encrypted field — write the whole field instead`,
+                { code: "ENCRYPTED_FIELD_OPERATOR", status: 400 },
+            );
+        }
         const pf = pathFields.find((p) => k === p.name || k.startsWith(p.name + "."));
         if (pf) {
             const sub = k === pf.name ? null : k.slice(pf.name.length + 1);
@@ -149,14 +173,15 @@ export async function encryptUpdate(col: Collection | null, update: Record<strin
             for (const { k, hit } of hits) {
                 const v = newValues[k];
                 if (v === undefined || v === null) continue;
+                const aad = fieldAad(col, hit!.field);
                 if (hit!.kind === "whole") {
-                    newValues[k] = await cipher.encrypt(JSON.stringify(v));
+                    newValues[k] = await cipher.encrypt(JSON.stringify(v), aad);
                 } else if (hit!.sub === null) {
                     // whole json replacement → encrypt the configured paths inside
-                    newValues[k] = await encryptAt(cipher, v, hit!.paths!);
+                    newValues[k] = await encryptAt(cipher, v, hit!.paths!, aad);
                 } else {
                     // dot-notation leaf ('address.zip') → encrypt the value directly
-                    newValues[k] = await cipher.encrypt(JSON.stringify(v));
+                    newValues[k] = await cipher.encrypt(JSON.stringify(v), aad);
                 }
             }
             out[op] = newValues;
@@ -186,7 +211,7 @@ export async function decryptFields(col: Collection | null, doc: any): Promise<a
         const v = out[name];
         if (typeof v === "string") {
             try {
-                out[name] = await cipher.decrypt(v, true);
+                out[name] = await decryptStored(cipher, v, fieldAad(col, name));
             } catch {
                 // not a ciphertext (legacy plaintext) → keep as-is
             }
@@ -194,14 +219,14 @@ export async function decryptFields(col: Collection | null, doc: any): Promise<a
     }
     for (const { name, paths } of pathFields) {
         const v = out[name];
-        if (v && typeof v === "object") out[name] = await decryptAt(cipher, v, paths);
+        if (v && typeof v === "object") out[name] = await decryptAt(cipher, v, paths, fieldAad(col, name));
     }
     return out;
 }
 
-async function decryptAt(cipher: any, value: any, paths: string[]): Promise<any> {
+async function decryptAt(cipher: any, value: any, paths: string[], aad: string): Promise<any> {
     if (Array.isArray(value)) {
-        return Promise.all(value.map((item) => decryptAt(cipher, item, paths)));
+        return Promise.all(value.map((item) => decryptAt(cipher, item, paths, aad)));
     }
     if (!value || typeof value !== "object") return value;
     const out: Record<string, any> = { ...value };
@@ -209,7 +234,7 @@ async function decryptAt(cipher: any, value: any, paths: string[]): Promise<any>
         const v = getPath(out, p);
         if (typeof v === "string") {
             try {
-                setPath(out, p, await cipher.decrypt(v, true));
+                setPath(out, p, await decryptStored(cipher, v, aad));
             } catch {
                 // not a ciphertext → keep as-is
             }
