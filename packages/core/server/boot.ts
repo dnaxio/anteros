@@ -140,7 +140,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
             console.log('⚠ --replication-only conflicts with --no-replication/--api-only — running replication-only'.yellow);
         }
 
-        // Logging: configure from cfg.server.logging (console + file, e.g. logs/anteros.log)
+        // Logging: configure from cfg.server.logging (console + file, e.g. logs/app.log)
         logger.configure(cfg.server.logging);
         // File-only: the boxen banner already shows name / PID / URL / env on the console
         logger.file('Starting Anteros server', {
@@ -199,6 +199,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
                 for (const tenant of cfg.tenants ?? []) {
                     try { tenant.database?.client?.close(); } catch {}
                 }
+                try { await logger.flush(); } catch {}
                 process.exit(0);
             };
             process.once('SIGINT', () => shutdownReplicationOnly('SIGINT'));
@@ -299,6 +300,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
                 for (const tenant of cfg.tenants ?? []) {
                     try { tenant.database?.client?.close(); } catch {}
                 }
+                try { await logger.flush(); } catch {}
                 process.exit(0);
             };
             process.once('SIGINT', () => shutdownCluster('SIGINT'));
@@ -403,6 +405,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
             for (const tenant of cfg.tenants ?? []) {
                 try { tenant.database?.client?.close(); } catch {}
             }
+            try { await logger.flush(); } catch {}
             process.exit(0);
         };
         process.once('SIGINT', () => shutdownServer('SIGINT'));

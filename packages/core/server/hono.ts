@@ -28,6 +28,55 @@ import type { HonoVariables } from "./env";
  * Caddy-style header collection (array values); sensitive headers stripped
  * (`authorization`, `cookie`, `proxy-authorization`, `set-cookie`).
  */
+/** Request bodies are only read on demand (`logging.http.body`) — textual content types only. */
+type CapturedBody = { value: string; bytes: number; truncated: boolean };
+
+const TEXTUAL_BODY = /(^text\/)|json|xml|x-www-form-urlencoded|graphql/i;
+
+/** Methods whose body is captured by default (`logging.http.methods` overrides). */
+const DEFAULT_CAPTURE_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
+
+async function captureBody(res: Response, maxBytes: number): Promise<CapturedBody | undefined> {
+    if (!res.body) return undefined;
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let captured = 0;
+    let truncated = false;
+
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value || value.byteLength === 0) continue;
+
+        const remaining = maxBytes - captured;
+        if (value.byteLength > remaining) {
+            chunks.push(value.subarray(0, remaining));
+            captured = maxBytes;
+            truncated = true;
+            await reader.cancel().catch(() => {});
+            break;
+        }
+
+        chunks.push(value);
+        captured += value.byteLength;
+
+        if (captured === maxBytes) {
+            const next = await reader.read();
+            if (!next.done) truncated = true;
+            await reader.cancel().catch(() => {});
+            break;
+        }
+    }
+
+    const buffer = new Uint8Array(captured);
+    let offset = 0;
+    for (const chunk of chunks) {
+        buffer.set(chunk, offset);
+        offset += chunk.byteLength;
+    }
+    return { value: new TextDecoder().decode(buffer), bytes: captured, truncated };
+}
+
 export function collectHeaders(h: Headers): Record<string, string[]> {
     const EXCLUDE = ['authorization', 'cookie', 'proxy-authorization', 'set-cookie'];
     const keys = redactKeys() ?? new Set(DEFAULT_REDACT_KEYS.map((key) => key.toLowerCase()));
@@ -243,6 +292,25 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
     // Caddy-compatible JSONL payload: `request`/`resp_headers` blocks + flat fields.
     app.use(async (c, next) => {
         const start = performance.now();
+        // `logging.http.body` is opt-in: clone the body BEFORE the handler consumes it.
+        const loggingCfg = cfg.server.logging;
+        const httpCfg = loggingCfg?.http;
+        if (httpCfg?.enabled === false) {
+            await next();
+            return;
+        }
+        const maxBodyBytes = httpCfg?.maxBodyBytes ?? loggingCfg?.maxBodyBytes ?? 64 * 1024;
+        const captureEnabled = httpCfg?.body ?? httpCfg?.captureBody ?? loggingCfg?.captureBody ?? false;
+        const contentType = c.req.header('content-type') ?? '';
+        // GET is included by default too: some clients send a body on GET (non-standard but accepted).
+        const captureMethods = (httpCfg?.methods ?? httpCfg?.captureMethods ?? DEFAULT_CAPTURE_METHODS)
+            .map((method) => method.toUpperCase());
+        const hasBodyMethod = captureMethods.includes(c.req.method.toUpperCase());
+        const bodyPromise = captureEnabled
+            && hasBodyMethod
+            && TEXTUAL_BODY.test(contentType) && !contentType.includes('multipart/form-data')
+            ? captureBody(c.req.raw.clone(), maxBodyBytes).catch(() => undefined)
+            : undefined;
         try {
             await next();
         } finally {
@@ -270,6 +338,11 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
                 ip,
                 traceId: trace?.id ?? crypto.randomUUID(),
                 tenant: requestCtxStorage.get<string>('tenant_id') ?? null,
+                ...(bodyPromise ? await bodyPromise.then((body) => body && body.bytes > 0 ? {
+                    request_body: body.value,
+                    request_body_bytes: body.bytes,
+                    request_body_truncated: body.truncated,
+                } : {}) : {}),
                 request: {
                     headers: collectHeaders(c.req.raw.headers),
                     client_ip: ip,

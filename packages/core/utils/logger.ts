@@ -3,6 +3,9 @@ import path from 'node:path';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
+/** Rotation trigger: size (default) or a calendar period. */
+export type LogRotation = 'size' | 'hourly' | 'daily' | 'weekly' | 'monthly' | 'yearly';
+
 const LEVEL_ORDER: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 
 /** ANSI colors (no dependency on @colors/colors import order) */
@@ -19,24 +22,54 @@ export type LoggerOptions = {
     level?: LogLevel;
     /** Also write to the console (default: true) */
     console?: boolean;
-    /** File logging: `true` → `<dir>/anteros.log`, `string` → custom path, `false` → disabled (default: true) */
+    /** File logging: `true` → `<dir>/app.log`, `string` → custom path, `false` → disabled (default: true) */
     file?: boolean | string;
     /** Directory used when `file` is `true` (default: '.logs') */
     dir?: string;
-    /** Rotate when the file exceeds this size in bytes (default: 10MB) */
+    /** Rotation trigger (default: 'size'). Calendar modes ignore `maxSize`. */
+    rotate?: LogRotation;
+    /** Rotate when the file exceeds this size in bytes — `rotate: 'size'` only (default: 10MB) */
     maxSize?: number;
     /** Keep this many rotated files (default: 5) */
     maxFiles?: number;
 };
 
-const DEFAULT_OPTIONS: Required<Pick<LoggerOptions, 'level' | 'console' | 'dir' | 'maxSize' | 'maxFiles'>> & { file: boolean | string } = {
+const DEFAULT_OPTIONS: Required<Pick<LoggerOptions, 'level' | 'console' | 'dir' | 'rotate' | 'maxSize' | 'maxFiles'>> & { file: boolean | string } = {
     level: 'info',
     console: true,
     file: true,
     dir: '.logs',
+    rotate: 'size',
     maxSize: 10 * 1024 * 1024, // 10MB
     maxFiles: 5,
 };
+
+const pad2 = (value: number): string => String(value).padStart(2, '0');
+
+/** ISO week-numbering year + week (2026-W17). */
+function isoWeek(date: Date): { year: number; week: number } {
+    const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+    const day = d.getUTCDay() || 7;
+    d.setUTCDate(d.getUTCDate() + 4 - day);
+    const year = d.getUTCFullYear();
+    const yearStart = Date.UTC(year, 0, 1);
+    return { year, week: Math.ceil((((d.getTime() - yearStart) / 86_400_000) + 1) / 7) };
+}
+
+/**
+ * The rotation period of a date, used both to detect a boundary and to name the
+ * archive (`2026-04.log`, `2026-04-18.log`, `2026-W17.log`, `2026-04-18-14.log`, …).
+ */
+function periodOf(date: Date, rotate: LogRotation): string | null {
+    if (rotate === 'size') return null;
+    const day = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+    if (rotate === 'yearly') return String(date.getFullYear());
+    if (rotate === 'monthly') return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
+    if (rotate === 'daily') return day;
+    if (rotate === 'hourly') return `${day}-${pad2(date.getHours())}`;
+    const week = isoWeek(date);
+    return `${week.year}-W${pad2(week.week)}`;
+}
 
 function safeStringify(value: unknown): string {
     if (value === undefined) return '';
@@ -58,6 +91,8 @@ function safeStringify(value: unknown): string {
 class Logger {
     #options: LoggerOptions & typeof DEFAULT_OPTIONS;
     #filePath: string = '';
+    /** Period the live file belongs to (calendar modes only). */
+    #period: string = '';
     #size = 0;
     #pending: Promise<void>[] = [];
     #queue: Promise<void> = Promise.resolve();
@@ -85,57 +120,101 @@ class Logger {
         // Keep relative dirs explicit (`./logs`), but never double-prefix
         // dot-dirs (`.logs`, `./logs`, `../logs`) or absolute paths
         const prefix = /^(\/|\.|[A-Za-z]:)/.test(dir) ? dir : `./${dir}`;
-        return `${prefix}/anteros.log`;
+        return `${prefix}/app.log`;
     }
 
     #openFile() {
         if (!this.#options.file) {
             this.#filePath = '';
             this.#size = 0;
+            this.#period = '';
             return;
         }
         this.#filePath = this.#resolvePath();
         fs.mkdirSync(path.dirname(this.#filePath), { recursive: true });
+        const rotate = this.#options.rotate;
         try {
-            this.#size = fs.statSync(this.#filePath).size;
+            const stat = fs.statSync(this.#filePath);
+            this.#size = stat.size;
+            // The live file may be from a previous period (server restart): its mtime
+            // tells us when it was last written, so the next write archives it under
+            // that period instead of mixing two months in one file.
+            this.#period = rotate === 'size' || stat.size === 0
+                ? ''
+                : periodOf(stat.mtime, rotate) ?? '';
         } catch {
             this.#size = 0;
+            this.#period = '';
         }
     }
 
-    #rotate(filePath: string) {
+    /** Archive-name matcher for the active rotation mode (retention only). */
+    #archivePattern(): RegExp {
+        switch (this.#options.rotate) {
+            case 'hourly': return /^\d{4}-\d{2}-\d{2}-\d{2}\.log$/;
+            case 'daily': return /^\d{4}-\d{2}-\d{2}\.log$/;
+            case 'weekly': return /^\d{4}-W\d{2}\.log$/;
+            case 'monthly': return /^\d{4}-\d{2}\.log$/;
+            case 'yearly': return /^\d{4}\.log$/;
+            case 'size':
+            default: return /^\d{4}-\d{2}-\d{2}-\d+\.log$/;
+        }
+    }
+
+    /** Keep only the `maxFiles` most recent archives matching the active pattern. */
+    #prune(dir: string): Promise<void> {
         const { maxFiles } = this.#options;
+        const re = this.#archivePattern();
+        return (async () => {
+            try {
+                let files = (await fs.promises.readdir(dir)).filter((file) => re.test(file));
+                if (this.#options.rotate === 'size') {
+                    const withTime = await Promise.all(
+                        files.map(async (file) => ({
+                            file,
+                            time: (await fs.promises.stat(path.join(dir, file))).mtimeMs,
+                        })),
+                    );
+                    withTime.sort((a, b) => b.time - a.time);
+                    files = withTime.map((entry) => entry.file);
+                } else {
+                    // Calendar names are chronological (zero-padded): sort by name,
+                    // not mtime — a renamed archive keeps the old file's mtime.
+                    files.sort((a, b) => b.localeCompare(a));
+                }
+                for (const file of files.slice(maxFiles)) {
+                    await fs.promises.unlink(path.join(dir, file)).catch(() => {});
+                }
+            } catch {
+                // Retention is best-effort: never break a log write
+            }
+        })();
+    }
+
+    /** Rename the live file to its period archive (`2026-04.log`), then prune. */
+    #rotateToPeriod(filePath: string, period: string) {
         this.#enqueue(async () => {
             const dir = path.dirname(filePath);
-            const ext = path.extname(filePath);
-            const base = path.basename(filePath, ext);
-            const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            await fs.promises.rename(filePath, path.join(dir, `${period}.log`)).catch(() => {});
+            await this.#prune(dir);
+        });
+    }
+
+    /** Size rotation: `2026-04-18-1.log`, `-2`, … (index resets per day). */
+    #rotateBySize(filePath: string) {
+        this.#enqueue(async () => {
+            const dir = path.dirname(filePath);
             const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-
-            // Dated rotation name: anteros-2026-07-08-1.log, -2, … (index resets per day)
-            let n = 1;
+            let index = 1;
             try {
-                const files = await fs.promises.readdir(dir);
-                const re = new RegExp(`^${esc(base)}-${today}-(\\d+)${esc(ext)}$`);
-                for (const f of files) {
-                    const m = f.match(re);
-                    if (m) n = Math.max(n, parseInt(m[1]!, 10) + 1);
+                const re = new RegExp(`^${today}-(\\d+)\\.log$`);
+                for (const file of await fs.promises.readdir(dir)) {
+                    const match = file.match(re);
+                    if (match) index = Math.max(index, parseInt(match[1]!, 10) + 1);
                 }
             } catch {}
-            await fs.promises.rename(filePath, path.join(dir, `${base}-${today}-${n}${ext}`)).catch(() => {});
-
-            // Prune: keep only the maxFiles most recent rotated files
-            try {
-                const re = new RegExp(`^${esc(base)}-\\d{4}-\\d{2}-\\d{2}-\\d+${esc(ext)}$`);
-                const files = (await fs.promises.readdir(dir)).filter((f) => re.test(f));
-                const withTime = await Promise.all(
-                    files.map(async (f) => ({ f, t: (await fs.promises.stat(path.join(dir, f))).mtimeMs }))
-                );
-                withTime.sort((a, b) => b.t - a.t);
-                for (const { f } of withTime.slice(maxFiles)) {
-                    await fs.promises.unlink(path.join(dir, f)).catch(() => {});
-                }
-            } catch {}
+            await fs.promises.rename(filePath, path.join(dir, `${today}-${index}.log`)).catch(() => {});
+            await this.#prune(dir);
         });
     }
 
@@ -173,10 +252,23 @@ class Logger {
         const line = safeStringify(payload) + '\n';
         const bytes = Buffer.byteLength(line);
         const filePath = this.#filePath;
-        if (this.#size + bytes > this.#options.maxSize) {
+        const rotate = this.#options.rotate;
+
+        if (rotate !== 'size') {
+            const current = periodOf(new Date(), rotate)!;
+            if (this.#period && current !== this.#period) {
+                // The live file holds the previous period — archive it under its own name.
+                this.#size = 0;
+                this.#rotateToPeriod(filePath, this.#period);
+                this.#period = current;
+            } else if (!this.#period) {
+                this.#period = current;
+            }
+        } else if (this.#size + bytes > this.#options.maxSize) {
             this.#size = 0;
-            this.#rotate(filePath);
+            this.#rotateBySize(filePath);
         }
+
         this.#size += bytes;
         this.#enqueue(() => fs.promises.appendFile(filePath, line));
     }

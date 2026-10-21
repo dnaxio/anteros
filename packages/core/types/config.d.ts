@@ -172,16 +172,37 @@ export type ServerConfig = {
             level?: 'debug' | 'info' | 'warn' | 'error';
             /** Also write to the console (default: true) */
             console?: boolean;
-            /** File logging: true → <dir>/anteros.log, string → custom path, false → disabled (default: true) */
+            /** File logging: true → <dir>/app.log, string → custom path, false → disabled (default: true) */
             file?: boolean | string;
             /** Directory used when `file` is true (default: '.logs') */
             dir?: string;
-            /** Rotate when the log file exceeds this size in bytes (default: 10MB) */
+            /** Rotation trigger (default: 'size'): size | hourly | daily | weekly | monthly | yearly */
+            rotate?: 'size' | 'hourly' | 'daily' | 'weekly' | 'monthly' | 'yearly';
+            /** Rotate when the log file exceeds this size in bytes — `rotate: 'size'` only (default: 10MB) */
             maxSize?: number;
             /** Keep this many rotated files (default: 5) */
             maxFiles?: number;
             /** Log database operations slower than this many ms (default: 200) */
             slowQueryMs?: number;
+            /** HTTP access-log options (everything about requests) */
+            http?: {
+                /** Write the per-request access log (default: true) */
+                enabled?: boolean;
+                /** Capture raw request bodies in the access log (default: false) — may contain secrets, file only */
+                body?: boolean;
+                /** HTTP methods whose body is captured (default: GET, POST, PUT, PATCH, DELETE); [] disables it */
+                methods?: string[];
+                /** Max bytes captured per request body (default: 65536); beyond is truncated */
+                maxBodyBytes?: number;
+                /** @deprecated Use `logging.http.body`. */
+                captureBody?: boolean;
+                /** @deprecated Use `logging.http.methods`. */
+                captureMethods?: string[];
+            };
+            /** @deprecated Use `logging.http.captureBody`. */
+            captureBody?: boolean;
+            /** @deprecated Use `logging.http.maxBodyBytes`. */
+            maxBodyBytes?: number;
         };
         /** DB query caching (find + useCache) — driver + defaults for the query cache */
         cache?: {
