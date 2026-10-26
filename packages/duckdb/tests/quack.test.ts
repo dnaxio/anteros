@@ -222,6 +222,7 @@ describe("@anteros/duckdb — local instance", () => {
         await expect(db.ingest({ table: "  ", rows: [] })).rejects.toThrow(/name is required/i);
         await expect(db.ingest({ table: "t", rows: null as any })).rejects.toThrow(/array/i);
         await expect(db.createTable("")).rejects.toThrow(/name is required/i);
+        expect(() => new DuckdbQuackInstance({ db: "POROAWA" })).toThrow(/pass `url`/);
         await db.close();
     });
 
@@ -468,6 +469,40 @@ describe("@anteros/duckdb — local instance", () => {
         // A variable can hold a query result — raw SQL for the DuckDB types.
         await db.exec("SET VARIABLE my_list = (SELECT list(x) FROM range(3) t(x))");
         expect(await db.getVariable("my_list")).toEqual(["0", "1", "2"]);
+
+        await db.close();
+    }, 60_000);
+
+    it("commits and rolls back a transaction", async () => {
+        const db = new DuckdbQuackInstance();
+        await db.createTable("tx", [
+            { name: "id", type: "string" },
+            { name: "v", type: "INTEGER" },
+        ]);
+
+        await db.transaction(async (tx) => {
+            await tx.exec("INSERT INTO tx VALUES ($1, $2)", ["a", 1]);
+            await tx.exec("INSERT INTO tx VALUES ($1, $2)", ["b", 2]);
+        });
+        expect((await db.exec("SELECT id FROM tx ORDER BY id")).rows).toEqual([{ id: "a" }, { id: "b" }]);
+
+        await expect(db.transaction(async (tx) => {
+            await tx.exec("INSERT INTO tx VALUES ($1, $2)", ["c", 3]);
+            throw new Error("abort");
+        })).rejects.toThrow("abort");
+        expect((await db.exec("SELECT count(*) AS n FROM tx")).rows).toEqual([{ n: "2" }]);
+
+        // `ingest` joins a local transaction too.
+        await expect(db.transaction(async () => {
+            await db.ingest({ table: "tx", rows: [{ id: "c", v: 3 }] });
+            await db.flush();
+            throw new Error("abort-ingest");
+        })).rejects.toThrow("abort-ingest");
+        expect((await db.exec("SELECT count(*) AS n FROM tx")).rows).toEqual([{ n: "2" }]);
+
+        await expect(db.transaction(async () => {
+            await db.transaction(async () => {});
+        })).rejects.toThrow(/Nested transactions/);
 
         await db.close();
     }, 60_000);
@@ -841,6 +876,103 @@ describe("@anteros/duckdb — Quack remote", () => {
             .rejects.toThrow(/Values were not provided/i);
     }, 60_000);
 
+    it("selects a database on the server with `db`", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "quack-database-"));
+        const file = join(directory, "POROAWA.duckdb");
+
+        const seed = new DuckdbQuackInstance({ dbPath: file });
+        await seed.createTable("orders", [{ name: "v", type: "string" }]);
+        await seed.ingest({ table: "orders", rows: [{ v: "poro" }] });
+        await seed.flush();
+        await seed.close();
+
+        try {
+            await serverDb.exec(`ATTACH '${file}' AS POROAWA`);
+
+            // Without `db`, the server's default database is used.
+            const defaultClient = new DuckdbQuackInstance({ url: serverUrl, token: TOKEN });
+            expect((await defaultClient.exec("SELECT current_database() AS d")).rows).toEqual([{ d: "memory" }]);
+            await defaultClient.close();
+
+            const db = new DuckdbQuackInstance({
+                url: serverUrl,
+                token: TOKEN,
+                db: "POROAWA",
+            });
+
+            expect((await db.exec("SELECT current_database() AS d")).rows).toEqual([{ d: "POROAWA" }]);
+            expect((await db.exec("SELECT v FROM orders")).rows).toEqual([{ v: "poro" }]);
+
+            await db.createTable("created_on_poro", [{ name: "x", type: "string" }]);
+            await db.ingest({ table: "orders", rows: [{ v: "second" }] });
+            await db.flush();
+
+            expect((await db.listTables()).sort()).toEqual(["created_on_poro", "orders"]);
+            expect((await serverDb.exec("SELECT v FROM POROAWA.orders ORDER BY v")).rows)
+                .toEqual([{ v: "poro" }, { v: "second" }]);
+            await db.close();
+
+            const bad = new DuckdbQuackInstance({ url: serverUrl, token: TOKEN, db: "NOPE" });
+            await expect(bad.connect()).rejects.toThrow(/Cannot select database 'NOPE'/);
+        } finally {
+            await serverDb.exec("DETACH POROAWA").catch(() => {});
+            await rm(directory, { recursive: true, force: true });
+        }
+    }, 120_000);
+
+    it("runs a transaction on the Quack server", async () => {
+        const db = defaultDb;
+        await db.createTable("tx_remote", [
+            { name: "id", type: "string" },
+            { name: "v", type: "INTEGER" },
+        ]);
+
+        try {
+            await db.transaction(async (tx) => {
+                await tx.exec("INSERT INTO tx_remote VALUES ($1, $2)", ["a", 1]);
+                // Snapshot isolation: another client does not see the open row.
+                expect((await serverDb.exec("SELECT count(*) AS n FROM tx_remote")).rows).toEqual([{ n: "0" }]);
+            });
+            expect((await serverDb.exec("SELECT count(*) AS n FROM tx_remote")).rows).toEqual([{ n: "1" }]);
+
+            await expect(db.transaction(async (tx) => {
+                await tx.exec("INSERT INTO tx_remote VALUES ($1, $2)", ["b", 2]);
+                throw new Error("abort");
+            })).rejects.toThrow("abort");
+            expect((await serverDb.exec("SELECT count(*) AS n FROM tx_remote")).rows).toEqual([{ n: "1" }]);
+
+            // `ingest` joins the server transaction when the table exists.
+            await expect(db.transaction(async () => {
+                await db.ingest({ table: "tx_remote", rows: [{ id: "c", v: 3 }] });
+                expect((await serverDb.exec("SELECT count(*) AS n FROM tx_remote")).rows).toEqual([{ n: "1" }]);
+                throw new Error("abort-ingest");
+            })).rejects.toThrow("abort-ingest");
+            expect((await serverDb.exec("SELECT count(*) AS n FROM tx_remote")).rows).toEqual([{ n: "1" }]);
+
+            // A table that does not exist cannot be created inside the transaction.
+            await expect(db.transaction(async () => {
+                await db.ingest({ table: "tx_missing", rows: [{ id: "x" }] });
+            })).rejects.toThrow(/existing table/);
+            expect((await db.listTables()).includes("tx_missing")).toBe(false);
+
+            // `update` joins the transaction too.
+            await db.exec('CREATE TABLE tx_docs ("data" JSON, "ts" TIMESTAMP)');
+            await db.exec(`INSERT INTO tx_docs VALUES (CAST('{"ref":"A-1","v":1}' AS JSON), now())`);
+            await expect(db.transaction(async () => {
+                expect(await db.update({
+                    table: "tx_docs",
+                    filter: "data->>'ref' = 'A-1'",
+                    set: { v: 2 },
+                })).toEqual({ table: "tx_docs", updated: 1 });
+                throw new Error("abort-update");
+            })).rejects.toThrow("abort-update");
+            expect((await serverDb.exec("SELECT data->>'v' AS v FROM tx_docs")).rows).toEqual([{ v: "1" }]);
+        } finally {
+            await db.deleteTable("tx_remote").catch(() => {});
+            await db.deleteTable("tx_docs").catch(() => {});
+        }
+    }, 120_000);
+
     it("updates matching documents with a JSON merge patch", async () => {
         const db = defaultDb;
         const docs = await db.table("docs_update");
@@ -854,8 +986,12 @@ describe("@anteros/duckdb — Quack remote", () => {
         const { updated } = await docs.update("data->>'ref' = 'A-1'", { zone: "Z", prix: 42 });
         expect(updated).toBe(1);
 
-        // …and through the instance shorthand.
-        expect(await db.update("docs_update", "data->>'ref' = 'A-2'", { note: "via instance" })).toEqual({
+        // …and through the instance shorthand, one options object.
+        expect(await db.update({
+            table: "docs_update",
+            filter: "data->>'ref' = 'A-2'",
+            set: { note: "via instance" },
+        })).toEqual({
             table: "docs_update",
             updated: 1,
         });
@@ -871,6 +1007,18 @@ describe("@anteros/duckdb — Quack remote", () => {
 
         // A filter is mandatory — without it every document would be patched.
         await expect(docs.update("   ", { zone: "Z" })).rejects.toThrow(/WHERE filter/i);
+        await expect(db.update({ table: "docs_update", filter: " ", set: { zone: "Z" } }))
+            .rejects.toThrow(/WHERE filter/i);
+        await expect(db.update({ table: "docs_update", set: { zone: "Z" } } as any))
+            .rejects.toThrow(/WHERE filter/i);
+        await expect(db.update({ table: "docs_update", filter: ["a"] as any, set: { zone: "Z" } }))
+            .rejects.toThrow(/WHERE filter/i);
+
+        // So is `set` — anything that is not an object has nothing to merge.
+        await expect(db.update({ table: "docs_update", filter: "1 = 1", set: null as any }))
+            .rejects.toThrow(/set/i);
+        await expect(db.update({ table: "docs_update", filter: "1 = 1", set: ["zone"] as any }))
+            .rejects.toThrow(/set/i);
 
     }, 60_000);
 
@@ -886,8 +1034,12 @@ describe("@anteros/duckdb — Quack remote", () => {
         const { replaced } = await docs.replace("data->>'ref' = 'A-2'", { ref: "A-2", zone: "R" });
         expect(replaced).toBe(1);
 
-        // The instance shorthand does the same.
-        expect(await db.replace("docs_replace", "data->>'ref' = 'A-1'", { ref: "A-1" })).toEqual({
+        // The instance shorthand does the same — one options object.
+        expect(await db.replace({
+            table: "docs_replace",
+            filter: "data->>'ref' = 'A-1'",
+            set: { ref: "A-1" },
+        })).toEqual({
             table: "docs_replace",
             replaced: 1,
         });
@@ -902,6 +1054,16 @@ describe("@anteros/duckdb — Quack remote", () => {
         ]);
 
         await expect(docs.replace("", { ref: "X" })).rejects.toThrow(/WHERE filter/i);
+        await expect(db.replace({ table: "docs_replace", filter: " ", set: { ref: "X" } }))
+            .rejects.toThrow(/WHERE filter/i);
+        await expect(db.replace({ table: "docs_replace", set: { ref: "X" } } as any))
+            .rejects.toThrow(/WHERE filter/i);
+        await expect(db.replace({ table: "docs_replace", filter: {}, set: { ref: "X" } } as any))
+            .rejects.toThrow(/WHERE filter/i);
+        await expect(db.replace({ table: "docs_replace", filter: "1 = 1", set: null as any }))
+            .rejects.toThrow(/set/i);
+        await expect(db.replace({ table: "docs_replace", filter: "1 = 1", set: ["a"] as any }))
+            .rejects.toThrow(/set/i);
 
     }, 60_000);
 
@@ -912,14 +1074,20 @@ describe("@anteros/duckdb — Quack remote", () => {
         await docs.flush();
 
         expect(await docs.delete("data->>'ref' = 'A-2'")).toEqual({ table: "docs_delete", deleted: 1 });
-        expect(await db.delete("docs_delete", "data->>'ref' = 'A-3'")).toEqual({ table: "docs_delete", deleted: 1 });
+        expect(await db.delete({ table: "docs_delete", filter: "data->>'ref' = 'A-3'" }))
+            .toEqual({ table: "docs_delete", deleted: 1 });
 
         const { rows } = await db.exec("SELECT data->>'ref' AS ref FROM docs_delete ORDER BY ref");
         expect(rows).toEqual([{ ref: "A-1" }]);
 
         // The filter is mandatory here too.
         await expect(docs.delete(" ")).rejects.toThrow(/WHERE filter/i);
-        await expect(db.delete("docs_delete", "")).rejects.toThrow(/WHERE filter/i);
+        await expect(db.delete({ table: "docs_delete", filter: "" })).rejects.toThrow(/WHERE filter/i);
+        await expect(db.delete({ table: "docs_delete", filter: undefined as any }))
+            .rejects.toThrow(/WHERE filter/i);
+        await expect(db.delete({ table: "docs_delete", filter: ["a"] as any }))
+            .rejects.toThrow(/WHERE filter/i);
+        await expect(db.delete({ table: "docs_delete" } as any)).rejects.toThrow(/WHERE filter/i);
 
     }, 60_000);
 
@@ -1035,6 +1203,53 @@ describe("@anteros/duckdb — Quack server", () => {
         const late = new DuckdbQuackInstance({ url: own.url, token: "own-token" });
         await expect(late.connect()).rejects.toThrow(/cannot attach the quack remote/i);
     }, 90_000);
+
+    it("runs a transaction on the server's own instance", async () => {
+        const own = new DuckdbQuackServer({ port: freePort(), token: "own-tx" });
+        await own.start();
+        const shape = [
+            { name: "id", type: "string" },
+            { name: "v", type: "INTEGER" },
+        ];
+        try {
+            // The table can be created inside the transaction: same local connection.
+            await expect(own.db.transaction(async () => {
+                await own.db.ingest({ table: "own_tx", rows: [{ id: "a", v: 1 }], columns: shape });
+                throw new Error("abort-create");
+            })).rejects.toThrow("abort-create");
+            expect((await own.db.listTables()).includes("own_tx")).toBe(false);
+
+            await own.db.transaction(async () => {
+                await own.db.ingest({ table: "own_tx", rows: [{ id: "a", v: 1 }], columns: shape });
+            });
+            expect((await own.db.exec("SELECT count(*) AS n FROM own_tx")).rows).toEqual([{ n: "1" }]);
+
+            await own.db.exec('CREATE TABLE own_docs ("data" JSON, "ts" TIMESTAMP)');
+            await own.db.exec(`INSERT INTO own_docs VALUES (CAST('{"ref":"A-1","v":1}' AS JSON), now())`);
+            await expect(own.db.transaction(async () => {
+                await own.db.update({ table: "own_docs", filter: "data->>'ref' = 'A-1'", set: { v: 2 } });
+                throw new Error("abort-update");
+            })).rejects.toThrow("abort-update");
+            expect((await own.db.exec("SELECT data->>'v' AS v FROM own_docs")).rows).toEqual([{ v: "1" }]);
+
+            // A client transaction does not take the server's own instance hostage.
+            const client = new DuckdbQuackInstance({ url: own.url, token: "own-tx" });
+            await client.connect();
+            try {
+                await expect(client.transaction(async (tx) => {
+                    await tx.exec("INSERT INTO own_tx VALUES ($1, $2)", ["b", 2]);
+                    await own.db.ingest({ table: "own_tx", rows: [{ id: "c", v: 3 }] });
+                    throw new Error("abort-client");
+                })).rejects.toThrow("abort-client");
+                expect((await own.db.exec("SELECT id FROM own_tx ORDER BY id")).rows)
+                    .toEqual([{ id: "a" }, { id: "c" }]);
+            } finally {
+                await client.close();
+            }
+        } finally {
+            await own.stop();
+        }
+    }, 120_000);
 
     it("starts twice without serving twice", async () => {
         const own = new DuckdbQuackServer({ port: freePort(), token: "twice" });

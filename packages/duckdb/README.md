@@ -74,6 +74,7 @@ await db.close();
 | `url`      | `string`                                | —                  | The Quack server, `'quack:host'` (9494) or `'quack:host:port'`. Omit for a purely local instance. |
 | `token`    | `string`                                | `DUCKDB_QUACK_TOKEN` | The shared secret, sent as a secret **scoped to `url`** (`CREATE SECRET … SCOPE '…'`). |
 | `as`       | `string`                                | `'quack'`          | The catalog name the remote is attached under — and then made the **default catalog** (`USE`). |
+| `db`       | `string`                                | —                  | Select a database **on the server** (`USE`) — for a server exposing several attached databases; requires `url`. |
 | `readOnly` | `boolean`                               | —                  | **Refused** — Quack 2.0 accepts `READ_ONLY` on `ATTACH` and ignores it. Enforce it on the server (`authorizationFunction`). |
 | `disableSsl` | `boolean`                             | Quack's default    | `true` = plain HTTP, `false` = forced TLS (even localhost), omitted = plain for a local URI and TLS otherwise (`DISABLE_SSL`). |
 | `secret`   | `string`                                | `'anteros_quack'`  | Name given to the created secret.                                              |
@@ -83,12 +84,25 @@ await db.close();
 | `tables`   | `DuckdbTableSchema[]`                   | —                  | Tables the instance must have — reconciled at startup (see below).             |
 | `onError`  | `(error: Error) => void`                | `console.error`    | Where a failed **background** `ingest` reports itself.                         |
 
+`as` names the attachment on the **client**; `db` selects a database **inside the server**. If the
+server has attached several files (`ATTACH 'PROD_RTL.duckdb' AS PROD_RTL`), a client can pick one:
+
+```ts
+const db = new DuckdbQuackInstance({ url, token, db: "PROD_RTL" });
+await db.exec("SELECT * FROM orders"); // runs on PROD_RTL, not the server default
+```
+
+The choice is **per client session** (`USE` on the server). Without `db`, the server's **default database** is
+used — the `dbPath` file's database (e.g. `DEMO_ST` for `DEMO_ST.duckdb`), or `memory`. A missing named
+database fails at `connect()` with `DUCKDB_QUACK_DATABASE_FAILED`; `db` without `url` is refused.
+
 ## Methods
 
 | Method                                      | What it does                                                                    |
 | ------------------------------------------- | ------------------------------------------------------------------------------- |
 | `connect()`                                 | Opens the local instance and attaches the remote. Idempotent, called for you.    |
 | `exec(sql, values?)`                        | Runs one statement, returns `{ columns, types, rows, duration_ms }`. On an attached instance it runs **on the Quack server** (`quack_query_by_name`); `values` run in the client engine, inlined as SQL literals (Quack 2.0 cannot bind parameters on a remote catalog). |
+| `transaction(fn)`                           | `BEGIN TRANSACTION` / `COMMIT` around `fn(tx)`, `ROLLBACK` on throw; `tx.exec` stays server-side. |
 | `createTable(table, columns?)`              | `CREATE TABLE IF NOT EXISTS` — on the attached remote when there is one.         |
 | `deleteTable(table)`                        | `DROP TABLE IF EXISTS` — on the attached remote when there is one.               |
 | `listTables()`                              | The tables of the attached remote, or of the local catalog when not attached.     |
@@ -105,9 +119,9 @@ await db.close();
 | `flush()`                                   | Waits for every queued write.                                                    |
 | `syncSchema()`                              | Waits for the startup reconciliation of `tables` — reports what changed.          |
 | `table(name, { ts? })`                      | A **data table** — `data` JSON + `ts` TIMESTAMP, created in the background.       |
-| `update(table, where, patch)`               | Shorthand for `(await db.table(name)).update(…)` — filter mandatory.              |
-| `replace(table, where, document)`           | Shorthand for `(await db.table(name)).replace(…)` — filter mandatory.             |
-| `delete(table, where)`                      | Shorthand for `(await db.table(name)).delete(…)` — filter mandatory.              |
+| `update({ table, filter, set })`            | Patches matching documents (`json_merge_patch`) — filter mandatory; `set` is merged.      |
+| `replace({ table, filter, set })`           | Replaces matching documents entirely — filter mandatory; `set` is stored whole.              |
+| `delete({ table, filter })`                 | Deletes matching documents — filter mandatory.                                    |
 | `raw()`                                     | The underlying `{ instance, connection }` — the escape hatch.                    |
 | `close()`                                   | Closes the instance; later calls are refused.                                    |
 | `isConnected` / `isAttached` / `url` / `alias` | State, readable at any time.                                                  |
@@ -184,6 +198,37 @@ A clean `stop()` / `close()` checkpoints and releases the file — what a backup
 the main file while its WAL still holds changes, and never delete a live `.wal`. A Quack client is in memory
 by default (its own `dbPath`, if any, is a separate local file); only the **server's** `dbPath` is durable.
 
+### Transactions
+
+```ts
+await db.transaction(async (tx) => {
+  await tx.exec("INSERT INTO orders VALUES ($1, $2)", ["A-1", 42]);
+  await db.ingest({ table: "events", rows: [{ id: "e-1", kind: "created" }] });
+  await db.update({ table: "docs", filter: "data->>'ref' = 'A-1'", set: { v: 2 } });
+});
+// COMMIT on success, ROLLBACK when the callback throws
+```
+
+On an attached instance the transaction runs **on the Quack server**; `tx.exec` stays there (values are
+inlined), so it participates. Another client sees nothing before `COMMIT` (snapshot isolation).
+
+The instance-level writers join it as well: `db.ingest`, `db.update`, `db.replace` and `db.delete` run
+server-side, on the transaction's connection. `ingest` requires the table to **already exist** — a table created
+inside the transaction is refused (`DUCKDB_TRANSACTION_TABLE_REQUIRED`), since `createTable` runs in the client
+engine and cannot see the open server transaction. Create it before, or with a raw
+`tx.exec("CREATE TABLE …")`. On a local instance `ingest` reuses the same connection, so it joins there too —
+a table it creates inside the transaction is rolled back with it. That is also the case for a
+`DuckdbQuackServer`'s own `server.db`: a client's open transaction does not block its writes.
+
+On an **attached** instance, still outside the transaction: `createTable`, `deleteTable`, the
+`db.table(name)` handle methods, and `exec(sql, values)` called outside `tx` — all run in the client engine.
+A local instance shares one connection, so those join the transaction instead. `tx.exec` is server-side on an
+attached instance, so it cannot run client-only SQL (`USE`, `ATTACH`, `memory.…`).
+
+One transaction at a time per instance (`DUCKDB_TRANSACTION_NESTED`); the connection is shared, so do not run
+concurrent queries on the same instance while it runs. Manual `db.exec("BEGIN TRANSACTION")` / `COMMIT` /
+`ROLLBACK` also work, with the same rule: writes must use `exec` without values (server-side).
+
 ### Default table shape
 
 `id` (VARCHAR), `ts` (TIMESTAMP), `data` (JSON) — an append-only event log. A row that leaves `ts` or `id` out gets the current time and a UUID; a `Date` is written as the local wall clock (`formatTimestamp`, exported).
@@ -210,7 +255,9 @@ const { rows } = await db.exec(`
 `);
 ```
 
-CRUD on the matching documents — the **filter is mandatory**:
+CRUD on the matching documents — the **filter is mandatory**: a non-empty SQL string. Omitted, blank,
+or not a string (`undefined`, an array…) → `DUCKDB_WHERE_REQUIRED`, because an update without one would
+patch every row.
 
 ```ts
 await tickets.update("data->>'ref' = 'A-1'", { total: 43 });   // { table, updated }
@@ -218,9 +265,9 @@ await tickets.replace("data->>'ref' = 'A-2'", { ref: "A-2" }); // { table, repla
 await tickets.delete("data->>'ref' = 'A-2'");                  // { table, deleted }
 
 // Or from the instance, without holding the handle:
-await db.update("tickets", "data->>'ref' = 'A-1'", { total: 44 });
-await db.replace("tickets", "data->>'ref' = 'A-2'", { ref: "A-2" });
-await db.delete("tickets", "data->>'ref' = 'A-2'");
+await db.update({ table: "tickets", filter: "data->>'ref' = 'A-1'", set: { total: 44 } });
+await db.replace({ table: "tickets", filter: "data->>'ref' = 'A-2'", set: { ref: "A-2" } });
+await db.delete({ table: "tickets", filter: "data->>'ref' = 'A-2'" });
 ```
 
 | Element | What it does |

@@ -52,6 +52,32 @@ JWT, access rules, rate limiting, IP restriction, field-level encryption.
 ::
 ::
 
+::landing-features{:title='"First-party packages."' :description='"Maintained in the Anteros repo, versioned together — install only what you need; every package already speaks Anteros."'}
+::prose-card{title="@anteros/duckdb" to="/docs/packages/duckdb"}
+#icon
+  ::package-icon{name="duckdb"}
+  ::
+#default
+DuckDB over Quack: client/server, JSON tables, full-text and vector search.
+::
+
+::prose-card{title="@anteros/quack" to="/docs/packages/quack"}
+#icon
+  ::package-icon{name="quack"}
+  ::
+#default
+The antq binary — serve a DuckDB database over the Quack protocol.
+::
+
+::prose-card{title="@anteros/sdk" to="/docs/manage-data/sdk"}
+#icon
+  ::package-icon{name="sdk"}
+  ::
+#default
+Typed client for the REST API, files, agents and realtime.
+::
+::
+
 ::landing-cta{:title='"Ready to build?"' :description='"Create your first Anteros project in seconds."' :primary='{"label":"Quick Start","href":"/docs/getting-started/quick-start","icon":"lucide:rocket"}' :secondary='{"label":"Explore the docs","href":"/docs/reference/configuration","icon":"lucide:book-open"}'}
 
 ::

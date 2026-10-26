@@ -12,10 +12,13 @@
     "preview": "nuxt preview"
   },
   "dependencies": {
-    "@baybreezy/docd": "latest"
+    "@baybreezy/docd": "latest",
+    "@dev.icons/vue": "^1.3.0",
+    "@iconify-json/simple-icons": "^1.2.101"
   },
   "devDependencies": {
     "@antfu/ni": "latest",
+    "@iconify-json/lucide": "^1.2.147",
     "@types/node": "latest",
     "nuxt": "^4.5.2",
     "typescript": "^6.0.3",

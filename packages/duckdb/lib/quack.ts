@@ -2,6 +2,7 @@ import { DuckDBInstance, type DuckDBConnection } from "@duckdb/node-api";
 import type {
     DuckdbColumn,
     DuckdbDocument,
+    DuckdbDeleteOptions,
     DuckdbExecOptions,
     DuckdbExecResult,
     DuckdbFtsDropResult,
@@ -11,6 +12,7 @@ import type {
     DuckdbFtsSearchResult,
     DuckdbIngestOptions,
     DuckdbIngestResult,
+    DuckdbReplaceOptions,
     DuckdbSchemaChange,
     DuckdbSchemaReport,
     DuckdbTableDeleteResult,
@@ -19,6 +21,8 @@ import type {
     DuckdbTableOptions,
     DuckdbTableReplaceResult,
     DuckdbTableUpdateResult,
+    DuckdbTransaction,
+    DuckdbUpdateOptions,
     DuckdbVssDropResult,
     DuckdbVssIndexInfo,
     DuckdbVssIndexOptions,
@@ -208,6 +212,8 @@ class DuckdbQuackInstance {
     #ftsFields = new Map<string, Set<string>>();
     /** Whether `LOAD vss` already ran for this instance. */
     #vssLoaded = false;
+    /** Whether `transaction()` is running — nested transactions are refused. */
+    #inTransaction = false;
     /** The background reconciliation of `options.tables` (see `syncSchema`). */
     #schemaSync: Promise<DuckdbSchemaReport> | null = null;
 
@@ -219,6 +225,12 @@ class DuckdbQuackInstance {
             throw new DuckdbQuackError(
                 "Quack 2.0 ignores READ_ONLY on ATTACH — enforce read-only on the server (`authorizationFunction`) instead",
                 "DUCKDB_QUACK_READ_ONLY_UNSUPPORTED",
+            );
+        }
+        if (options.db !== undefined && options.url === undefined) {
+            throw new DuckdbQuackError(
+                "`db` selects a database on a Quack server — pass `url` (or use `ATTACH` locally)",
+                "DUCKDB_QUACK_URL_REQUIRED",
             );
         }
         this.#options = options;
@@ -318,7 +330,28 @@ class DuckdbQuackInstance {
             // memory catalog stays reachable, qualified (`memory.…`).
             await this.#connection!.run(`USE ${quoteIdent(this.alias)}`);
             this.#attached = true;
+
+            // Select a database inside the server when it exposes several. The
+            // statement runs on the server (the attachment's session), not on the
+            // client's own catalog. `USE` is per client session.
+            if (quack.db !== undefined) {
+                const database = normaliseName(quack.db);
+                try {
+                    await this.#connection!.runAndReadAll(
+                        `SELECT * FROM quack_query_by_name($1, $2)`,
+                        [this.alias, `USE ${quoteIdent(database)}`],
+                    );
+                } catch (err: any) {
+                    this.#attached = false;
+                    throw new DuckdbQuackError(
+                        `Cannot select database '${database}' on '${quack.url}' — ${firstLine(err?.message)}`,
+                        "DUCKDB_QUACK_DATABASE_FAILED",
+                        err,
+                    );
+                }
+            }
         } catch (err: any) {
+            if (err instanceof DuckdbQuackError && err.code === "DUCKDB_QUACK_DATABASE_FAILED") throw err;
             throw new DuckdbQuackError(
                 `Cannot attach the Quack remote '${quack.url}' — ${firstLine(err?.message)}`,
                 "DUCKDB_QUACK_ATTACH_FAILED",
@@ -346,6 +379,7 @@ class DuckdbQuackInstance {
             this.#columns.clear();
             this.#ftsFields.clear();
             this.#vssLoaded = false;
+            this.#inTransaction = false;
             this.#schemaSync = null;
         }
     }
@@ -581,19 +615,90 @@ class DuckdbQuackInstance {
         });
     }
 
-    /** Shorthand for `(await db.table(name)).update(where, patch)` — filter mandatory. */
-    async update(table: string, where: string, patch: DuckdbDocument): Promise<DuckdbTableUpdateResult> {
-        return (await this.table(table)).update(where, patch);
+    /**
+     * Patch the documents matching `filter` — **filter mandatory**.
+     *
+     * ```ts
+     * await db.update({
+     *     table: "tickets",
+     *     filter: "data->>'ref' = 'A-1'",
+     *     set: { total: 43, zone: "Z" },
+     * });
+     * ```
+     *
+     * `set` is a **JSON merge patch**: the named fields are merged into each
+     * document, the others are left as they are.
+     */
+    async update(options: DuckdbUpdateOptions): Promise<DuckdbTableUpdateResult> {
+        const table = normaliseName(options?.table);
+        const predicate = requireFilter(options?.filter, "update");
+        const patch = options?.set;
+        if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
+            throw new DuckdbQuackError(
+                "`update` needs `set` — an object of fields to merge into each document",
+                "DUCKDB_SET_REQUIRED",
+            );
+        }
+
+        if (this.#inTransaction && this.#options.url !== undefined) {
+            const result = await this.#execOnRemote(
+                `UPDATE ${quotePath(this.#serverTable(table))} SET "data" = json_merge_patch("data", ${quoteLiteral(JSON.stringify(patch))}) WHERE ${predicate}`,
+            );
+            return { table, updated: affectedRows(result) };
+        }
+        return (await this.table(table)).update(predicate, patch);
     }
 
-    /** Shorthand for `(await db.table(name)).replace(where, document)` — filter mandatory. */
-    async replace(table: string, where: string, document: DuckdbDocument): Promise<DuckdbTableReplaceResult> {
-        return (await this.table(table)).replace(where, document);
+    /**
+     * Replace the **whole** document of the rows matching `filter` — it is not
+     * merged with the previous one. Filter mandatory.
+     *
+     * ```ts
+     * await db.replace({
+     *     table: "tickets",
+     *     filter: "data->>'ref' = 'A-1'",
+     *     set: { ref: "A-1", total: 43 },
+     * });
+     * ```
+     */
+    async replace(options: DuckdbReplaceOptions): Promise<DuckdbTableReplaceResult> {
+        const table = normaliseName(options?.table);
+        const predicate = requireFilter(options?.filter, "replace");
+        const document = options?.set;
+        if (document === null || typeof document !== "object" || Array.isArray(document)) {
+            throw new DuckdbQuackError(
+                "`replace` needs `set` — the whole object to store",
+                "DUCKDB_SET_REQUIRED",
+            );
+        }
+
+        if (this.#inTransaction && this.#options.url !== undefined) {
+            const result = await this.#execOnRemote(
+                `UPDATE ${quotePath(this.#serverTable(table))} SET "data" = CAST(${quoteLiteral(JSON.stringify(document))} AS JSON) WHERE ${predicate}`,
+            );
+            return { table, replaced: affectedRows(result) };
+        }
+        return (await this.table(table)).replace(predicate, document);
     }
 
-    /** Shorthand for `(await db.table(name)).delete(where)` — filter mandatory. */
-    async delete(table: string, where: string): Promise<DuckdbTableDeleteResult> {
-        return (await this.table(table)).delete(where);
+    /**
+     * Delete the rows matching `filter` — **filter mandatory**.
+     *
+     * ```ts
+     * await db.delete({ table: "tickets", filter: "data->>'ref' = 'A-2'" });
+     * ```
+     */
+    async delete(options: DuckdbDeleteOptions): Promise<DuckdbTableDeleteResult> {
+        const table = normaliseName(options?.table);
+        const predicate = requireFilter(options?.filter, "delete");
+
+        if (this.#inTransaction && this.#options.url !== undefined) {
+            const result = await this.#execOnRemote(
+                `DELETE FROM ${quotePath(this.#serverTable(table))} WHERE ${predicate}`,
+            );
+            return { table, deleted: affectedRows(result) };
+        }
+        return (await this.table(table)).delete(predicate);
     }
 
     /**
@@ -756,6 +861,77 @@ class DuckdbQuackInstance {
         }
     }
 
+    /**
+     * Run `work` inside a transaction — `BEGIN TRANSACTION` / `COMMIT`, and
+     * `ROLLBACK` when `work` throws.
+     *
+     * On an attached instance the transaction lives **on the Quack server**, and
+     * `tx.exec` stays there (values are inlined). `ingest` joins it too — provided
+     * the table already exists — as do the instance-level `update`, `replace` and
+     * `delete`. `createTable` and `deleteTable` run in the client engine and do
+     * **not** join: create the table before the transaction, or with
+     * `tx.exec("CREATE TABLE …")`.
+     *
+     * ```ts
+     * await db.transaction(async (tx) => {
+     *     await tx.exec("INSERT INTO orders VALUES ($1, $2)", ["A-1", 42]);
+     *     await tx.exec("UPDATE stock SET qty = qty - 1 WHERE sku = 'A-1'");
+     * });
+     * ```
+     *
+     * Nested transactions are refused (`DUCKDB_TRANSACTION_NESTED`). The connection
+     * is shared: do not run concurrent queries on the same instance while it runs.
+     */
+    async transaction<T>(work: (tx: DuckdbTransaction) => Promise<T>): Promise<T> {
+        if (this.#inTransaction) {
+            throw new DuckdbQuackError(
+                "Nested transactions are not supported — one at a time per instance",
+                "DUCKDB_TRANSACTION_NESTED",
+            );
+        }
+
+        this.#inTransaction = true;
+        // Catalog caches learn about tables created inside the transaction; a
+        // rollback removes them from DuckDB too, so the caches go back as well.
+        const tables = new Set(this.#tables);
+        const columns = new Map(this.#columns);
+        try {
+            await this.exec("BEGIN TRANSACTION");
+            try {
+                const result = await work({
+                    exec: (sql, values) => this.#execInTransaction(sql, values),
+                });
+                await this.exec("COMMIT");
+                return result;
+            } catch (err) {
+                await this.exec("ROLLBACK").catch(() => {});
+                this.#tables = tables;
+                this.#columns = columns;
+                throw err;
+            }
+        } finally {
+            this.#inTransaction = false;
+        }
+    }
+
+    /**
+     * `exec` for an open transaction: always server-side when attached, with the
+     * values inlined, so client-side writes cannot break the transaction.
+     */
+    async #execInTransaction(
+        sql: string,
+        values?: any[] | Record<string, any>,
+    ): Promise<DuckdbExecResult> {
+        if (typeof sql !== "string" || !sql.trim()) {
+            throw new DuckdbQuackError("`exec` needs a SQL statement", "DUCKDB_SQL_REQUIRED");
+        }
+
+        if (this.#options.url === undefined) return this.#execOnClient(sql, values);
+
+        const statement = values === undefined ? sql : inlineParameters(sql, values);
+        return this.#execOnRemote(statement);
+    }
+
     // ─── Schema ───────────────────────────────────────────────────────────
 
     /** Create a table if it is not there yet; columns default to the instance's. */
@@ -805,7 +981,7 @@ class DuckdbQuackInstance {
                 // remote's own `duckdb_tables()` is asked through the attachment.
                 const reader = await connection.runAndReadAll(
                     `SELECT table_name FROM quack_query_by_name($1, $2) ORDER BY 1`,
-                    [this.alias, "SELECT table_name FROM duckdb_tables()"],
+                    [this.alias, "SELECT table_name FROM duckdb_tables() WHERE database_name = current_database()"],
                 );
                 return (reader.getRowObjectsJson() as any[]).map((row) => String(row.table_name));
             } catch (err: any) {
@@ -1330,11 +1506,43 @@ class DuckdbQuackInstance {
         // The schema is resolved now, not in the drain: a wrong table name should
         // fail while the caller is still there to see it.
         const { connection } = await this.raw();
+        const inTransaction = this.#inTransaction;
+        const remote = this.#options.url !== undefined;
+
+        // Inside a server transaction, resolve the columns server-side: client-side
+        // catalog probes do not see the open transaction and can end it.
+        if (inTransaction && remote) {
+            const target = quotePath(this.#serverTable(table));
+            let columns: Array<{ name: string; sql: string }>;
+            try {
+                const probe = await this.#execOnRemote(`SELECT * FROM ${target} LIMIT 0`);
+                columns = probe.columns.map((name, index) => ({ name, sql: probe.types[index] ?? "VARCHAR" }));
+            } catch (err: any) {
+                throw new DuckdbQuackError(
+                    `\`ingest\` inside a transaction needs an existing table '${table}' — ${firstLine(err?.message)}`,
+                    "DUCKDB_TRANSACTION_TABLE_REQUIRED",
+                    err,
+                );
+            }
+            await this.#insertRemote(table, columns, rows as Array<Record<string, unknown>>);
+            return { table, queued: rows.length };
+        }
+
         if (!this.#tables.has(table)) {
-            if (!(await this.#exists(connection, table))) await this.createTable(table, options.columns);
-            else this.#tables.add(table);
+            const exists = await this.#exists(connection, table);
+            if (!exists) {
+                await this.createTable(table, options.columns);
+            } else {
+                this.#tables.add(table);
+            }
         }
         const columns = await this.#columnsOf(connection, table);
+
+        if (inTransaction) {
+            // Local instance: same connection, so the write is transactional.
+            await this.#insert(connection, table, columns, rows as Array<Record<string, unknown>>);
+            return { table, queued: rows.length };
+        }
 
         const work = async () => {
             try {
@@ -1390,6 +1598,33 @@ class DuckdbQuackInstance {
     /** Wait for every write queued so far. */
     async flush(): Promise<void> {
         await this.#pending.catch(() => {});
+    }
+
+    /**
+     * The `ingest` write for an open transaction — server-side, values as literals,
+     * so it joins the transaction instead of running in the client engine.
+     */
+    async #insertRemote(
+        table: string,
+        columns: Array<{ name: string; sql: string }>,
+        rows: Array<Record<string, unknown>>,
+    ): Promise<void> {
+        const names = columns.map((column) => quoteIdent(column.name)).join(", ");
+        const target = quotePath(this.#serverTable(table));
+
+        for (let offset = 0; offset < rows.length; offset += INSERT_BATCH) {
+            const batch = rows.slice(offset, offset + INSERT_BATCH);
+            const tuples = batch.map((row) => `(${columns.map((column) => {
+                let value = row[column.name];
+                if (value === undefined && column.name === "ts") value = formatTimestamp();
+                if (value === undefined && column.name === "id") value = crypto.randomUUID();
+                return `CAST(${sqlLiteral(value)} AS ${column.sql})`;
+            }).join(", ")})`);
+
+            await this.#execOnRemote(
+                `INSERT INTO ${target} (${names}) VALUES ${tuples.join(", ")}`,
+            );
+        }
     }
 }
 
@@ -1864,9 +2099,13 @@ function splitExecArguments(input?: any[] | Record<string, any>): {
     return { values: (input as DuckdbExecOptions).values };
 }
 
-/** A filter is mandatory — an update/replace without one would hit every row. */
+/**
+ * A filter is mandatory, and must be a real SQL predicate — an update, replace
+ * or delete without one would hit every row. A non-string (`undefined`, an
+ * array…) is refused rather than stringified into something that runs.
+ */
 function requireFilter(where: unknown, operation: string): string {
-    const predicate = String(where ?? "").trim();
+    const predicate = typeof where === "string" ? where.trim() : "";
     if (!predicate) {
         throw new DuckdbQuackError(`\`${operation}\` needs a WHERE filter`, "DUCKDB_WHERE_REQUIRED");
     }

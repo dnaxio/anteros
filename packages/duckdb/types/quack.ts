@@ -293,6 +293,15 @@ export type QuackInstanceOptions = {
      */
     as?: string;
     /**
+     * Select a database on the attached Quack server (`USE <db>`) — for a
+     * server that exposes several databases (e.g. `ATTACH 'PROD_RTL.duckdb'`).
+     * Omitted → the server's default database. Requires `url`.
+     *
+     * The selection is **per client session**: one instance per database, or
+     * `exec("USE …")` later.
+     */
+    db?: string;
+    /**
      * The transport, spelled out: `true` forces plain HTTP, `false` forces TLS
      * (even for a local URI), omitted keeps Quack's default — plain for a local
      * URI, TLS otherwise (`DISABLE_SSL`).
@@ -480,6 +489,19 @@ export type DuckdbExecResult = {
     duration_ms: number;
 };
 
+/**
+ * The handle passed to `transaction()`.
+ *
+ * `exec` always runs **server-side** on an attached instance (values are inlined),
+ * so it stays inside the open transaction. The high-level writers (`ingest`,
+ * `createTable`, `deleteTable`, and `exec` with values outside `tx`) run in the
+ * client engine and do **not** join it.
+ */
+export type DuckdbTransaction = {
+    /** Run one statement in the open transaction. */
+    exec(sql: string, values?: any[] | Record<string, any>): Promise<DuckdbExecResult>;
+};
+
 /** `exec()` options. */
 export type DuckdbExecOptions = {
     /**
@@ -525,6 +547,34 @@ export type DuckdbIngestResult = {
 
 /** A document of a data table — an arbitrary object, stored as one `data` value. */
 export type DuckdbDocument = Record<string, unknown>;
+
+/** `db.update()` request — the table, the filter, and the fields to merge. */
+export type DuckdbUpdateOptions = {
+    /** The table holding the documents. */
+    table: string;
+    /** SQL predicate selecting the rows — mandatory. */
+    filter: string;
+    /** Fields merged into each matching document (`json_merge_patch`). */
+    set: DuckdbDocument;
+};
+
+/** `db.replace()` request — the table, the filter, and the document to store. */
+export type DuckdbReplaceOptions = {
+    /** The table holding the documents. */
+    table: string;
+    /** SQL predicate selecting the rows — mandatory. */
+    filter: string;
+    /** The whole document stored in place of the previous one. */
+    set: DuckdbDocument;
+};
+
+/** `db.delete()` request — the table and the filter selecting the rows. */
+export type DuckdbDeleteOptions = {
+    /** The table holding the documents. */
+    table: string;
+    /** SQL predicate selecting the rows — mandatory. */
+    filter: string;
+};
 
 /** `db.table()` options. */
 export type DuckdbTableOptions = {
