@@ -128,6 +128,23 @@ describe("antq — the CLI", () => {
         expect(code).toBe(0);
         expect(out).toContain("start [options]");
         expect(out).toContain("--dbPath");
+        expect(out).toContain("--targetBatchBytes");
+        expect(out).toContain("--sslCertFile");
+        expect(out).toContain("--ftsConfig");
+        expect(out).toContain("--vssConfig");
+    });
+
+    it("refuses a TLS configuration that cannot be served", async () => {
+        const missingKey = await capture(["start", "--token", TOKEN, "--sslCertFile", "/tmp/cert.pem"]);
+        expect(missingKey.code).toBe(1);
+        expect(missingKey.err).toContain("go together");
+
+        const plain = await capture([
+            "start", "--token", TOKEN, "--disableSsl",
+            "--sslCertFile", "/tmp/cert.pem", "--sslKeyFile", "/tmp/key.pem",
+        ]);
+        expect(plain.code).toBe(1);
+        expect(plain.err).toContain("exclusive");
     });
 
     it("prints its version", async () => {
@@ -231,4 +248,212 @@ describe("antq — the CLI serving", () => {
         proc.kill("SIGINT");
         await proc.exited;
     }, 120_000);
+
+    it("builds a --fts index before serving, and the client can search it", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "antq-fts-"));
+        const file = join(directory, "docs.duckdb");
+
+        // Seed the file the server will open — the index needs a table to index.
+        const instance = await DuckDBInstance.create(file);
+        const connection = await instance.connect();
+        await connection.run(`CREATE TABLE docs (id VARCHAR PRIMARY KEY, body VARCHAR)`);
+        await connection.run(`INSERT INTO docs VALUES
+            ('d1', 'Le chat est un petit mammifère.'),
+            ('d2', 'Le canard colvert est un oiseau.')`);
+        connection.closeSync();
+        instance.closeSync();
+
+        const port = freePort();
+        const proc = cli([
+            "start", "--port", String(port), "--token", TOKEN, "--dbPath", file,
+            "--fts", "docs:id:body", "--ftsStemmer", "french", "--ftsIncremental",
+        ]);
+
+        const client = await attach(port);
+        const searched = await client.exec(`
+            SELECT * FROM quack_query_by_name(
+                'r',
+                'SELECT id, score FROM (SELECT *, fts_main_docs.match_bm25(id, ''chats'') AS score FROM docs) sq WHERE score IS NOT NULL ORDER BY score DESC'
+            )
+        `);
+        expect(searched.rows).toEqual([{ id: "d1", score: expect.any(Number) }]);
+
+        // `--ftsIncremental`: a row inserted after the start is searchable too.
+        await client.exec(`
+            SELECT * FROM quack_query_by_name('r', 'INSERT INTO docs VALUES (''d3'', ''Le cygne est un oiseau aquatique.'')')
+        `);
+        const swan = await client.exec(`
+            SELECT * FROM quack_query_by_name(
+                'r',
+                'SELECT id, score FROM (SELECT *, fts_main_docs.match_bm25(id, ''cygne'') AS score FROM docs) sq WHERE score IS NOT NULL'
+            )
+        `);
+        expect(swan.rows).toEqual([{ id: "d3", score: expect.any(Number) }]);
+        await client.close();
+
+        proc.kill("SIGINT");
+        expect(await proc.exited).toBe(0);
+        await rm(directory, { recursive: true, force: true });
+    }, 180_000);
+
+    it("builds several indexes from --ftsConfig and repeated --fts", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "antq-fts-config-"));
+        const file = join(directory, "docs.duckdb");
+        const config = join(directory, "fts.json");
+
+        const instance = await DuckDBInstance.create(file);
+        const connection = await instance.connect();
+        await connection.run(`CREATE TABLE documents (document_identifier VARCHAR PRIMARY KEY, text_content VARCHAR, author VARCHAR)`);
+        await connection.run(`CREATE TABLE docs (id VARCHAR PRIMARY KEY, body VARCHAR)`);
+        await connection.run(`CREATE TABLE redactions (redaction_id VARCHAR PRIMARY KEY, text VARCHAR)`);
+        await connection.run(`CREATE TABLE notes (note_id VARCHAR PRIMARY KEY, body VARCHAR)`);
+        await connection.run(`INSERT INTO documents VALUES ('doc1', 'The mallard is a dabbling duck.', 'Alice')`);
+        await connection.run(`INSERT INTO docs VALUES ('d1', 'Le chat est un petit mammifère.')`);
+        await connection.run(`INSERT INTO redactions VALUES ('r1', 'Secret project alpha.')`);
+        await connection.run(`INSERT INTO notes VALUES ('n1', 'The swan is a bird.')`);
+        connection.closeSync();
+        instance.closeSync();
+
+        await Bun.write(config, JSON.stringify([
+            { table: "documents", id: "document_identifier", fields: ["text_content", "author"], stemmer: "english" },
+            { table: "docs", id: "id", fields: "body" },
+            { table: "redactions", id: "redaction_id", fields: ["text"], incremental: true },
+        ]));
+
+        const port = freePort();
+        const proc = cli([
+            "start", "--port", String(port), "--token", TOKEN, "--dbPath", file,
+            "--ftsConfig", config,
+            "--fts", "notes:note_id:body",
+        ]);
+
+        const client = await attach(port);
+        const search = async (schema: string, table: string, idColumn: string, term: string) =>
+            (await client.exec(`
+                SELECT * FROM quack_query_by_name(
+                    'r',
+                    'SELECT ${idColumn} FROM (SELECT *, ${schema}.match_bm25(${idColumn}, ''${term}'') AS score FROM ${table}) sq WHERE score IS NOT NULL'
+                )
+            `)).rows;
+
+        expect(await search("fts_main_documents", "documents", "document_identifier", "mallard"))
+            .toEqual([{ document_identifier: "doc1" }]);
+        expect(await search("fts_main_docs", "docs", "id", "chat"))
+            .toEqual([{ id: "d1" }]);
+        expect(await search("fts_main_redactions", "redactions", "redaction_id", "secret"))
+            .toEqual([{ redaction_id: "r1" }]);
+        expect(await search("fts_main_notes", "notes", "note_id", "swan"))
+            .toEqual([{ note_id: "n1" }]);
+        await client.close();
+
+        proc.kill("SIGINT");
+        expect(await proc.exited).toBe(0);
+        await rm(directory, { recursive: true, force: true });
+    }, 180_000);
+
+    it("refuses a missing --ftsConfig file", async () => {
+        const { code, err } = await capture(["start", "--token", TOKEN, "--ftsConfig", "/nope/fts.json"]);
+        expect(code).toBe(1);
+        expect(err).toContain("Cannot read --ftsConfig");
+    });
+
+    it("builds a --vss index before serving, and the client can search it", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "antq-vss-"));
+        const file = join(directory, "vecs.duckdb");
+
+        const instance = await DuckDBInstance.create(file);
+        const connection = await instance.connect();
+        await connection.run(`CREATE TABLE vecs (id VARCHAR PRIMARY KEY, vec FLOAT[3])`);
+        await connection.run(`INSERT INTO vecs VALUES ('v1', [1, 0, 0]), ('v2', [0, 1, 0]), ('v3', [1, 1, 0])`);
+        connection.closeSync();
+        instance.closeSync();
+
+        const port = freePort();
+        const proc = cli([
+            "start", "--port", String(port), "--token", TOKEN, "--dbPath", file,
+            "--vss", "vecs:vec:cosine", "--vssPersist",
+        ]);
+
+        const client = await attach(port);
+        const searched = await client.exec(`
+            SELECT * FROM quack_query_by_name(
+                'r',
+                'SELECT id, array_cosine_distance(vec, CAST([1, 0, 0] AS FLOAT[3])) AS distance FROM vecs ORDER BY array_cosine_distance(vec, CAST([1, 0, 0] AS FLOAT[3])) LIMIT 2'
+            )
+        `);
+        expect(searched.rows.map((row: any) => row.id)).toEqual(["v1", "v3"]);
+        await client.close();
+
+        proc.kill("SIGINT");
+        expect(await proc.exited).toBe(0);
+        await rm(directory, { recursive: true, force: true });
+    }, 180_000);
+
+    it("builds several vector indexes from --vssConfig", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "antq-vss-config-"));
+        const file = join(directory, "vecs.duckdb");
+        const config = join(directory, "vss.json");
+
+        const instance = await DuckDBInstance.create(file);
+        const connection = await instance.connect();
+        await connection.run(`CREATE TABLE vecs (id VARCHAR PRIMARY KEY, vec FLOAT[3])`);
+        await connection.run(`CREATE TABLE embeddings (id VARCHAR PRIMARY KEY, vec FLOAT[3])`);
+        await connection.run(`INSERT INTO vecs VALUES ('a1', [1, 0, 0]), ('a2', [0, 1, 0])`);
+        await connection.run(`INSERT INTO embeddings VALUES ('e1', [0, 0, 1]), ('e2', [0, 1, 0])`);
+        connection.closeSync();
+        instance.closeSync();
+
+        await Bun.write(config, JSON.stringify([
+            { table: "vecs", column: "vec", metric: "cosine" },
+            { table: "embeddings", column: "vec", metric: "l2sq", efSearch: 32 },
+        ]));
+
+        const port = freePort();
+        const proc = cli([
+            "start", "--port", String(port), "--token", TOKEN, "--dbPath", file,
+            "--vssConfig", config, "--vssPersist",
+        ]);
+
+        const client = await attach(port);
+        const nearest = async (table: string, fn: string, vector: string) =>
+            (await client.exec(`
+                SELECT * FROM quack_query_by_name(
+                    'r',
+                    'SELECT id FROM ${table} ORDER BY ${fn}(vec, CAST(${vector} AS FLOAT[3])) LIMIT 1'
+                )
+            `)).rows;
+
+        expect(await nearest("vecs", "array_cosine_distance", "[1, 0, 0]")).toEqual([{ id: "a1" }]);
+        expect(await nearest("embeddings", "array_distance", "[0, 0, 1]")).toEqual([{ id: "e1" }]);
+        await client.close();
+
+        proc.kill("SIGINT");
+        expect(await proc.exited).toBe(0);
+        await rm(directory, { recursive: true, force: true });
+    }, 180_000);
+
+    it("refuses a file database without --vssPersist", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "antq-vss-nopersist-"));
+        const file = join(directory, "vecs.duckdb");
+
+        const { code, err } = await capture([
+            "start", "--token", TOKEN, "--dbPath", file, "--vss", "vecs:vec",
+        ]);
+        expect(code).toBe(1);
+        expect(err).toContain("need --vssPersist");
+
+        await rm(directory, { recursive: true, force: true });
+    });
+
+    it("refuses a missing --vssConfig file", async () => {
+        const { code, err } = await capture(["start", "--token", TOKEN, "--vssConfig", "/nope/vss.json"]);
+        expect(code).toBe(1);
+        expect(err).toContain("Cannot read --vssConfig");
+    });
+
+    it("refuses a malformed --fts spec", async () => {
+        const { code, err } = await capture(["start", "--token", TOKEN, "--fts", "nope"]);
+        expect(code).toBe(1);
+        expect(err).toContain("--fts expects table:id:field1,field2");
+    });
 });

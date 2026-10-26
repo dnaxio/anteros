@@ -75,6 +75,186 @@ export type DuckdbSchemaReport = {
 };
 
 /**
+ * A full-text index, as `createFtsIndex()` takes it.
+ *
+ * DuckDB builds it with the `fts` extension (autoloaded on first use) in a schema
+ * named `fts_<catalog>_<table>` — `fts_main_documents` for `documents`.
+ */
+export type DuckdbFtsIndexOptions = {
+    /** Document identifier column. `NOT NULL` or `PRIMARY KEY` when `incremental`. */
+    id: string;
+    /** One text column, a list of them, or `'*'` for every `VARCHAR` column. */
+    fields: string | string[] | "*";
+    /** Stemmer: `'porter'` (default), `'english'`, `'french'`, `'none'`… */
+    stemmer?: string;
+    /** Stopwords table, `'none'`, or the default `'english'` list. */
+    stopwords?: string;
+    /** Regex of patterns to ignore (default `'(\\.|[^a-z])+'`). */
+    ignore?: string;
+    /** Remove accents before indexing (default `true`). */
+    stripAccents?: boolean;
+    /** Lowercase before indexing (default `true`). */
+    lower?: boolean;
+    /**
+     * `true` (default): rebuild an existing index. `false`: keep an existing index
+     * as it is, and create it only when missing — what a server restart wants.
+     * (DuckDB's own default is `false`, but it errors instead of skipping.)
+     */
+    overwrite?: boolean;
+    /** Keep the index up to date with triggers after inserts/deletes. */
+    incremental?: boolean;
+};
+
+/** A full-text index declared at server startup (`ftsIndexes`). */
+export type DuckdbFtsIndex = DuckdbFtsIndexOptions & {
+    /** Table on the served database. */
+    table: string;
+};
+
+/** What `createFtsIndex()` reports. */
+export type DuckdbFtsIndexInfo = {
+    /** Table indexed. */
+    table: string;
+    /** Schema DuckDB created for the index (`fts_main_<table>`). */
+    index: string;
+};
+
+/** What `dropFtsIndex()` reports. */
+export type DuckdbFtsDropResult = {
+    /** Table whose index was dropped. */
+    table: string;
+    /** `true` when an index existed. */
+    dropped: boolean;
+};
+
+/** What `searchFts()` takes. */
+export type DuckdbFtsSearchOptions = {
+    /** Document identifier column — the **column**, not its name as a string. */
+    id: string;
+    /** Fields to search: a list, or a comma-separated string. Default: all indexed fields. */
+    fields?: string[] | string;
+    /** BM25 `k1` (default `1.2`). */
+    k?: number;
+    /** BM25 `b` (default `0.75`). */
+    b?: number;
+    /** Every term must be present (default `false`). */
+    conjunctive?: boolean;
+    /**
+     * Extra SQL predicate, e.g. `"doc_version > 2"`. It is **SQL**, not a value:
+     * never pass untrusted input here.
+     */
+    where?: string;
+    /** Columns to return (default `*`); `score` is always appended. */
+    select?: string[];
+    /** Maximum rows (default `100`; `0` → no limit). */
+    limit?: number;
+};
+
+/** What `searchFts()` returns. */
+export type DuckdbFtsSearchResult = {
+    /** Table searched. */
+    table: string;
+    /** The query string. */
+    query: string;
+    /** Matching rows, `score` included. */
+    rows: Record<string, unknown>[];
+    /** Call duration, row materialisation included. */
+    duration_ms: number;
+};
+
+/** The distance metric an HNSW index is built for. */
+export type DuckdbVssMetric = "l2sq" | "cosine" | "ip";
+
+/** A vector index, as `createVssIndex()` takes it. */
+export type DuckdbVssIndexOptions = {
+    /** `FLOAT[N]` column to index. */
+    column: string;
+    /** Distance metric (default `'l2sq'`). */
+    metric?: DuckdbVssMetric;
+    /** HNSW `ef_construction` (default 128). */
+    efConstruction?: number;
+    /** HNSW `ef_search` (default 64). */
+    efSearch?: number;
+    /** HNSW `M` (default 16). */
+    m?: number;
+    /** HNSW `M0` (default `2 * M`). */
+    m0?: number;
+    /** Index name (default `vss_<table>_<column>`). */
+    name?: string;
+    /** Drop and recreate an existing index (default `true`). */
+    overwrite?: boolean;
+    /**
+     * Enable `hnsw_enable_experimental_persistence` before creating the index —
+     * required for a **file** database. In-memory databases do not need it.
+     */
+    persist?: boolean;
+};
+
+/** A vector index declared at server startup (`vssIndexes`). */
+export type DuckdbVssIndex = DuckdbVssIndexOptions & {
+    /** Table on the served database. */
+    table: string;
+};
+
+/** What `createVssIndex()` reports. */
+export type DuckdbVssIndexInfo = {
+    /** Table indexed. */
+    table: string;
+    /** Name of the HNSW index. */
+    index: string;
+    /** Metric the index was built for. */
+    metric: DuckdbVssMetric;
+};
+
+/** What `dropVssIndex()` reports. */
+export type DuckdbVssDropResult = {
+    /** Table whose index was dropped. */
+    table: string;
+    /** Index name. */
+    index: string;
+    /** `true` when the index existed. */
+    dropped: boolean;
+};
+
+/** What `searchVss()` takes. */
+export type DuckdbVssSearchOptions = {
+    /** `FLOAT[N]` column to search. */
+    column: string;
+    /** Distance metric (default `'l2sq'`); it must match the index to accelerate. */
+    metric?: DuckdbVssMetric;
+    /** Number of neighbours (default `10`; must be > 0). */
+    limit?: number;
+    /** Columns to return (default `*`); `distance` is always appended. */
+    select?: string[];
+    /** Extra SQL predicate — trusted SQL only. */
+    where?: string;
+};
+
+/** What `searchVss()` returns. */
+export type DuckdbVssSearchResult = {
+    /** Table searched. */
+    table: string;
+    /** Vector column. */
+    column: string;
+    /** Metric used. */
+    metric: DuckdbVssMetric;
+    /** Nearest rows, `distance` included (closest first). */
+    rows: Record<string, unknown>[];
+    /** Call duration, row materialisation included. */
+    duration_ms: number;
+};
+
+/** A session variable, as `listVariables()` reports it. */
+export type DuckdbVariable = {
+    /** Variable name. */
+    name: string;
+    /** Value as text (`getVariable` returns it typed). */
+    value: string | null;
+    /** DuckDB type (`INTEGER`, `VARCHAR`, `BIGINT[]`…). */
+    type: string;
+};
+
+/**
  * What `new DuckdbQuackInstance()` takes.
  *
  * The Quack part is at the top level, because it is what the class is for; leaving
@@ -113,12 +293,16 @@ export type QuackInstanceOptions = {
      */
     as?: string;
     /**
-     * Force the transport to plain HTTP. Quack defaults to **TLS** for a non-local
-     * server (`DISABLE_SSL` is `true` only for a local URI) — set this when you talk
-     * to a remote that serves plain HTTP.
+     * The transport, spelled out: `true` forces plain HTTP, `false` forces TLS
+     * (even for a local URI), omitted keeps Quack's default — plain for a local
+     * URI, TLS otherwise (`DISABLE_SSL`).
      */
     disableSsl?: boolean;
-    /** Attach read-only, so a stray write fails locally instead of landing on the server. */
+    /**
+     * Refused: Quack 2.0 accepts `READ_ONLY` on ATTACH and ignores it, so the flag
+     * cannot protect anything. Enforce read-only on the server with
+     * `QuackServerOptions.authorizationFunction` instead.
+     */
     readOnly?: boolean;
     /** Name given to the created secret (default `'anteros_quack'`). */
     secret?: string;
@@ -192,8 +376,9 @@ export type QuackServerOptions = {
      */
     allowOtherHostname?: boolean;
     /**
-     * Serve in plain HTTP instead of TLS (default `false`: Quack enables SSL for a
-     * non-local URI). A remote client then needs `disableSsl: true` too.
+     * The transport, spelled out: `true` serves plain HTTP, `false` forces TLS
+     * (even for a local URI), omitted keeps Quack's default — plain for a local
+     * URI, TLS otherwise.
      */
     disableSsl?: boolean;
     /**
@@ -208,11 +393,18 @@ export type QuackServerOptions = {
      */
     dbPath?: string;
     /**
-     * Maximum `DataChunk`s shipped per `FETCH` response
-     * (`quack_fetch_batch_chunks`, default `12`) — the server-side batching knob:
-     * raise it to cut per-chunk overhead on wide results, lower it to bound memory.
+     * Target size of one wire batch (`quack_target_batch_bytes`, default 32 MiB) —
+     * the server-side batching knob: raise it to cut per-message overhead on wide
+     * results, lower it to bound memory.
      */
-    fetchBatchChunks?: number;
+    targetBatchBytes?: number;
+    /**
+     * TLS certificate used when serving HTTPS (`ssl_cert_file`). Quack generates a
+     * self-signed pair when omitted. Refused together with `disableSsl: true`.
+     */
+    sslCertFile?: string;
+    /** Private key matching `sslCertFile` (`ssl_key_file`). */
+    sslKeyFile?: string;
     /**
      * Name of a `(sid, client_token, server_token) -> BOOLEAN` scalar function used
      * to authenticate clients, replacing the default `quack_check_token`
@@ -242,6 +434,24 @@ export type QuackServerOptions = {
     columns?: DuckdbColumn[];
     /** Tables the server owns, with their fields — reconciled like `QuackInstanceOptions.tables`. */
     tables?: DuckdbTableSchema[];
+    /**
+     * Full-text indexes built **before** the server starts listening (the `fts`
+     * extension is autoloaded). Rebuilt at each start (`overwrite` defaults to
+     * `true`), so a restart picks up new rows; pass `incremental: true` to keep an
+     * index current instead.
+     */
+    ftsIndexes?: DuckdbFtsIndex[];
+    /**
+     * HNSW vector indexes built **before** the server starts listening. The `vss`
+     * extension is installed/loaded on first use.
+     */
+    vssIndexes?: DuckdbVssIndex[];
+    /**
+     * Enable `hnsw_enable_experimental_persistence` on the server instance —
+     * required to create an HNSW index in a **file** database. DuckDB marks this
+     * persistence as experimental (WAL recovery is not implemented for it).
+     */
+    vssPersist?: boolean;
     /** Where a failed background `ingest` reports itself (default `console.error`). */
     onError?: (error: Error) => void;
 };

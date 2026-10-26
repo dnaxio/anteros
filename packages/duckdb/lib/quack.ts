@@ -4,6 +4,11 @@ import type {
     DuckdbDocument,
     DuckdbExecOptions,
     DuckdbExecResult,
+    DuckdbFtsDropResult,
+    DuckdbFtsIndexInfo,
+    DuckdbFtsIndexOptions,
+    DuckdbFtsSearchOptions,
+    DuckdbFtsSearchResult,
     DuckdbIngestOptions,
     DuckdbIngestResult,
     DuckdbSchemaChange,
@@ -14,6 +19,13 @@ import type {
     DuckdbTableOptions,
     DuckdbTableReplaceResult,
     DuckdbTableUpdateResult,
+    DuckdbVssDropResult,
+    DuckdbVssIndexInfo,
+    DuckdbVssIndexOptions,
+    DuckdbVssMetric,
+    DuckdbVssSearchOptions,
+    DuckdbVssSearchResult,
+    DuckdbVariable,
     QuackInstanceOptions,
     QuackServerOptions,
 } from "../types/quack";
@@ -192,10 +204,23 @@ class DuckdbQuackInstance {
     #tables = new Set<string>();
     /** Columns of a table, as DuckDB reports them. */
     #columns = new Map<string, Array<{ name: string; sql: string }>>();
+    /** Fields of a full-text index, cached per table. */
+    #ftsFields = new Map<string, Set<string>>();
+    /** Whether `LOAD vss` already ran for this instance. */
+    #vssLoaded = false;
     /** The background reconciliation of `options.tables` (see `syncSchema`). */
     #schemaSync: Promise<DuckdbSchemaReport> | null = null;
 
     constructor(options: QuackInstanceOptions = {}) {
+        // Quack 2.0 accepts `READ_ONLY` on ATTACH and ignores it: writes still land.
+        // A flag that promises protection without providing it is worse than none,
+        // so it is refused rather than silently downgraded.
+        if (options.readOnly) {
+            throw new DuckdbQuackError(
+                "Quack 2.0 ignores READ_ONLY on ATTACH — enforce read-only on the server (`authorizationFunction`) instead",
+                "DUCKDB_QUACK_READ_ONLY_UNSUPPORTED",
+            );
+        }
         this.#options = options;
     }
 
@@ -272,14 +297,17 @@ class DuckdbQuackInstance {
 
         const secret = quoteIdent(quack.secret ?? "anteros_quack");
         try {
-            // The secret first: the ATTACH resolves it by type.
-            await this.#connection!.run(`CREATE OR REPLACE SECRET ${secret} (TYPE quack, TOKEN ${quoteLiteral(token)})`);
+            // The secret first: the ATTACH resolves it by type. `SCOPE` pins it to
+            // this server, so another quack URI in the session cannot pick the token up.
+            await this.#connection!.run(
+                `CREATE OR REPLACE SECRET ${secret} (TYPE quack, TOKEN ${quoteLiteral(token)}, SCOPE ${quoteLiteral(quack.url!)})`,
+            );
 
-            // `READ_ONLY` and `DISABLE_SSL` are ATTACH options (Quack's own defaults
-            // are "writable" and "TLS off a local URI").
+            // `DISABLE_SSL` is the one ATTACH transport option still honoured. It is
+            // only spelled out when the caller states it: Quack's default is plain
+            // for a local URI and TLS otherwise, and an explicit `false` forces TLS.
             const attachOptions: string[] = [];
-            if (quack.disableSsl) attachOptions.push("DISABLE_SSL true");
-            if (quack.readOnly) attachOptions.push("READ_ONLY");
+            if (quack.disableSsl !== undefined) attachOptions.push(`DISABLE_SSL ${quack.disableSsl}`);
             const suffix = attachOptions.length ? ` (${attachOptions.join(", ")})` : "";
 
             await this.#connection!.run(
@@ -316,6 +344,8 @@ class DuckdbQuackInstance {
             this.#opening = null;
             this.#tables.clear();
             this.#columns.clear();
+            this.#ftsFields.clear();
+            this.#vssLoaded = false;
             this.#schemaSync = null;
         }
     }
@@ -596,6 +626,9 @@ class DuckdbQuackInstance {
     /** Write documents into a data table — one `data` value and one `ts` per row. */
     async #insertDocuments(table: string, rows: Array<Record<string, unknown>>, tsField?: string): Promise<void> {
         const target = this.#targeted(table);
+        // Against an attached catalog, Quack 2.0 cannot take bind parameters: the
+        // document and the timestamp travel as literals.
+        const remote = this.#options.url !== undefined;
 
         for (let offset = 0; offset < rows.length; offset += INSERT_BATCH) {
             const batch = rows.slice(offset, offset + INSERT_BATCH);
@@ -605,12 +638,16 @@ class DuckdbQuackInstance {
                 const ts = tsField !== undefined && row[tsField] !== undefined
                     ? toWallClock(row[tsField])
                     : formatTimestamp();
+                if (remote) return `(CAST(${sqlLiteral(row)} AS JSON), CAST(${quoteLiteral(ts)} AS TIMESTAMP))`;
                 params.push(bindable(row));
                 params.push(ts);
                 return `(CAST($${params.length - 1} AS JSON), CAST($${params.length} AS TIMESTAMP))`;
             });
 
-            await this.#runWithParams(`INSERT INTO ${target} ("data", "ts") VALUES ${tuples.join(", ")}`, params);
+            await this.#runWithParams(
+                `INSERT INTO ${target} ("data", "ts") VALUES ${tuples.join(", ")}`,
+                remote ? undefined : params,
+            );
         }
     }
 
@@ -628,7 +665,7 @@ class DuckdbQuackInstance {
     }
 
     /** Run a statement with bound values — the SQL this class builds itself. */
-    async #runWithParams(sql: string, values: any[]): Promise<void> {
+    async #runWithParams(sql: string, values?: any[]): Promise<void> {
         const { connection } = await this.raw();
         await connection.run(sql, values);
     }
@@ -638,10 +675,11 @@ class DuckdbQuackInstance {
     /**
      * Run one statement and return its rows.
      *
-     * On an attached instance it runs **on the Quack server** (`quack_query`): the
-     * remote computes, and only the result crosses the wire. A statement with bound
-     * `values` is the one exception — it runs in the **client's** engine, because the
-     * server only receives SQL text and cannot take parameters.
+     * On an attached instance it runs **on the Quack server**
+     * (`quack_query_by_name`): the remote computes, and only the result crosses
+     * the wire. A statement with bound `values` runs in the **client's** engine —
+     * Quack 2.0 cannot carry parameters to a remote catalog, so the values are
+     * inlined as SQL literals before the statement is sent.
      *
      * ```ts
      * await db.exec("SELECT SUM(CAST(data.prix AS INT)) AS total FROM tickets");  // server
@@ -657,8 +695,9 @@ class DuckdbQuackInstance {
         }
 
         const { values } = splitExecArguments(valuesOrOptions);
-        // Everything runs on the Quack server — bound values are the one exception:
-        // the server receives SQL text, it cannot take parameters.
+        // Without values the statement is shipped to the server as text. Values
+        // force the client engine (the server cannot take parameters), where they
+        // are inlined first — see `#execOnClient`.
         if (this.#options.url !== undefined && values === undefined) {
             return this.#execOnRemote(sql);
         }
@@ -666,12 +705,22 @@ class DuckdbQuackInstance {
         return this.#execOnClient(sql, values);
     }
 
-    /** Run the statement in the client's DuckDB engine. */
+    /**
+     * Run the statement in the client's DuckDB engine.
+     *
+     * On an attached instance the values are inlined as SQL literals first: Quack
+     * 2.0 prepares the statement on the remote catalog and does not carry bind
+     * parameters over the wire, so `$1` would fail with "Values were not provided"
+     * even for a purely local expression.
+     */
     async #execOnClient(sql: string, values?: any[] | Record<string, any>): Promise<DuckdbExecResult> {
         const { connection } = await this.raw();
+        const inlined = this.#options.url !== undefined && values !== undefined;
+        const statement = inlined ? inlineParameters(sql, values) : sql;
+        const params = inlined ? undefined : values;
         const started = performance.now();
         try {
-            const reader = await connection.runAndReadAll(sql, values);
+            const reader = await connection.runAndReadAll(statement, params);
             const result = {
                 columns: reader.columnNames(),
                 types: reader.columnTypes().map((type) => String(type)),
@@ -683,22 +732,18 @@ class DuckdbQuackInstance {
         }
     }
 
-    /** Run the statement on the attached Quack server — `quack_query` carries the SQL. */
+    /**
+     * Run the statement on the attached Quack server — `quack_query_by_name`
+     * carries the SQL, so the attachment's connection, token and transport options
+     * are reused instead of being restated on every call.
+     */
     async #execOnRemote(sql: string): Promise<DuckdbExecResult> {
-        const token = this.#options.token ?? Bun.env?.DUCKDB_QUACK_TOKEN ?? process.env?.DUCKDB_QUACK_TOKEN;
-        if (!token) {
-            throw new DuckdbQuackError(
-                "A Quack url was given but no token — pass `token`, or set DUCKDB_QUACK_TOKEN",
-                "DUCKDB_QUACK_TOKEN_REQUIRED",
-            );
-        }
-
         const { connection } = await this.raw();
         const started = performance.now();
         try {
             const reader = await connection.runAndReadAll(
-                `SELECT * FROM quack_query($1, $2, token := $3)`,
-                [this.#options.url, sql, token],
+                `SELECT * FROM quack_query_by_name($1, $2)`,
+                [this.alias, sql],
             );
             const result = {
                 columns: reader.columnNames(),
@@ -754,21 +799,13 @@ class DuckdbQuackInstance {
      */
     async listTables(): Promise<string[]> {
         if (this.#options.url) {
-            const token = this.#options.token ?? Bun.env?.DUCKDB_QUACK_TOKEN ?? process.env?.DUCKDB_QUACK_TOKEN;
-            if (!token) {
-                throw new DuckdbQuackError(
-                    "A Quack url was given but no token — pass `token`, or set DUCKDB_QUACK_TOKEN",
-                    "DUCKDB_QUACK_TOKEN_REQUIRED",
-                );
-            }
-
             const { connection } = await this.raw();
             try {
-                // A quack remote exposes its tables, not its `information_schema`:
-                // one-shot query, no ATTACH needed.
+                // `information_schema` only describes the local catalog, so the
+                // remote's own `duckdb_tables()` is asked through the attachment.
                 const reader = await connection.runAndReadAll(
-                    `SELECT table_name FROM quack_query($1, $2, token := $3) ORDER BY 1`,
-                    [this.#options.url, "SELECT table_name FROM duckdb_tables()", token],
+                    `SELECT table_name FROM quack_query_by_name($1, $2) ORDER BY 1`,
+                    [this.alias, "SELECT table_name FROM duckdb_tables()"],
                 );
                 return (reader.getRowObjectsJson() as any[]).map((row) => String(row.table_name));
             } catch (err: any) {
@@ -784,6 +821,428 @@ class DuckdbQuackInstance {
             `SELECT table_name FROM information_schema.tables WHERE table_catalog = current_database() ORDER BY table_name`,
         );
         return rows.map((row) => String(row.table_name));
+    }
+
+    // ─── Full-text search ─────────────────────────────────────────────────
+
+    /**
+     * Build (or rebuild) a full-text index with DuckDB's `fts` extension.
+     *
+     * On an attached instance the `PRAGMA` runs **on the Quack server**, next to
+     * the table it indexes; the search macro lives in the schema it returns
+     * (`fts_main_<table>`). The extension is autoloaded on first use.
+     *
+     * `overwrite: false` keeps an existing index as it is, and creates it only
+     * when missing — what a restart wants; the default (`true`) rebuilds it.
+     *
+     * ```ts
+     * await db.createFtsIndex("documents", {
+     *     id: "document_identifier",
+     *     fields: ["text_content", "author"],
+     *     stemmer: "english",
+     * });
+     * ```
+     */
+    async createFtsIndex(table: string, options: DuckdbFtsIndexOptions): Promise<DuckdbFtsIndexInfo> {
+        const name = this.#serverTable(table);
+        const id = normaliseName(options?.id);
+        const fields = options?.fields;
+        const indexed = fields === "*"
+            ? ["*"]
+            : typeof fields === "string"
+                ? [normaliseName(fields)]
+                : Array.isArray(fields)
+                    ? fields.map((field) => normaliseName(field))
+                    : [];
+
+        if (!indexed.length) {
+            throw new DuckdbQuackError(
+                "`createFtsIndex` needs `fields` — one column name, a list, or '*'",
+                "DUCKDB_FTS_FIELDS_REQUIRED",
+            );
+        }
+
+        const index = ftsSchemaName(name);
+        const overwrite = options.overwrite ?? true;
+
+        // `overwrite: false` means "keep what is there": DuckDB itself would error
+        // on an existing index instead of skipping it.
+        if (!overwrite && await this.#ftsIndexExists(index)) {
+            this.#ftsFields.delete(name);
+            return { table: name, index };
+        }
+
+        // PRAGMA arguments are literals; named ones use `=`, not `:=`.
+        const args = [quoteLiteral(name), quoteLiteral(id), ...indexed.map(quoteLiteral)];
+        args.push(`overwrite = ${overwrite}`);
+
+        if (options.stemmer !== undefined) args.push(`stemmer = ${quoteLiteral(options.stemmer)}`);
+        if (options.stopwords !== undefined) args.push(`stopwords = ${quoteLiteral(options.stopwords)}`);
+        if (options.ignore !== undefined) args.push(`ignore = ${quoteLiteral(options.ignore)}`);
+        if (options.stripAccents !== undefined) args.push(`strip_accents = ${options.stripAccents === true}`);
+        if (options.lower !== undefined) args.push(`lower = ${options.lower === true}`);
+        if (options.incremental !== undefined) args.push(`incremental = ${options.incremental === true}`);
+
+        await this.exec(`PRAGMA create_fts_index(${args.join(", ")})`);
+        this.#ftsFields.delete(name);
+        return { table: name, index };
+    }
+
+    /** Drop the full-text index of a table; `dropped: false` when there was none. */
+    async dropFtsIndex(table: string): Promise<DuckdbFtsDropResult> {
+        const name = this.#serverTable(table);
+        try {
+            await this.exec(`PRAGMA drop_fts_index(${quoteLiteral(name)})`);
+            this.#ftsFields.delete(name);
+            return { table: name, dropped: true };
+        } catch (err: any) {
+            if (/does not exist/i.test(String(err?.message ?? ""))) {
+                this.#ftsFields.delete(name);
+                return { table: name, dropped: false };
+            }
+            throw err;
+        }
+    }
+
+    /**
+     * Search a full-text index, best match first — `score` is the BM25 score.
+     *
+     * ```ts
+     * const { rows } = await db.searchFts("documents", "small cats", {
+     *     id: "document_identifier",
+     *     limit: 10,
+     * });
+     * ```
+     *
+     * On an attached instance the search runs **on the Quack server**, where the
+     * index lives. `match_bm25` takes the identifier **column**, not its name as a
+     * string — the method quotes the column for you.
+     *
+     * `fields` is validated against the index's own field list, so a typo fails
+     * with `DUCKDB_FTS_FIELD_UNKNOWN` instead of an empty result.
+     */
+    async searchFts(table: string, query: string, options: DuckdbFtsSearchOptions): Promise<DuckdbFtsSearchResult> {
+        const name = this.#serverTable(table);
+        const id = normaliseName(options?.id);
+        const text = String(query ?? "").trim();
+        if (!text) {
+            throw new DuckdbQuackError("`searchFts` needs a query string", "DUCKDB_FTS_QUERY_REQUIRED");
+        }
+
+        const match = [quoteIdent(id), quoteLiteral(text)];
+
+        if (options.fields !== undefined) {
+            const requested = fieldList(options.fields);
+            if (!requested.length) {
+                throw new DuckdbQuackError("`searchFts` got an empty `fields` option", "DUCKDB_FTS_OPTION_INVALID");
+            }
+
+            // `fields: '*'` means "all indexed fields" — no `fields` argument and
+            // no validation. Anything else must be one of the indexed columns.
+            if (!(requested.length === 1 && requested[0] === "*")) {
+                const indexed = await this.#ftsFieldsFor(name, ftsSchemaName(name));
+                const unknown = requested.filter((field) => !indexed.has(field));
+                if (unknown.length) {
+                    throw new DuckdbQuackError(
+                        `Unknown full-text field(s) ${unknown.map((field) => `'${field}'`).join(", ")} — indexed: ${[...indexed].join(", ")}`,
+                        "DUCKDB_FTS_FIELD_UNKNOWN",
+                    );
+                }
+                match.push(`fields := ${quoteLiteral(requested.join(", "))}`);
+            }
+        }
+
+        if (options.k !== undefined) match.push(`k := ${finiteNumber(options.k, "k")}`);
+        if (options.b !== undefined) match.push(`b := ${finiteNumber(options.b, "b")}`);
+        if (options.conjunctive !== undefined) match.push(`conjunctive := ${options.conjunctive === true}`);
+
+        if (options.select !== undefined && !Array.isArray(options.select)) {
+            throw new DuckdbQuackError("`select` takes an array of column names", "DUCKDB_FTS_OPTION_INVALID");
+        }
+        const selected = (options.select ?? []).map((column) => normaliseName(column));
+        let projection: string;
+        if (selected.length === 0 || selected.includes("*")) {
+            projection = "*";
+        } else {
+            // `score` is always appended; listing it would produce `score, score`.
+            const columns = selected.filter((column) => column.toLowerCase() !== "score");
+            projection = columns.length
+                ? `${columns.map((column) => quoteIdent(column)).join(", ")}, score`
+                : "score";
+        }
+
+        const conditions = ["score IS NOT NULL"];
+        if (options.where !== undefined && String(options.where).trim()) {
+            // A raw SQL predicate by design: callers must not pass untrusted input.
+            conditions.push(`(${String(options.where).trim()})`);
+        }
+
+        const requestedLimit = options.limit === undefined ? FTS_DEFAULT_LIMIT : finiteNumber(options.limit, "limit");
+        if (requestedLimit < 0) {
+            throw new DuckdbQuackError("`limit` cannot be negative", "DUCKDB_FTS_OPTION_INVALID");
+        }
+        const limit = requestedLimit > 0 ? ` LIMIT ${Math.trunc(requestedLimit)}` : "";
+
+        // The index schema and the table are server-side names: run the search
+        // through `exec` (which goes to the server when attached).
+        const sql = `SELECT ${projection}
+                       FROM (
+                         SELECT *, ${quoteIdent(ftsSchemaName(name))}.match_bm25(${match.join(", ")}) AS score
+                           FROM ${quotePath(name)}
+                       ) sq
+                      WHERE ${conditions.join(" AND ")}
+                      ORDER BY score DESC${limit}`;
+
+        const { rows, duration_ms } = await this.exec(sql);
+        return { table: name, query: text, rows, duration_ms };
+    }
+
+    /** The fields of an index, cached — read from the FTS schema DuckDB created. */
+    async #ftsFieldsFor(table: string, index: string): Promise<Set<string>> {
+        const cached = this.#ftsFields.get(table);
+        if (cached) return cached;
+
+        let rows: Record<string, unknown>[];
+        try {
+            ({ rows } = await this.exec(`SELECT field FROM ${quoteIdent(index)}.fields`));
+        } catch (err: any) {
+            throw new DuckdbQuackError(
+                `No full-text index on '${table}' — create it with \`createFtsIndex\``,
+                "DUCKDB_FTS_INDEX_MISSING",
+                err,
+            );
+        }
+
+        const fields = new Set(rows.map((row) => String(row.field)));
+        this.#ftsFields.set(table, fields);
+        return fields;
+    }
+
+    /** Whether the FTS schema exists — on the server when attached. */
+    async #ftsIndexExists(index: string): Promise<boolean> {
+        const { rows } = await this.exec(
+            `SELECT count(*) AS n FROM duckdb_schemas() WHERE schema_name = ${quoteLiteral(index)}`,
+        );
+        return Number(rows[0]?.n ?? 0) > 0;
+    }
+
+    /** The table name as the **server** knows it: the client alias is stripped. */
+    #serverTable(table: string): string {
+        const parts = parsePath(table);
+        if (this.#options.url !== undefined && parts.length >= 2 && parts[0] === this.alias) {
+            parts.shift();
+        }
+        return parts.join(".");
+    }
+
+    // ─── Vector similarity search ─────────────────────────────────────────
+
+    /**
+     * Build (or rebuild) an HNSW index on a `FLOAT[N]` column.
+     *
+     * `vss` is **not autoloaded** like `fts`: the first call runs `LOAD vss`
+     * (installing it if needed) on the instance — on the Quack server when
+     * attached. A **file** database needs `persist: true` (or the server option
+     * `vssPersist`); DuckDB marks that persistence as experimental.
+     *
+     * ```ts
+     * await db.createVssIndex("embeddings", { column: "vec", metric: "cosine" });
+     * ```
+     */
+    async createVssIndex(table: string, options: DuckdbVssIndexOptions): Promise<DuckdbVssIndexInfo> {
+        const name = this.#serverTable(table);
+        const column = normaliseName(options?.column);
+        const metric = vssMetric(options?.metric);
+        const index = normaliseName(options?.name ?? vssIndexName(name, column));
+        const overwrite = options.overwrite ?? true;
+
+        await this.#ensureVss();
+        if (options.persist) {
+            // `SET GLOBAL` so the statement that builds the index sees it, including
+            // through `quack_query_by_name`.
+            await this.exec("SET GLOBAL hnsw_enable_experimental_persistence = true");
+        }
+
+        if (!overwrite && await this.#vssIndexExists(name, index)) {
+            return { table: name, index, metric };
+        }
+        if (overwrite) {
+            await this.exec(`DROP INDEX IF EXISTS ${quotePath(vssIndexRef(name, index))}`);
+        }
+
+        const withOptions = [`metric = ${quoteLiteral(metric)}`];
+        if (options.efConstruction !== undefined) {
+            withOptions.push(`ef_construction = ${Math.trunc(finiteNumber(options.efConstruction, "efConstruction"))}`);
+        }
+        if (options.efSearch !== undefined) {
+            withOptions.push(`ef_search = ${Math.trunc(finiteNumber(options.efSearch, "efSearch"))}`);
+        }
+        if (options.m !== undefined) {
+            withOptions.push(`M = ${Math.trunc(finiteNumber(options.m, "m"))}`);
+        }
+        if (options.m0 !== undefined) {
+            withOptions.push(`M0 = ${Math.trunc(finiteNumber(options.m0, "m0"))}`);
+        }
+
+        await this.exec(
+            `CREATE INDEX ${quoteIdent(index)} ON ${quotePath(name)} USING HNSW (${quoteIdent(column)}) WITH (${withOptions.join(", ")})`,
+        );
+        return { table: name, index, metric };
+    }
+
+    /**
+     * Drop an HNSW index. Give its `name`, or its `column` — the default name is
+     * derived from both.
+     */
+    async dropVssIndex(
+        table: string,
+        options: { column?: string; name?: string } = {},
+    ): Promise<DuckdbVssDropResult> {
+        const name = this.#serverTable(table);
+        if (options.name === undefined && options.column === undefined) {
+            throw new DuckdbQuackError(
+                "`dropVssIndex` needs the index `name`, or the indexed `column`",
+                "DUCKDB_VSS_INDEX_REQUIRED",
+            );
+        }
+        const index = normaliseName(options.name ?? vssIndexName(name, normaliseName(options.column!)));
+
+        await this.#ensureVss();
+        const existed = await this.#vssIndexExists(name, index);
+        if (existed) await this.exec(`DROP INDEX IF EXISTS ${quotePath(vssIndexRef(name, index))}`);
+        return { table: name, index, dropped: existed };
+    }
+
+    /**
+     * Nearest neighbours of `vector`, closest first — `distance` is appended to
+     * every row.
+     *
+     * ```ts
+     * const { rows } = await db.searchVss("embeddings", [0.1, 0.2, 0.3], {
+     *     column: "vec",
+     *     metric: "cosine",
+     *     limit: 5,
+     * });
+     * ```
+     *
+     * The HNSW index accelerates the query only when the metric matches the index,
+     * and the shape is `ORDER BY <distance>(col, constant) LIMIT n`. A `where`
+     * predicate is allowed but may make the planner fall back to a scan.
+     */
+    async searchVss(
+        table: string,
+        vector: number[],
+        options: DuckdbVssSearchOptions,
+    ): Promise<DuckdbVssSearchResult> {
+        const name = this.#serverTable(table);
+        const column = normaliseName(options?.column);
+        const metric = vssMetric(options?.metric);
+        const sqlVector = vssVector(vector);
+        const distance = `${vssDistanceFunction(metric)}(${quoteIdent(column)}, ${sqlVector})`;
+
+        const limit = options.limit === undefined ? VSS_DEFAULT_LIMIT : Math.trunc(finiteNumber(options.limit, "limit"));
+        if (limit <= 0) {
+            throw new DuckdbQuackError("`limit` must be greater than 0", "DUCKDB_VSS_OPTION_INVALID");
+        }
+
+        if (options.select !== undefined && !Array.isArray(options.select)) {
+            throw new DuckdbQuackError("`select` takes an array of column names", "DUCKDB_VSS_OPTION_INVALID");
+        }
+        const selected = (options.select ?? []).map((columnName) => normaliseName(columnName));
+        let projection: string;
+        if (selected.length === 0 || selected.includes("*")) {
+            projection = "*";
+        } else {
+            const columns = selected.filter((columnName) => columnName.toLowerCase() !== "distance");
+            projection = columns.length
+                ? `${columns.map((columnName) => quoteIdent(columnName)).join(", ")}, ${distance} AS distance`
+                : `${distance} AS distance`;
+        }
+        // `*` already carries the source columns; append the distance once.
+        if (projection === "*") projection = `*, ${distance} AS distance`;
+
+        const conditions: string[] = [];
+        if (options.where !== undefined && String(options.where).trim()) {
+            // A raw SQL predicate by design: callers must not pass untrusted input.
+            conditions.push(`(${String(options.where).trim()})`);
+        }
+
+        await this.#ensureVss();
+
+        const sql = `SELECT ${projection}
+                       FROM ${quotePath(name)}
+                      ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
+                      ORDER BY ${distance}
+                      LIMIT ${limit}`;
+
+        const { rows, duration_ms } = await this.exec(sql);
+        return { table: name, column, metric, rows, duration_ms };
+    }
+
+    /** Load `vss` once per instance — installing it if it is not there. */
+    async #ensureVss(): Promise<void> {
+        if (this.#vssLoaded) return;
+        try {
+            await this.exec("LOAD vss");
+        } catch {
+            await this.exec("INSTALL vss");
+            await this.exec("LOAD vss");
+        }
+        this.#vssLoaded = true;
+    }
+
+    /** Whether an index with that name exists in the table's schema. */
+    async #vssIndexExists(table: string, index: string): Promise<boolean> {
+        const parts = parsePath(table);
+        const schema = parts.length >= 2 ? parts[parts.length - 2]! : "main";
+        const { rows } = await this.exec(
+            `SELECT count(*) AS n FROM duckdb_indexes() WHERE index_name = ${quoteLiteral(index)} AND schema_name = ${quoteLiteral(schema)}`,
+        );
+        return Number(rows[0]?.n ?? 0) > 0;
+    }
+
+    // ─── Session variables ────────────────────────────────────────────────
+
+    /**
+     * Set a session variable (`SET VARIABLE name = value`).
+     *
+     * Scalars are passed as SQL literals: string, number, boolean, `null`, and
+     * `Date` (as `TIMESTAMP`). For a DuckDB list, map or a query result, run the
+     * statement yourself — `db.exec("SET VARIABLE files = (SELECT list(...) …)")`.
+     *
+     * On an attached instance the statement runs **on the Quack server**, and the
+     * variable stays for the following `exec` calls (session scope).
+     */
+    async setVariable(name: string, value: unknown): Promise<{ name: string }> {
+        const variable = normaliseName(name);
+        await this.exec(`SET VARIABLE ${quoteIdent(variable)} = ${variableLiteral(value)}`);
+        return { name: variable };
+    }
+
+    /** Read a session variable; `null` when it is not set (`getvariable`). */
+    async getVariable(name: string): Promise<unknown> {
+        const variable = normaliseName(name);
+        const { rows } = await this.exec(`SELECT getvariable(${quoteLiteral(variable)}) AS value`);
+        return rows[0]?.value ?? null;
+    }
+
+    /** Unset a session variable (`RESET VARIABLE`). */
+    async resetVariable(name: string): Promise<{ name: string }> {
+        const variable = normaliseName(name);
+        await this.exec(`RESET VARIABLE ${quoteIdent(variable)}`);
+        return { name: variable };
+    }
+
+    /** Every session variable with its type (`duckdb_variables()`). */
+    async listVariables(): Promise<DuckdbVariable[]> {
+        const { rows } = await this.exec(
+            "SELECT name, value, type FROM duckdb_variables() ORDER BY name",
+        );
+        return rows.map((row) => ({
+            name: String(row.name),
+            value: row.value === null || row.value === undefined ? null : String(row.value),
+            type: String(row.type),
+        }));
     }
 
     async #exists(connection: DuckDBConnection, table: string): Promise<boolean> {
@@ -903,6 +1362,9 @@ class DuckdbQuackInstance {
         rows: Array<Record<string, unknown>>,
     ): Promise<void> {
         const names = columns.map((column) => quoteIdent(column.name)).join(", ");
+        // Against an attached catalog, Quack 2.0 cannot take bind parameters: the
+        // values travel as literals, cast to the column's type.
+        const remote = this.#options.url !== undefined;
 
         for (let offset = 0; offset < rows.length; offset += INSERT_BATCH) {
             const batch = rows.slice(offset, offset + INSERT_BATCH);
@@ -913,13 +1375,14 @@ class DuckdbQuackInstance {
                 // The event-log defaults: a row may omit the time and the id.
                 if (value === undefined && column.name === "ts") value = formatTimestamp();
                 if (value === undefined && column.name === "id") value = crypto.randomUUID();
+                if (remote) return `CAST(${sqlLiteral(value)} AS ${column.sql})`;
                 params.push(bindable(value));
                 return `CAST($${params.length} AS ${column.sql})`;
             }).join(", ")})`);
 
             await connection.run(
                 `INSERT INTO ${this.#targeted(table)} (${names}) VALUES ${tuples.join(", ")}`,
-                params,
+                remote ? undefined : params,
             );
         }
     }
@@ -965,6 +1428,8 @@ class DuckdbQuackServer {
 
     #options: QuackServerOptions;
     #running = false;
+    #listenUri: string | null = null;
+    #listenUrl: string | null = null;
 
     constructor(options: QuackServerOptions) {
         const token = String(options?.token ?? "");
@@ -982,13 +1447,27 @@ class DuckdbQuackServer {
                 "DUCKDB_QUACK_TOKEN_TOO_SHORT",
             );
         }
+        if ((options.sslCertFile === undefined) !== (options.sslKeyFile === undefined)) {
+            throw new DuckdbQuackError(
+                "`sslCertFile` and `sslKeyFile` go together — pass both, or neither",
+                "DUCKDB_QUACK_SSL_INCOMPLETE",
+            );
+        }
+        if (options.disableSsl === true && options.sslCertFile !== undefined) {
+            throw new DuckdbQuackError(
+                "A plain-HTTP server cannot serve a certificate — drop `disableSsl`, or drop the TLS files",
+                "DUCKDB_QUACK_SSL_CONFLICT",
+            );
+        }
 
         this.#options = options;
         // The server is a client that attaches nothing: same engine, same SQL.
         this.db = new DuckdbQuackInstance({
             // A Quack server owns its database — the one place a file is right.
             dbPath: options.dbPath,
-            options: options.options,
+            options: options.vssPersist
+                ? { ...options.options, hnsw_enable_experimental_persistence: "true" }
+                : options.options,
             columns: options.columns,
             tables: options.tables,
             onError: options.onError,
@@ -1005,9 +1484,22 @@ class DuckdbQuackServer {
         return this.#options.host ?? "127.0.0.1";
     }
 
+    /**
+     * The protocol URI the server actually listens on — what `quack_serve`
+     * returned, or `'quack:host:port'` before it starts.
+     */
+    get listenUri(): string {
+        return this.#listenUri ?? `quack:${this.host}:${this.port}`;
+    }
+
+    /** The HTTP(S) URL behind the protocol, once the server is running. */
+    get listenUrl(): string | undefined {
+        return this.#listenUrl ?? undefined;
+    }
+
     /** What a client hands to `DuckdbQuackInstance` — `'quack:host:port'`. */
     get url(): string {
-        return `quack:${this.host}:${this.port}`;
+        return this.listenUri;
     }
 
     /** The token clients must present. */
@@ -1033,14 +1525,38 @@ class DuckdbQuackServer {
         try {
             await this.#applySettings();
 
-            // Named arguments: `quack_serve(uri, token := …, allow_other_hostname := …, disable_ssl := …)`.
+            // Full-text indexes are built before the port opens: a client that
+            // attaches can search immediately.
+            for (const index of this.#options.ftsIndexes ?? []) {
+                await this.db.createFtsIndex(index.table, index);
+            }
+            for (const index of this.#options.vssIndexes ?? []) {
+                await this.db.createVssIndex(index.table, index);
+            }
+
+            // Named arguments: `quack_serve(uri, token := …)`. The transport is only
+            // stated when the caller chose one: Quack's default is plain for a local
+            // URI and TLS otherwise, while an explicit `disable_ssl := false` forces
+            // TLS even on localhost.
             const args = [
                 quoteLiteral(this.url),
                 `token := ${quoteLiteral(this.token)}`,
                 `allow_other_hostname := ${this.#options.allowOtherHostname === true}`,
-                `disable_ssl := ${this.#options.disableSsl === true}`,
             ];
-            await this.db.exec(`CALL quack_serve(${args.join(", ")})`);
+            if (this.#options.disableSsl !== undefined) {
+                args.push(`disable_ssl := ${this.#options.disableSsl}`);
+            }
+            if (this.#options.sslCertFile !== undefined) {
+                args.push(`ssl_cert_file := ${quoteLiteral(this.#options.sslCertFile)}`);
+                args.push(`ssl_key_file := ${quoteLiteral(this.#options.sslKeyFile!)}`);
+            }
+
+            // The return value is what the server really bound: keep it rather than
+            // recomputing the URL from the options.
+            const { rows } = await this.db.exec(`CALL quack_serve(${args.join(", ")})`);
+            const served = rows[0] as { listen_uri?: unknown; listen_url?: unknown } | undefined;
+            if (served?.listen_uri !== undefined) this.#listenUri = String(served.listen_uri);
+            if (served?.listen_url !== undefined) this.#listenUrl = String(served.listen_url);
         } catch (err: any) {
             await this.db.close();
             throw new DuckdbQuackError(
@@ -1058,8 +1574,8 @@ class DuckdbQuackServer {
     async #applySettings(): Promise<void> {
         const options = this.#options;
 
-        if (options.fetchBatchChunks !== undefined) {
-            await this.db.exec(`SET GLOBAL quack_fetch_batch_chunks = ${Number(options.fetchBatchChunks)}`);
+        if (options.targetBatchBytes !== undefined) {
+            await this.db.exec(`SET GLOBAL quack_target_batch_bytes = ${Number(options.targetBatchBytes)}`);
         }
         if (options.authenticationFunction) {
             await this.db.exec(`SET GLOBAL quack_authentication_function = ${quoteLiteral(options.authenticationFunction)}`);
@@ -1089,12 +1605,14 @@ class DuckdbQuackServer {
 
         if (wasRunning) {
             try {
-                await this.db.exec(`CALL quack_stop(${quoteLiteral(this.url)})`);
+                await this.db.exec(`CALL quack_stop(${quoteLiteral(this.listenUri)})`);
             } catch {
                 // Already gone — closing the instance releases the rest.
             }
         }
 
+        this.#listenUri = null;
+        this.#listenUrl = null;
         await this.db.close();
     }
 }
@@ -1119,6 +1637,12 @@ const INSERT_BATCH = 500;
 
 /** Quack's own default port. */
 const DEFAULT_PORT = 9494;
+
+/** Rows returned by `searchFts` when no `limit` is given (`0` disables the cap). */
+const FTS_DEFAULT_LIMIT = 100;
+
+/** Neighbours returned by `searchVss` when no `limit` is given. */
+const VSS_DEFAULT_LIMIT = 10;
 
 // ─── Errors ───────────────────────────────────────────────────────────────
 
@@ -1170,6 +1694,126 @@ function quoteIdent(name: string): string {
 /** A SQL string literal, escaped — used for a token or a URL, never for a value. */
 function quoteLiteral(value: string): string {
     return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+/** A possibly qualified name (`schema.table`), each part quoted. */
+/**
+ * Split a possibly-qualified name into bare parts, respecting double quotes:
+ * `main.documents`, `"main"."documents"` and `"my.table"` all work.
+ */
+function parsePath(name: string): string[] {
+    const parts: string[] = [];
+    let current = "";
+    let quoted = false;
+
+    for (let index = 0; index < name.length; index++) {
+        const ch = name[index]!;
+        if (ch === '"') {
+            if (quoted && name[index + 1] === '"') {
+                current += '"';
+                index++;
+            } else {
+                quoted = !quoted;
+            }
+            continue;
+        }
+        if (ch === "." && !quoted) {
+            parts.push(current);
+            current = "";
+            continue;
+        }
+        current += ch;
+    }
+    parts.push(current);
+
+    return parts.map((part) => normaliseName(part.trim()));
+}
+
+/** A possibly qualified name (`schema.table`), each part quoted. */
+function quotePath(name: string): string {
+    return parsePath(name).map((part) => quoteIdent(part)).join(".");
+}
+
+/**
+ * The schema DuckDB's `fts` extension creates for a table: `fts_<schema>_<table>`
+ * (`fts_main_documents` for `documents` or `main.documents`).
+ */
+function ftsSchemaName(table: string): string {
+    const parts = parsePath(table);
+    const name = parts[parts.length - 1]!;
+    const schema = parts.length >= 2 ? parts[parts.length - 2]! : "main";
+    return `fts_${schema}_${name}`;
+}
+
+/** A comma-separated field list, trimmed and normalised. */
+function fieldList(value: string | string[]): string[] {
+    const parts = Array.isArray(value) ? value : String(value).split(",");
+    return parts
+        .map((part) => String(part).trim())
+        .filter((part) => part.length > 0)
+        .map((part) => normaliseName(part));
+}
+
+/** A supported VSS metric, validated (`l2sq`, `cosine`, `ip`). */
+function vssMetric(value?: string | null): DuckdbVssMetric {
+    const metric = String(value ?? "l2sq").toLowerCase();
+    if (metric !== "l2sq" && metric !== "cosine" && metric !== "ip") {
+        throw new DuckdbQuackError(
+            `Unknown VSS metric '${metric}' — use 'l2sq', 'cosine' or 'ip'`,
+            "DUCKDB_VSS_METRIC_INVALID",
+        );
+    }
+    return metric;
+}
+
+/** The DuckDB function that computes the distance for a metric. */
+function vssDistanceFunction(metric: DuckdbVssMetric): string {
+    if (metric === "cosine") return "array_cosine_distance";
+    if (metric === "ip") return "array_negative_inner_product";
+    return "array_distance";
+}
+
+/** The default HNSW index name for a column. */
+function vssIndexName(table: string, column: string): string {
+    const parts = parsePath(table);
+    const tableName = parts[parts.length - 1]!;
+    return `vss_${tableName}_${column}`.replace(/[^a-z0-9_]/gi, "_").toLowerCase();
+}
+
+/** The index name qualified with the table's schema, for `DROP INDEX`. */
+function vssIndexRef(table: string, index: string): string {
+    const parts = parsePath(table);
+    return parts.length >= 2 ? `${parts[parts.length - 2]}.${index}` : index;
+}
+
+/** A `CAST([…] AS FLOAT[N])` literal, with a validated, finite vector. */
+function vssVector(vector: unknown): string {
+    if (!Array.isArray(vector) || !vector.length) {
+        throw new DuckdbQuackError(
+            "`searchVss` needs a non-empty array of numbers",
+            "DUCKDB_VSS_VECTOR_REQUIRED",
+        );
+    }
+    const values = vector.map((value) => {
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed)) {
+            throw new DuckdbQuackError(
+                "A VSS vector must contain finite numbers",
+                "DUCKDB_VSS_VECTOR_INVALID",
+            );
+        }
+        return parsed;
+    });
+    return `CAST([${values.join(", ")}] AS FLOAT[${values.length}])`;
+}
+
+/** A finite number, for a BM25 parameter or a limit. */
+function finiteNumber(value: unknown, option: string): number {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+        throw new DuckdbQuackError(`\`${option}\` must be a finite number`, "DUCKDB_FTS_OPTION_INVALID");
+    }
+    return parsed;
 }
 
 function columnSql(column: DuckdbColumn): string {
@@ -1242,6 +1886,149 @@ function bindable(value: unknown): any {
     if (value instanceof Date) return formatTimestamp(value);
     if (value !== null && typeof value === "object") return JSON.stringify(value);
     return value as any;
+}
+
+/**
+ * A JS value as a SQL literal — the form Quack 2.0 requires when it cannot take
+ * bound parameters (an attached catalog). Strings are escaped, numbers checked,
+ * objects serialised the same way `bindable` does.
+ */
+function sqlLiteral(value: unknown): string {
+    if (value === undefined || value === null) return "NULL";
+    if (value instanceof Date) return quoteLiteral(formatTimestamp(value));
+    if (typeof value === "number") {
+        if (!Number.isFinite(value)) {
+            throw new DuckdbQuackError(`Cannot inline '${value}' as a SQL value`, "DUCKDB_PARAMETER_INVALID");
+        }
+        return String(value);
+    }
+    if (typeof value === "bigint") return value.toString();
+    if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+    if (typeof value === "string") return quoteLiteral(value);
+    if (typeof value === "object") return quoteLiteral(JSON.stringify(value));
+    return quoteLiteral(String(value));
+}
+
+/** A JS value as a `SET VARIABLE` literal — a `Date` becomes a `TIMESTAMP`. */
+function variableLiteral(value: unknown): string {
+    if (value instanceof Date) return `TIMESTAMP '${formatTimestamp(value)}'`;
+    return sqlLiteral(value);
+}
+
+/**
+ * Replace `$1`/`$name` parameters with SQL literals, skipping what is not code:
+ * quoted strings and identifiers, dollar-quoted strings, and comments.
+ *
+ * Quack 2.0 prepares a statement against the attached catalog and does not send
+ * bind values with it, so this is the only way to keep `exec(sql, values)` working
+ * on an attached instance.
+ */
+function inlineParameters(sql: string, values: any[] | Record<string, any>): string {
+    const positional = Array.isArray(values);
+    const named = positional ? undefined : values;
+    let out = "";
+    let index = 0;
+
+    const copyQuoted = (quote: string) => {
+        out += quote;
+        index++;
+        while (index < sql.length) {
+            const ch = sql[index]!;
+            out += ch;
+            index++;
+            if (ch === quote) {
+                // A doubled quote is an escaped one, not the end.
+                if (sql[index] === quote) {
+                    out += quote;
+                    index++;
+                    continue;
+                }
+                break;
+            }
+        }
+    };
+
+    while (index < sql.length) {
+        const ch = sql[index]!;
+
+        if (ch === "'" || ch === '"') {
+            copyQuoted(ch);
+            continue;
+        }
+
+        if (ch === "-" && sql[index + 1] === "-") {
+            while (index < sql.length && sql[index] !== "\n") {
+                out += sql[index];
+                index++;
+            }
+            continue;
+        }
+
+        if (ch === "/" && sql[index + 1] === "*") {
+            out += "/*";
+            index += 2;
+            while (index < sql.length && !(sql[index] === "*" && sql[index + 1] === "/")) {
+                out += sql[index];
+                index++;
+            }
+            if (index < sql.length) {
+                out += "*/";
+                index += 2;
+            }
+            continue;
+        }
+
+        if (ch === "$") {
+            const rest = sql.slice(index);
+
+            // Dollar-quoted string — `$$ … $$` or `$tag$ … $tag$`.
+            const dollar = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(rest);
+            if (dollar) {
+                const tag = dollar[0];
+                const end = sql.indexOf(tag, index + tag.length);
+                if (end === -1) {
+                    out += rest;
+                    index = sql.length;
+                } else {
+                    out += sql.slice(index, end + tag.length);
+                    index = end + tag.length;
+                }
+                continue;
+            }
+
+            // Positional — `$1`, `$2` …
+            const position = /^\$(\d+)/.exec(rest);
+            if (position) {
+                if (!positional) {
+                    throw new DuckdbQuackError("Positional parameters need an array of values", "DUCKDB_PARAMETER_INVALID");
+                }
+                const n = Number(position[1]);
+                if (n < 1 || n > values.length) {
+                    throw new DuckdbQuackError(`Missing value for parameter $${n}`, "DUCKDB_PARAMETER_MISSING");
+                }
+                out += sqlLiteral(values[n - 1]);
+                index += position[0].length;
+                continue;
+            }
+
+            // Named — `$name`. When the caller did not supply it, leave the token
+            // for DuckDB 2.0's session-variable shorthand (`SET VARIABLE name = …`).
+            const name = /^\$([A-Za-z_][A-Za-z0-9_]*)/.exec(rest);
+            if (name) {
+                const key = name[1]!;
+                if (named && Object.prototype.hasOwnProperty.call(named, key)) {
+                    out += sqlLiteral(named[key]);
+                    index += name[0].length;
+                    continue;
+                }
+            }
+        }
+
+        out += ch;
+        index++;
+    }
+
+    return out;
 }
 
 /**

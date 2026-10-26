@@ -230,6 +230,247 @@ describe("@anteros/duckdb — local instance", () => {
         expect(await db.ingest({ table: "logs", rows: [] })).toEqual({ table: "logs", queued: 0 });
         await db.close();
     });
+
+    it("builds a full-text index and searches it", async () => {
+        const db = new DuckdbQuackInstance();
+        await db.createTable("fts_docs", [
+            { name: "document_identifier", type: "string", primaryKey: true },
+            { name: "text_content", type: "string" },
+            { name: "author", type: "string" },
+            { name: "doc_version", type: "INTEGER" },
+        ]);
+        await db.ingest({
+            table: "fts_docs",
+            rows: [
+                { document_identifier: "doc1", text_content: "The mallard is a dabbling duck.", author: "Hannes Mühleisen", doc_version: 3 },
+                { document_identifier: "doc2", text_content: "The cat is a small carnivorous mammal.", author: "Laurens Kuiper", doc_version: 2 },
+            ],
+        });
+        await db.flush();
+
+        const index = await db.createFtsIndex("fts_docs", {
+            id: "document_identifier",
+            fields: ["text_content", "author"],
+            stemmer: "english",
+        });
+        expect(index).toEqual({ table: "fts_docs", index: "fts_main_fts_docs" });
+
+        const byText = await db.searchFts("fts_docs", "small cats", { id: "document_identifier" });
+        expect(byText.rows.map((row) => row.document_identifier)).toEqual(["doc2"]);
+        expect(Number(byText.rows[0]!.score)).toBeGreaterThan(0);
+
+        const byAuthor = await db.searchFts("fts_docs", "Muhleisen", {
+            id: "document_identifier",
+            fields: "author",
+            select: ["document_identifier", "author"],
+            where: "doc_version > 2",
+            limit: 5,
+        });
+        expect(byAuthor.rows).toEqual([
+            { document_identifier: "doc1", author: "Hannes Mühleisen", score: expect.any(Number) },
+        ]);
+
+        // A typo in `fields` is an error, not an empty result.
+        await expect(db.searchFts("fts_docs", "cats", { id: "document_identifier", fields: "unknown" }))
+            .rejects.toThrow(/Unknown full-text field/i);
+
+        // `select` is an array of column names — never raw SQL.
+        await expect(db.searchFts("fts_docs", "cats", { id: "document_identifier", select: "text_content" as any }))
+            .rejects.toThrow(/array of column names/i);
+
+        // `score` is appended once, even when selected.
+        const scored = await db.searchFts("fts_docs", "cats", {
+            id: "document_identifier",
+            select: ["document_identifier", "score"],
+        });
+        expect(Object.keys(scored.rows[0]!)).toEqual(["document_identifier", "score"]);
+
+        // `overwrite: false` keeps the existing index: `author` is still searchable
+        // even though the second declaration only names `text_content`.
+        await db.createFtsIndex("fts_docs", {
+            id: "document_identifier",
+            fields: ["text_content"],
+            overwrite: false,
+        });
+        expect((await db.searchFts("fts_docs", "Muhleisen", {
+            id: "document_identifier",
+            fields: "author",
+        })).rows.map((row) => row.document_identifier)).toEqual(["doc1"]);
+
+        expect(await db.dropFtsIndex("fts_docs")).toEqual({ table: "fts_docs", dropped: true });
+        expect(await db.dropFtsIndex("fts_docs")).toEqual({ table: "fts_docs", dropped: false });
+
+        await db.close();
+    }, 120_000);
+
+    it("keeps an incremental index current across ingest", async () => {
+        const db = new DuckdbQuackInstance();
+        await db.createTable("fts_live", [
+            { name: "id", type: "string", primaryKey: true },
+            { name: "body", type: "string" },
+            { name: "author", type: "string" },
+        ]);
+        await db.ingest({ table: "fts_live", rows: [{ id: "d1", body: "The cat is a small mammal.", author: "Alice" }] });
+        await db.flush();
+
+        // `*` indexes every VARCHAR column; `incremental` installs the triggers.
+        await db.createFtsIndex("fts_live", { id: "id", fields: "*", incremental: true });
+        expect((await db.searchFts("fts_live", "mallard", { id: "id" })).rows).toEqual([]);
+
+        await db.ingest({ table: "fts_live", rows: [{ id: "d2", body: "The mallard is a dabbling duck.", author: "Bob" }] });
+        await db.flush();
+
+        const found = await db.searchFts("fts_live", "mallard", { id: "id" });
+        expect(found.rows.map((row) => row.id)).toEqual(["d2"]);
+
+        await db.close();
+    }, 120_000);
+
+    it("accepts a single field name, and caps results at 100 by default", async () => {
+        const db = new DuckdbQuackInstance();
+        await db.createTable("fts_many", [
+            { name: "id", type: "string", primaryKey: true },
+            { name: "body", type: "string" },
+        ]);
+        await db.ingest({
+            table: "fts_many",
+            rows: Array.from({ length: 105 }, (_, index) => ({
+                id: `d${String(index).padStart(3, "0")}`,
+                body: `Document number ${index} about ducks.`,
+            })),
+        });
+        await db.flush();
+
+        // A single string is a valid `fields` value.
+        const index = await db.createFtsIndex("fts_many", { id: "id", fields: "body" });
+        expect(index).toEqual({ table: "fts_many", index: "fts_main_fts_many" });
+
+        expect((await db.searchFts("fts_many", "ducks", { id: "id" })).rows).toHaveLength(100);
+        expect((await db.searchFts("fts_many", "ducks", { id: "id", limit: 0 })).rows).toHaveLength(105);
+
+        await db.close();
+    }, 120_000);
+
+    it("builds an HNSW index and searches the nearest vectors", async () => {
+        const db = new DuckdbQuackInstance();
+        await db.createTable("vss_vecs", [
+            { name: "id", type: "string", primaryKey: true },
+            { name: "vec", type: "FLOAT[3]" },
+        ]);
+        await db.ingest({
+            table: "vss_vecs",
+            rows: [
+                { id: "v1", vec: [1, 0, 0] },
+                { id: "v2", vec: [0, 1, 0] },
+                { id: "v3", vec: [0, 0, 1] },
+                { id: "v4", vec: [1, 1, 0] },
+            ],
+        });
+        await db.flush();
+
+        const info = await db.createVssIndex("vss_vecs", { column: "vec", metric: "cosine" });
+        expect(info).toEqual({ table: "vss_vecs", index: "vss_vss_vecs_vec", metric: "cosine" });
+
+        const { rows } = await db.searchVss("vss_vecs", [1, 0, 0], {
+            column: "vec",
+            metric: "cosine",
+            limit: 2,
+        });
+        expect(rows.map((row) => row.id)).toEqual(["v1", "v4"]);
+        expect(Number(rows[0]!.distance)).toBeCloseTo(0, 5);
+
+        const selected = await db.searchVss("vss_vecs", [1, 0, 0], {
+            column: "vec",
+            metric: "cosine",
+            select: ["id"],
+            limit: 1,
+        });
+        expect(selected.rows).toEqual([{ id: "v1", distance: expect.any(Number) }]);
+
+        const plan = (await db.exec(
+            `EXPLAIN SELECT id FROM vss_vecs ORDER BY array_cosine_distance(vec, CAST([1, 0, 0] AS FLOAT[3])) LIMIT 2`,
+        )).rows[0]!;
+        expect(String(plan.explain_value)).toContain("Hnsw Index Scan");
+
+        await expect(db.createVssIndex("vss_vecs", { column: "vec", metric: "nope" as any }))
+            .rejects.toThrow(/Unknown VSS metric/i);
+        await expect(db.searchVss("vss_vecs", [], { column: "vec" }))
+            .rejects.toThrow(/non-empty array/i);
+        await expect(db.searchVss("vss_vecs", [1, 0, 0], { column: "vec", limit: 0 }))
+            .rejects.toThrow(/greater than 0/i);
+
+        expect(await db.dropVssIndex("vss_vecs", { column: "vec" })).toEqual({
+            table: "vss_vecs",
+            index: "vss_vss_vecs_vec",
+            dropped: true,
+        });
+        expect(await db.dropVssIndex("vss_vecs", { column: "vec" })).toMatchObject({ dropped: false });
+
+        await db.close();
+    }, 120_000);
+
+    it("persists an HNSW index in a file when asked", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "quack-vss-"));
+        const file = join(directory, "vecs.duckdb");
+
+        const first = new DuckdbQuackInstance({ dbPath: file });
+        await first.createTable("vecs", [
+            { name: "id", type: "string", primaryKey: true },
+            { name: "vec", type: "FLOAT[3]" },
+        ]);
+        await first.ingest({
+            table: "vecs",
+            rows: [{ id: "v1", vec: [1, 0, 0] }, { id: "v2", vec: [0, 1, 0] }],
+        });
+        await first.flush();
+
+        // A file database refuses the index until the experimental flag is set.
+        await expect(first.createVssIndex("vecs", { column: "vec" }))
+            .rejects.toThrow(/hnsw_enable_experimental_persistence/);
+        expect((await first.createVssIndex("vecs", { column: "vec", metric: "cosine", persist: true })).index)
+            .toBe("vss_vecs_vec");
+        await first.close();
+
+        const again = new DuckdbQuackInstance({
+            dbPath: file,
+            options: { hnsw_enable_experimental_persistence: "true" },
+        });
+        const { rows } = await again.searchVss("vecs", [1, 0, 0], { column: "vec", metric: "cosine", limit: 1 });
+        expect(rows.map((row) => row.id)).toEqual(["v1"]);
+        await again.close();
+
+        await rm(directory, { recursive: true, force: true });
+    }, 120_000);
+
+    it("sets, reads, lists and resets session variables", async () => {
+        const db = new DuckdbQuackInstance();
+
+        expect(await db.setVariable("my_var", 30)).toEqual({ name: "my_var" });
+        expect(await db.getVariable("my_var")).toBe(30);
+        expect((await db.exec("SELECT 20 + $my_var AS total")).rows).toEqual([{ total: 50 }]);
+
+        // Quoted names work too.
+        await db.setVariable("my string", "hello");
+        expect(await db.getVariable("my string")).toBe("hello");
+
+        await db.setVariable("my_date", new Date(2026, 0, 2, 3, 4, 5));
+        expect(String(await db.getVariable("my_date"))).toContain("2026-01-02 03:04:05");
+
+        const variables = await db.listVariables();
+        expect(variables.find((variable) => variable.name === "my_var"))
+            .toEqual({ name: "my_var", value: "30", type: "INTEGER" });
+        expect(variables.find((variable) => variable.name === "my string")?.type).toBe("VARCHAR");
+
+        await db.resetVariable("my_var");
+        expect(await db.getVariable("my_var")).toBeNull();
+        expect(await db.getVariable("never_set")).toBeNull();
+
+        // A variable can hold a query result — raw SQL for the DuckDB types.
+        await db.exec("SET VARIABLE my_list = (SELECT list(x) FROM range(3) t(x))");
+        expect(await db.getVariable("my_list")).toEqual(["0", "1", "2"]);
+
+        await db.close();
+    }, 60_000);
 });
 
 describe("@anteros/duckdb — timestamp helper", () => {
@@ -477,6 +718,129 @@ describe("@anteros/duckdb — Quack remote", () => {
 
     }, 60_000);
 
+    it("scopes the secret to the server, and inlines bound values", async () => {
+        const db = defaultDb;
+        const { connection } = await db.raw();
+
+        // The token is pinned to this server, not usable for any quack URI.
+        const secrets = (await connection.runAndReadAll(
+            `SELECT name, scope FROM duckdb_secrets() WHERE name = 'anteros_quack'`,
+        )).getRowObjectsJson() as Array<{ scope: string[] }>;
+        expect(secrets[0]?.scope).toContain(serverUrl);
+
+        // Quack 2.0 cannot bind parameters on an attached catalog: they are inlined,
+        // escaped, and a placeholder inside a string literal is left alone.
+        const inlined = await db.exec("SELECT $1 AS v, length('$1') AS untouched", ["a'b"]);
+        expect(inlined.rows).toEqual([{ v: "a'b", untouched: "2" }]);
+
+        await db.createTable("inline_probe", [{ name: "v", type: "string" }]);
+        await db.exec("INSERT INTO inline_probe VALUES ($1)", ["l'apostrophe"]);
+        const seen = await serverDb.exec("SELECT v FROM inline_probe");
+        expect(seen.rows).toEqual([{ v: "l'apostrophe" }]);
+    }, 60_000);
+
+    it("builds and searches a full-text index on the remote", async () => {
+        const db = defaultDb;
+        await db.createTable("fts_remote_docs", [
+            { name: "document_identifier", type: "string", primaryKey: true },
+            { name: "text_content", type: "string" },
+            { name: "author", type: "string" },
+        ]);
+        await db.ingest({
+            table: "fts_remote_docs",
+            rows: [
+                { document_identifier: "doc1", text_content: "The mallard is a dabbling duck.", author: "Hannes Mühleisen" },
+                { document_identifier: "doc2", text_content: "The cat is a small carnivorous mammal.", author: "Laurens Kuiper" },
+            ],
+        });
+        await db.flush();
+
+        const info = await db.createFtsIndex(`${db.alias}.fts_remote_docs`, {
+            id: "document_identifier",
+            fields: ["text_content", "author"],
+            stemmer: "english",
+            incremental: true,
+        });
+        expect(info).toEqual({ table: "fts_remote_docs", index: "fts_main_fts_remote_docs" });
+
+        const byText = await db.searchFts(`${db.alias}.fts_remote_docs`, "small cats", { id: "document_identifier" });
+        expect(byText.rows.map((row) => row.document_identifier)).toEqual(["doc2"]);
+        expect(Number(byText.rows[0]!.score)).toBeGreaterThan(0);
+
+        const byAuthor = await db.searchFts("fts_remote_docs", "Muhleisen", {
+            id: "document_identifier",
+            fields: "author",
+            select: ["document_identifier"],
+            limit: 5,
+        });
+        expect(byAuthor.rows.map((row) => row.document_identifier)).toEqual(["doc1"]);
+
+        // The index is incremental: a row ingested afterwards is searchable.
+        await db.ingest({
+            table: "fts_remote_docs",
+            rows: [{ document_identifier: "doc3", text_content: "The swan is an aquatic bird.", author: "Alice" }],
+        });
+        await db.flush();
+        expect((await db.searchFts("fts_remote_docs", "swan", { id: "document_identifier" }))
+            .rows.map((row) => row.document_identifier)).toEqual(["doc3"]);
+
+        expect((await db.dropFtsIndex("fts_remote_docs")).dropped).toBe(true);
+    }, 120_000);
+
+    it("builds and searches an HNSW index on the remote", async () => {
+        const db = defaultDb;
+        await db.createTable("vss_remote_vecs", [
+            { name: "id", type: "string", primaryKey: true },
+            { name: "vec", type: "FLOAT[3]" },
+        ]);
+        await db.ingest({
+            table: "vss_remote_vecs",
+            rows: [
+                { id: "v1", vec: [1, 0, 0] },
+                { id: "v2", vec: [0, 1, 0] },
+                { id: "v3", vec: [0, 0, 1] },
+                { id: "v4", vec: [1, 1, 0] },
+            ],
+        });
+        await db.flush();
+
+        const info = await db.createVssIndex(`${db.alias}.vss_remote_vecs`, {
+            column: "vec",
+            metric: "cosine",
+        });
+        expect(info).toEqual({ table: "vss_remote_vecs", index: "vss_vss_remote_vecs_vec", metric: "cosine" });
+
+        const { rows } = await db.searchVss("vss_remote_vecs", [1, 0, 0], {
+            column: "vec",
+            metric: "cosine",
+            limit: 2,
+        });
+        expect(rows.map((row) => row.id)).toEqual(["v1", "v4"]);
+
+        expect(await db.dropVssIndex("vss_remote_vecs", { column: "vec" })).toMatchObject({ dropped: true });
+    }, 120_000);
+
+    it("keeps session variables on the Quack server across exec", async () => {
+        const db = defaultDb;
+
+        await db.setVariable("remote_var", 30);
+        expect(await db.getVariable("remote_var")).toBe(30);
+        expect((await db.exec("SELECT 20 + $remote_var AS total")).rows).toEqual([{ total: 50 }]);
+        expect((await db.listVariables()).find((variable) => variable.name === "remote_var"))
+            .toMatchObject({ value: "30", type: "INTEGER" });
+
+        await db.resetVariable("remote_var");
+        expect(await db.getVariable("remote_var")).toBeNull();
+
+        // A client-side variable is left to DuckDB even when other named values
+        // are inlined (the client engine resolves `$client_var`).
+        await db.exec("SET VARIABLE client_var = 7", []);
+        expect((await db.exec("SELECT $client_var AS v, $p AS p", { p: 1 })).rows)
+            .toEqual([{ v: 7, p: 1 }]);
+        await expect(db.exec("SELECT $not_set AS v", { p: 1 }))
+            .rejects.toThrow(/Values were not provided/i);
+    }, 60_000);
+
     it("updates matching documents with a JSON merge patch", async () => {
         const db = defaultDb;
         const docs = await db.table("docs_update");
@@ -559,17 +923,11 @@ describe("@anteros/duckdb — Quack remote", () => {
 
     }, 60_000);
 
-    it("refuses a write when the remote is attached read-only", async () => {
-        const db = new DuckdbQuackInstance({ url: serverUrl, token: TOKEN, readOnly: true });
-
-        // `readOnly` constrains the attach — the mode SQL runs on that connection.
-        const { connection } = await db.raw();
-        const reader = await connection.runAndReadAll("SELECT * FROM hello");
-        expect(reader.getRowObjectsJson()).toEqual([{ s: "world" }]);
-        await expect(connection.run(`CREATE TABLE ${db.alias}.nope AS SELECT 1 AS n`)).rejects.toThrow(/read-only/i);
-
-        await db.close();
-    }, 60_000);
+    it("refuses `readOnly` — Quack 2.0 ignores READ_ONLY on ATTACH", async () => {
+        // Accepting the flag while writes still land would be a false promise.
+        expect(() => new DuckdbQuackInstance({ url: serverUrl, token: TOKEN, readOnly: true }))
+            .toThrow(/READ_ONLY/i);
+    });
 
     it("fails loudly — and fast — on an unreachable server", async () => {
         const db = new DuckdbQuackInstance({ url: "quack:127.0.0.1:1", token: TOKEN });
@@ -641,6 +999,19 @@ describe("@anteros/duckdb — Quack server", () => {
         expect(new DuckdbQuackServer({ token: "abcd" }).token).toBe("abcd");
     });
 
+    it("refuses a TLS configuration that cannot be served", () => {
+        // A certificate without its key is a half-configured server.
+        expect(() => new DuckdbQuackServer({ token: "abcd", sslCertFile: "/tmp/cert.pem" }))
+            .toThrow(/go together/i);
+        // Plain HTTP has nowhere to put a certificate.
+        expect(() => new DuckdbQuackServer({
+            token: "abcd",
+            disableSsl: true,
+            sslCertFile: "/tmp/cert.pem",
+            sslKeyFile: "/tmp/key.pem",
+        })).toThrow(/plain-HTTP/i);
+    });
+
     it("serves its own tables to a client, and cuts it off when stopped", async () => {
         const own = new DuckdbQuackServer({ port: freePort(), token: "own-token" });
         await own.start();
@@ -702,20 +1073,110 @@ describe("@anteros/duckdb — Quack server: options", () => {
         const own = new DuckdbQuackServer({
             port: freePort(),
             token: "own-token",
-            fetchBatchChunks: 32,
+            targetBatchBytes: 1048576,
             identity: { name: "analytics-1", region: "eu-west-3" },
         });
         await own.start();
 
-        const batch = (await own.db.exec("SELECT current_setting('quack_fetch_batch_chunks') AS v")).rows;
-        expect(Number(batch[0]!.v)).toBe(32);
+        const batch = (await own.db.exec("SELECT current_setting('quack_target_batch_bytes') AS v")).rows;
+        expect(Number(batch[0]!.v)).toBe(1048576);
 
         const me = (await own.db.exec("SELECT * FROM whoami()")).rows;
         expect(me[0]!.name).toBe("analytics-1");
         expect(me[0]!.region).toBe("eu-west-3");
 
+        // What `quack_serve` actually bound, not a recomputation from the options.
+        expect(own.listenUri).toBe(`quack:127.0.0.1:${own.port}`);
+        expect(own.listenUrl).toBe(`http://127.0.0.1:${own.port}`);
+
         await own.stop();
+        expect(own.listenUrl).toBeUndefined();
     }, 60_000);
+
+    it("builds declared full-text indexes before it starts serving", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "quack-fts-"));
+        const file = join(directory, "docs.duckdb");
+
+        const seeder = new DuckdbQuackInstance({ dbPath: file });
+        await seeder.createTable("documents", [
+            { name: "document_identifier", type: "string", primaryKey: true },
+            { name: "text_content", type: "string" },
+        ]);
+        await seeder.ingest({
+            table: "documents",
+            rows: [
+                { document_identifier: "doc1", text_content: "The mallard is a dabbling duck." },
+                { document_identifier: "doc2", text_content: "The cat is a small carnivorous mammal." },
+            ],
+        });
+        await seeder.flush();
+        await seeder.close();
+
+        const own = new DuckdbQuackServer({
+            port: freePort(),
+            token: "own-token",
+            dbPath: file,
+            ftsIndexes: [
+                { table: "documents", id: "document_identifier", fields: ["text_content"], stemmer: "english" },
+            ],
+        });
+        await own.start();
+
+        const client = new DuckdbQuackInstance({ url: own.url, token: "own-token" });
+        const { rows } = await client.searchFts("documents", "small cats", { id: "document_identifier" });
+        expect(rows.map((row) => row.document_identifier)).toEqual(["doc2"]);
+        await client.close();
+        await own.stop();
+
+        // A restart with `overwrite: false` keeps the existing index.
+        const again = new DuckdbQuackServer({
+            port: freePort(),
+            token: "own-token",
+            dbPath: file,
+            ftsIndexes: [
+                { table: "documents", id: "document_identifier", fields: ["text_content"], overwrite: false },
+            ],
+        });
+        await again.start();
+        const againClient = new DuckdbQuackInstance({ url: again.url, token: "own-token" });
+        expect((await againClient.searchFts("documents", "small cats", { id: "document_identifier" }))
+            .rows.map((row) => row.document_identifier)).toEqual(["doc2"]);
+        await againClient.close();
+        await again.stop();
+
+        await rm(directory, { recursive: true, force: true });
+    }, 120_000);
+
+    it("builds declared vector indexes before it starts serving", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "quack-vss-server-"));
+        const file = join(directory, "vecs.duckdb");
+
+        const seeder = new DuckdbQuackInstance({ dbPath: file });
+        await seeder.createTable("vecs", [
+            { name: "id", type: "string", primaryKey: true },
+            { name: "vec", type: "FLOAT[3]" },
+        ]);
+        await seeder.ingest({ table: "vecs", rows: [{ id: "v1", vec: [1, 0, 0] }, { id: "v2", vec: [0, 1, 0] }] });
+        await seeder.flush();
+        await seeder.close();
+
+        const own = new DuckdbQuackServer({
+            port: freePort(),
+            token: "own-token",
+            dbPath: file,
+            vssPersist: true,
+            vssIndexes: [{ table: "vecs", column: "vec", metric: "cosine" }],
+        });
+        await own.start();
+
+        const client = new DuckdbQuackInstance({ url: own.url, token: "own-token" });
+        const { rows } = await client.searchVss("vecs", [1, 0, 0], { column: "vec", metric: "cosine", limit: 1 });
+        expect(rows.map((row) => row.id)).toEqual(["v1"]);
+        await client.close();
+        await own.stop();
+
+        await rm(directory, { recursive: true, force: true });
+    }, 180_000);
 
     it("accepts what a client from outside the machine needs", async () => {
         // A non-loopback bind is not enough: `allow_other_hostname` lifts the
