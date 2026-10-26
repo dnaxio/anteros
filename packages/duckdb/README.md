@@ -158,6 +158,32 @@ await db.resetVariable("my_var");
 - `listVariables()` reads `duckdb_variables()`: `value` is text, `type` is the DuckDB type.
 - Variables are session state — nothing is persisted in the database file.
 
+### Storage and files
+
+A DuckDB database is **one file**, not a directory — the `dbPath` you pass (extension free: `.duckdb`,
+`.db`, `.ddb`…). Schemas, tables, indexes, views and metadata live in it, in DuckDB's block/row-group
+[storage format](https://duckdb.org/docs/2.0/internals/storage) (v2.0.0 / version 69 by default in DuckDB 2.0;
+older versions cannot read it).
+
+| File | Role | When |
+| --- | --- | --- |
+| `app.duckdb` | The database | Always (file mode) |
+| `app.duckdb.wal` | Write-ahead log — committed changes not yet checkpointed | During writes, until a checkpoint |
+| `app.duckdb.tmp/` | Spilling files (`temp_directory`) | Only when a query exceeds memory |
+| `~/.duckdb/extensions/…` | Installed extensions (quack, fts, vss…) | Outside the database |
+| `~/.duckdb/stored_secrets/` | Persistent secrets | Outside the database |
+
+The **WAL** is the crash-recovery journal: a committed write is appended there, and a
+[checkpoint](https://duckdb.org/docs/2.0/sql/statements/checkpoint) merges it into the main file. Checkpoints
+happen automatically when the WAL grows (`checkpoint_threshold`, 16 MiB by default), on `CHECKPOINT`, or on a
+clean close — which is why a running database can show two files and a closed one shows a single file.
+`PRAGMA database_size` reports `database_size` and `wal_size` separately. Attached databases are separate
+files, each with its own optional `.wal`; `duckdb_databases()` lists them.
+
+A clean `stop()` / `close()` checkpoints and releases the file — what a backup should copy. Do not copy only
+the main file while its WAL still holds changes, and never delete a live `.wal`. A Quack client is in memory
+by default (its own `dbPath`, if any, is a separate local file); only the **server's** `dbPath` is durable.
+
 ### Default table shape
 
 `id` (VARCHAR), `ts` (TIMESTAMP), `data` (JSON) — an append-only event log. A row that leaves `ts` or `id` out gets the current time and a UUID; a `Date` is written as the local wall clock (`formatTimestamp`, exported).

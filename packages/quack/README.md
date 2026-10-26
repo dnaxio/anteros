@@ -154,6 +154,11 @@ N readers.
 > localhost unless `--allowOtherHostname` is set. A server meant to be reached sets both — and then the token
 > (and TLS) is all that stands between the network and the data.
 
+The server's database is **one file** (`--dbPath`). While it runs, DuckDB may also keep
+`<dbPath>.wal` (committed writes not yet checkpointed) and `<dbPath>.tmp/` (spilling); `Ctrl-C` checkpoints
+and closes, leaving the main file. A client never stores the remote data — its own `dbPath`, if any, is a
+separate local file.
+
 ## Attach a client
 
 ```ts
