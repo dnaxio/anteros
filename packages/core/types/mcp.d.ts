@@ -16,7 +16,7 @@ export type McpToolResult = {
 };
 
 /**
- * MCP tool definition — auto-loaded from `{tenant.dir}/mcp/tools/**\/*.tool.ts`.
+ * MCP tool definition — auto-loaded from `{tenant.dir}/ai/mcp/tools/**\/*.tool.ts`.
  * Served over the MCP protocol at `GET/POST /api/:tenant_id/mcp` (Streamable HTTP).
  */
 export type McpTool = {
@@ -58,7 +58,7 @@ export type McpResourceResult = {
 
 /**
  * MCP resource — read-only data exposed by URI (like a file the LLM can open).
- * Auto-loaded from `{tenant.dir}/mcp/resources/**\/*.resource.ts`.
+ * Auto-loaded from `{tenant.dir}/ai/mcp/resources/**\/*.resource.ts`.
  *
  * The `uri` can be static (`orders://summary`) or a template
  * (`users://{id}`) — template params are extracted and passed to `read`.

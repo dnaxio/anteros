@@ -48,3 +48,12 @@ export {
     agents,
     endpoints,
 }
+
+export type {
+    AgentMemoryContext,
+    AgentRecallHit,
+    AgentRecallQuery,
+    AgentRecallRecord,
+    AgentSemanticRecallOptions,
+} from "./types/agent";
+

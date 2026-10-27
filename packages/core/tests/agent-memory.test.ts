@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { Agent } from "../lib/agent";
-import { InMemoryAgentMemory, MongoAgentMemory, RedisAgentMemory } from "../lib/agentMemory";
+import { InMemoryAgentMemory, MongoAgentMemory, RedisAgentMemory, customAgentMemory, semanticRecall } from "../lib/agentMemory";
 import { replicatesCollection, replicatesMetaCollection } from "../database/deleteLog";
 import { formatConfig, cfg } from "../server/config";
 import { syncTenants } from "../database/tenant";
@@ -107,6 +107,180 @@ describe("agents.memory.InMemory", () => {
         memory.save("t1", [message("user", "hi")]);
         memory.clear("t1");
         expect(memory.get("t1")).toEqual([]);
+    });
+});
+
+// ─── Custom store ────────────────────────────────────────────────────────
+
+describe("agents.memory.custom", () => {
+    it("requires get, save and clear", () => {
+        expect(() => customAgentMemory({} as any)).toThrow(/needs `get`/);
+        expect(() => customAgentMemory({ get: () => [], save: () => {} } as any)).toThrow(/needs `clear`/);
+    });
+
+    it("scopes the key and caps the thread on save", async () => {
+        const seen: { key?: string; messages?: AgentMessage[] } = {};
+        const memory = customAgentMemory({
+            maxMessages: 2,
+            get: () => [],
+            save: (key, messages) => { seen.key = key; seen.messages = messages; },
+            clear: () => {},
+        });
+
+        await memory.save("chat", [
+            message("user", "1"),
+            message("assistant", "2"),
+            message("user", "3"),
+        ], { resourceId: "u1" });
+
+        expect(seen.key).toBe("u1:chat");
+        expect(seen.messages!.map((m) => m.content)).toEqual(["2", "3"]);
+        expect(await memory.get("chat", { resourceId: "u1" })).toEqual([]);
+    });
+
+    it("uses the bare thread id when the store is unscoped", async () => {
+        let key: string | undefined;
+        const memory = customAgentMemory({
+            scoped: false,
+            get: () => [],
+            save: (threadKey) => { key = threadKey; },
+            clear: () => {},
+        });
+        await memory.save("chat", [], { resourceId: "u1" });
+        expect(key).toBe("chat");
+    });
+
+    it("exposes the optional handlers only when given", async () => {
+        const plain = customAgentMemory({ get: () => [], save: () => {}, clear: () => {} });
+        expect("list" in plain).toBe(false);
+        expect("getState" in plain).toBe(false);
+        expect("collections" in plain).toBe(false);
+
+        const calls: string[] = [];
+        const full = customAgentMemory({
+            get: () => [],
+            save: () => {},
+            clear: () => {},
+            list: () => [{ threadId: "chat", messages: 2, updatedAt: new Date() }],
+            getState: () => ({ value: "# sheet" }),
+            setState: () => { calls.push("setState"); },
+            clearState: () => { calls.push("clearState"); },
+            collections: () => ["threads", "threads__state"],
+        });
+
+        expect((await full.list!({ resourceId: "u1", limit: 5 }))).toHaveLength(1);
+        expect(await full.getState!("u1", {})).toEqual({ value: "# sheet" });
+        await full.setState!("u1", { value: "x" });
+        await full.clearState!("u1");
+        expect(calls).toEqual(["setState", "clearState"]);
+        expect(full.collections!()).toEqual(["threads", "threads__state"]);
+    });
+
+    it("passes the caller context through to the handlers", async () => {
+        let seen: any;
+        const memory = customAgentMemory({
+            get: (_key, ctx) => { seen = ctx; return []; },
+            save: () => {},
+            clear: () => {},
+        });
+        await memory.get("chat", { resourceId: "u1", agentId: "support", tenant: "t1", thread: "chat" });
+        expect(seen).toMatchObject({ resourceId: "u1", agentId: "support", tenant: "t1", thread: "chat" });
+    });
+});
+
+// ─── Semantic recall ─────────────────────────────────────────────────────
+
+describe("agents.memory.semanticRecall", () => {
+    it("requires embed and search", () => {
+        expect(() => semanticRecall({} as any)).toThrow(/needs `embed` and `search`/);
+    });
+
+    it("recalls by meaning and prepends the hits", async () => {
+        const calls: any[] = [];
+        const processor = semanticRecall({
+            topK: 3,
+            messageRange: 2,
+            scope: "resource",
+            filter: { project: "A" },
+            embed: (batch, kind) => { calls.push(["embed", batch, kind]); return [[0.1, 0.2]]; },
+            search: (vector, query, ctx) => {
+                calls.push(["search", vector, query, ctx]);
+                return [{ id: "m1", text: "Le client a demandé un remboursement.", role: "assistant" }];
+            },
+        });
+
+        const messages = [{ role: "user", content: "Et le remboursement ?" }] as AgentMessage[];
+        const context = { thread: "chat-1", resourceId: "u-1" };
+        const out = await processor.load!(messages, context) as AgentMessage[];
+
+        expect(out).toHaveLength(2);
+        expect(out[0]!.role).toBe("system");
+        expect(String(out[0]!.content)).toContain("remboursement");
+        expect(calls[0]).toEqual(["embed", ["Et le remboursement ?"], "query"]);
+        expect(calls[1]).toEqual(["search", [0.1, 0.2], {
+            topK: 3,
+            messageRange: 2,
+            scope: "resource",
+            filter: { project: "A" },
+            thread: "chat-1",
+            resourceId: "u-1",
+        }, context]);
+    });
+
+    it("leaves the messages alone without a question or without hits", async () => {
+        const processor = semanticRecall({ embed: () => [[1]], search: () => [] });
+
+        const noQuestion = [{ role: "assistant", content: "hello" }] as AgentMessage[];
+        expect(await processor.load!(noQuestion, {})).toBe(noQuestion);
+
+        const noHits = [{ role: "user", content: "q" }] as AgentMessage[];
+        expect(await processor.load!(noHits, {})).toBe(noHits);
+    });
+
+    it("indexes new messages as passages, once", async () => {
+        const embedded: any[] = [];
+        const records: any[] = [];
+        let upsertCtx: any;
+        const processor = semanticRecall({
+            embed: (batch, kind) => { embedded.push([batch, kind]); return batch.map(() => [1, 2]); },
+            search: () => [],
+            upsert: (batch, ctx) => { records.push(...batch); upsertCtx = ctx; },
+        });
+
+        const messages = [
+            { role: "system", content: "prompt" },
+            { role: "user", content: "Bonjour" },
+            { role: "assistant", content: "Salut" },
+        ] as AgentMessage[];
+
+        const context = { thread: "chat-1", resourceId: "u-1" };
+        await processor.save!(messages, context);
+        expect(embedded).toEqual([[["Bonjour", "Salut"], "passage"]]);
+        expect(records.map((record) => record.text)).toEqual(["Bonjour", "Salut"]);
+        expect(records[0]).toMatchObject({ thread: "chat-1", resourceId: "u-1", role: "user", vector: [1, 2] });
+        expect(typeof records[0]!.id).toBe("string");
+        expect(upsertCtx).toBe(context);
+
+        // A second save of the same messages embeds nothing new.
+        await processor.save!(messages, { thread: "chat-1", resourceId: "u-1" });
+        expect(embedded).toHaveLength(1);
+        expect(records).toHaveLength(2);
+    });
+
+    it("recalls only, without upsert", async () => {
+        const processor = semanticRecall({ embed: () => [[1]], search: () => [] });
+        const messages = [{ role: "user", content: "q" }] as AgentMessage[];
+        expect(await processor.save!(messages, {})).toBe(messages);
+    });
+
+    it("accepts a custom formatter", async () => {
+        const processor = semanticRecall({
+            embed: () => [[1]],
+            search: () => [{ text: "A" }, { text: "B" }],
+            format: (hits) => hits.map((hit) => hit.text).join(" | "),
+        });
+        const out = await processor.load!([{ role: "user", content: "q" }] as AgentMessage[], {}) as AgentMessage[];
+        expect(String(out[0]!.content)).toContain("A | B");
     });
 });
 

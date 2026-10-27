@@ -457,6 +457,83 @@ export type AgentMemoryProcessor = {
     ) => AgentMessage[] | void | Promise<AgentMessage[] | void>;
 };
 
+/** One hit returned by the vector search of a semantic-recall processor. */
+export type AgentRecallHit = {
+    /** Stable id of the indexed message — the one `upsert` stored. */
+    id?: string;
+    /** The text to put back in the prompt (the store may expand `messageRange`). */
+    text: string;
+    role?: string;
+    thread?: string;
+    resourceId?: string;
+    score?: number;
+};
+
+/** One message handed to the vector store by the recall processor. */
+export type AgentRecallRecord = {
+    id: string;
+    text: string;
+    vector: number[];
+    thread?: string;
+    resourceId?: string;
+    role?: string;
+};
+
+/** What a recall processor asks the vector store — Mastra's `semanticRecall` options. */
+export type AgentRecallQuery = {
+    /** Number of similar messages to retrieve. */
+    topK: number;
+    /** Surrounding messages the store should include with each hit. */
+    messageRange: number;
+    /** Search the current thread only, or every thread of the caller. */
+    scope: "thread" | "resource";
+    /** Metadata criteria, applied by the store when it supports them. */
+    filter?: Record<string, unknown>;
+    /** The run's thread (scoping the search). */
+    thread?: string;
+    /** The run's caller (namespacing the search). */
+    resourceId?: string;
+};
+
+/**
+ * Options of `agents.memory.semanticRecall()` — the framework's processor-shaped
+ * projection of Mastra's `semanticRecall`.
+ *
+ * Mapping: Mastra's `embedder` → `embed`, `vector.search` → `search`,
+ * `vector.upsert` → `upsert`, and `options.semanticRecall` → `topK`,
+ * `messageRange`, `scope`, `filter`.
+ */
+export type AgentSemanticRecallOptions = {
+    /**
+     * Embed texts. `kind` separates the two sides of an asymmetric model:
+     * `'query'` for the current question, `'passage'` for indexed messages
+     * (E5 wants `query:` / `passage:` prefixes).
+     */
+    embed: (texts: string[], kind: "query" | "passage") => Promise<number[][]> | number[][];
+    /**
+     * Vector search — return `[]` when nothing is close enough. `ctx` is the run
+     * context: a Mongo-backed store reaches the tenant database through `ctx.rest`.
+     */
+    search: (vector: number[], query: AgentRecallQuery, ctx: AgentMemoryContext) => Promise<AgentRecallHit[]> | AgentRecallHit[];
+    /**
+     * Index messages. Optional: without it the processor only **recalls** from an
+     * index you fill elsewhere (a job, `remember()`, another writer). Should be
+     * idempotent — the same `id` may be written again after a restart. `ctx` is
+     * the run context, with the same `rest` as `search`.
+     */
+    upsert?: (records: AgentRecallRecord[], ctx: AgentMemoryContext) => Promise<void> | void;
+    /** Similar messages retrieved (default `3`). */
+    topK?: number;
+    /** Messages around each hit, left to the store (default `2`). */
+    messageRange?: number;
+    /** `'thread'` (default) or `'resource'` — the caller's other conversations. */
+    scope?: "thread" | "resource";
+    /** Metadata filter forwarded to the store. */
+    filter?: Record<string, unknown>;
+    /** How the hits are rendered into the injected system message. */
+    format?: (hits: AgentRecallHit[]) => string;
+};
+
 /** What a memory store knows about the run asking for a thread. */
 export type AgentMemoryContext = {
     agentId?: string;
@@ -500,6 +577,36 @@ export type AgentMemoryOptions = {
     maxMessages?: number;
     /** Namespace each thread under its `resourceId` (default `true`). */
     scoped?: boolean;
+};
+
+/**
+ * Options of `agents.memory.custom()` — your own storage behind the `AgentMemory`
+ * contract, with the framework's scoping (`scoped`) and message cap
+ * (`maxMessages`) applied for you.
+ *
+ * A handler receives the **resolved key**: `resourceId:threadId` when `scoped`
+ * (default) and a caller identity is present, the bare thread id otherwise. The
+ * caller's context (`thread`, `resourceId`, `agentId`, `tenant`, `rest`) travels
+ * as the second argument, so a handler can key on whatever it needs.
+ */
+export type CustomAgentMemoryOptions = AgentMemoryOptions & {
+    /** A label for logs and error messages (default `'custom'`). */
+    name?: string;
+    /** Read a thread — `[]` when it does not exist. */
+    get: (key: string, ctx: AgentMemoryContext) => Promise<AgentMessage[]> | AgentMessage[];
+    /** Persist a thread — `messages` is already capped to `maxMessages`. */
+    save: (key: string, messages: AgentMessage[], ctx: AgentMemoryContext) => Promise<void> | void;
+    /** Forget a thread. */
+    clear: (key: string, ctx: AgentMemoryContext) => Promise<void> | void;
+    /** The caller's threads, most recent first (needed by a chat UI). */
+    list?: (ctx: AgentMemoryContext & { limit?: number }) => Promise<AgentThread[]> | AgentThread[];
+    /** Working memory — one durable value per scope key. */
+    getState?: (key: string, ctx: AgentMemoryContext) => Promise<AgentMemoryState | undefined> | AgentMemoryState | undefined;
+    setState?: (key: string, value: AgentMemoryState, ctx: AgentMemoryContext) => Promise<void> | void;
+    /** Forget a scratchpad. */
+    clearState?: (key: string, ctx: AgentMemoryContext) => Promise<void> | void;
+    /** Storage collections to replicate (Mongo-backed stores only). */
+    collections?: () => string[];
 };
 
 /**

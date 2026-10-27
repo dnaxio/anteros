@@ -3,6 +3,7 @@ import { parseDuration } from "../utils/func";
 import { syncTtlRetention } from "../database/ttl";
 import { writeDeleteMarkers, replicatesCollection } from "../database/deleteLog";
 import { Redis } from "ioredis";
+import { createHash } from "node:crypto";
 import type { Db } from "mongodb";
 import type {
     AgentMemory,
@@ -11,7 +12,11 @@ import type {
     AgentMemoryProcessor,
     AgentMemoryState,
     AgentMessage,
+    AgentRecallHit,
+    AgentRecallRecord,
+    AgentSemanticRecallOptions,
     AgentThread,
+    CustomAgentMemoryOptions,
     MongoAgentMemoryOptions,
     RedisAgentMemoryOptions,
     RedisClientLike,
@@ -464,8 +469,202 @@ export class MongoAgentMemory implements AgentMemory {
     }
 }
 
+// ─── Custom store ───────────────────────────────────────────────────────
+
+/**
+ * Build a conversation store from your own handlers — the framework applies the
+ * same policy as the built-in stores, so a handler only reads and writes.
+ *
+ * - **scoping** — the key it receives is `resourceId:threadId` when `scoped`
+ *   (default) and a caller identity is present, the bare thread id otherwise;
+ * - **cap** — `save` receives at most `maxMessages` messages (default 100), the
+ *   opening `system`/`developer` message kept first;
+ * - **optional parts** — `list`, `getState`, `setState`, `clearState` and
+ *   `collections` exist on the returned store **only if you provide them**.
+ *
+ * ```ts
+ * import { agents } from "@anteros/core";
+ *
+ * define.Agent({
+ *   // …
+ *   memory: agents.memory.custom({
+ *     name: "sqlite",
+ *     maxMessages: 50,
+ *     get: async (key) => db.thread(key),
+ *     save: async (key, messages) => db.write(key, messages),
+ *     clear: async (key) => db.drop(key),
+ *   }),
+ * });
+ * ```
+ *
+ * A store used through `workingMemory` also needs `getState` / `setState`; without
+ * them the scratchpad is simply inert, as with any other store.
+ */
+function customAgentMemory(options: CustomAgentMemoryOptions): AgentMemory {
+    for (const handler of ["get", "save", "clear"] as const) {
+        if (typeof (options as any)?.[handler] !== "function") {
+            throw new AppError(
+                `A custom memory${options?.name ? ` '${options.name}'` : ""} needs \`${handler}\` — agents.memory.custom({ get, save, clear, … })`,
+                { status: 500, code: "AGENT_MEMORY_HANDLER_REQUIRED" },
+            );
+        }
+    }
+
+    const scoped = options.scoped ?? true;
+    const maxMessages = Math.max(1, options.maxMessages ?? DEFAULT_MAX_MESSAGES);
+    const resolved = (threadId: string, ctx?: AgentMemoryContext) => threadKey(threadId, ctx, scoped);
+
+    const memory: AgentMemory = {
+        get: (threadId, ctx) => options.get(resolved(threadId, ctx), ctx ?? {}),
+        save: (threadId, messages, ctx) =>
+            options.save(resolved(threadId, ctx), trimMessages(messages, maxMessages), ctx ?? {}),
+        clear: (threadId, ctx) => options.clear(resolved(threadId, ctx), ctx ?? {}),
+    };
+
+    if (options.list) memory.list = (ctx) => options.list!(ctx ?? {});
+    if (options.getState) memory.getState = (key, ctx) => options.getState!(key, ctx ?? {});
+    if (options.setState) memory.setState = (key, value, ctx) => options.setState!(key, value, ctx ?? {});
+    if (options.clearState) memory.clearState = (key, ctx) => options.clearState!(key, ctx ?? {});
+    if (options.collections) memory.collections = () => options.collections!();
+
+    return memory;
+}
+
+// ─── Semantic recall ────────────────────────────────────────────────────
+
+/** The text of a message, or `''` when it carries none (tool call, media-only). */
+function recallText(message: AgentMessage): string {
+    const content: any = message.content;
+    if (typeof content === "string") return content.trim();
+    if (Array.isArray(content)) {
+        return content
+            .filter((part: any) => part?.type === "text" && typeof part.text === "string")
+            .map((part: any) => part.text)
+            .join(" ")
+            .trim();
+    }
+    return "";
+}
+
+/** Stable id of an indexed message — two identical turns collapse onto one hit. */
+function recallId(message: AgentMessage, text: string): string {
+    return createHash("sha1").update(`${message.role}\0${text}`).digest("hex");
+}
+
+const RECALL_HEADER = "Relevant past exchanges (semantic recall):";
+
+/**
+ * A `load` / `save` processor that recalls past messages **by meaning** — the
+ * framework's projection of Mastra's `semanticRecall`.
+ *
+ * - `load` embeds the last user message as a **query**, searches your index, and
+ *   prepends the hits as a system message (only when there are hits).
+ * - `save` embeds the new user / assistant / tool messages as **passages** and
+ *   hands them to `upsert`. Without `upsert` it only recalls (index filled
+ *   elsewhere); without `search` it does not run at all.
+ *
+ * Same option names as Mastra: `topK`, `messageRange`, `scope` (`'thread'` or
+ * `'resource'`), `filter`. `messageRange` is forwarded to the store: expanding a
+ * hit into its surrounding messages belongs to the index, not to the prompt.
+ *
+ * ```ts
+ * processors: [
+ *   agents.memory.semanticRecall({
+ *     topK: 3,
+ *     messageRange: 2,
+ *     scope: "resource",
+ *     embed: (texts, kind) => embedder(texts, kind),   // → number[][]
+ *     search: (vector, query) => vectorStore.search(vector, query),
+ *     upsert: (records) => vectorStore.upsert(records),
+ *   }),
+ * ],
+ * ```
+ */
+function semanticRecall(options: AgentSemanticRecallOptions): AgentMemoryProcessor {
+    if (typeof options?.embed !== "function" || typeof options?.search !== "function") {
+        throw new AppError(
+            "A semantic recall processor needs `embed` and `search` — agents.memory.semanticRecall({ embed, search, … })",
+            { status: 500, code: "AGENT_RECALL_HANDLER_REQUIRED" },
+        );
+    }
+
+    const topK = Math.max(1, Math.trunc(options.topK ?? 3));
+    const messageRange = Math.max(0, Math.trunc(options.messageRange ?? 2));
+    const scope = options.scope === "resource" ? "resource" : "thread";
+    const format = options.format
+        ?? ((hits: AgentRecallHit[]) => hits.map((hit) => `- ${hit.text}`).join("\n"));
+
+    // A message is embedded once per process. The id is content-based and stable
+    // across restarts, so the store can deduplicate what it already holds.
+    const indexed = new Set<string>();
+
+    return {
+        id: "semantic-recall",
+
+        async load(messages, ctx) {
+            const question = [...messages].reverse().find((message) => message.role === "user");
+            const text = question ? recallText(question) : "";
+            if (!text) return messages;
+
+            const [vector] = await options.embed([text], "query");
+            if (!vector?.length) return messages;
+
+            const hits = await options.search(vector, {
+                topK,
+                messageRange,
+                scope,
+                ...(options.filter ? { filter: options.filter } : {}),
+                ...(ctx?.thread ? { thread: ctx.thread } : {}),
+                ...(ctx?.resourceId ? { resourceId: ctx.resourceId } : {}),
+            }, ctx);
+            if (!hits?.length) return messages;
+
+            const rendered = format(hits).trim();
+            if (!rendered) return messages;
+
+            return [{ role: "system", content: `${RECALL_HEADER}\n${rendered}` }, ...messages];
+        },
+
+        async save(messages, ctx) {
+            if (typeof options.upsert !== "function") return messages;
+
+            const seen = new Set<string>();
+            const fresh = messages
+                .filter((message) => message.role !== "system" && message.role !== "developer")
+                .map((message) => ({ message, text: recallText(message) }))
+                .filter(({ text }) => !!text)
+                .map((entry) => ({ ...entry, id: recallId(entry.message, entry.text) }))
+                .filter((entry) => {
+                    if (indexed.has(entry.id) || seen.has(entry.id)) return false;
+                    seen.add(entry.id);
+                    return true;
+                });
+            if (!fresh.length) return messages;
+
+            const vectors = await options.embed(fresh.map((entry) => entry.text), "passage");
+            const records: AgentRecallRecord[] = fresh
+                .map((entry, index) => ({
+                    id: entry.id,
+                    text: entry.text,
+                    vector: vectors[index] ?? [],
+                    role: entry.message.role,
+                    ...(ctx?.thread ? { thread: ctx.thread } : {}),
+                    ...(ctx?.resourceId ? { resourceId: ctx.resourceId } : {}),
+                }))
+                .filter((record) => record.vector.length);
+            if (!records.length) return messages;
+
+            await options.upsert(records, ctx);
+            for (const record of records) indexed.add(record.id);
+            return messages;
+        },
+    };
+}
+
 export {
     DEFAULT_MAX_MESSAGES,
+    customAgentMemory,
+    semanticRecall,
     summarize,
     threadKey,
     threadTitle,

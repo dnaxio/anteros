@@ -1255,3 +1255,38 @@ describe("syncAgents", () => {
         expect(agents.reload).toBe(syncAgents);
     });
 });
+
+describe("syncAgents — ai/ layout", () => {
+    const TENANT = "ai-fixture";
+    const TENANT_DIR = "packages/core/tests/fixtures/ai-tenant";
+
+    beforeAll(async () => {
+        cfg.tenants = [{ id: TENANT, dir: TENANT_DIR, database: { uri: "mongodb://localhost:27017/none" } }] as any;
+        await syncAgents();
+    });
+
+    afterAll(() => {
+        cfg.agents = [];
+        cfg.mcpTools = [];
+        cfg.mcpResources = [];
+        cfg.tenants = [];
+    });
+
+    it("loads agents from ai/agents, with the tools declared beside them", () => {
+        const registry = createAgents(TENANT);
+        expect(registry.ids().sort()).toEqual(["billing", "support"]);
+
+        // `support.agent.ts` + `support.tool.ts`, same directory
+        expect(registry.get("support")!.hasTool("greet")).toBe(true);
+        // `support/billing.agent.ts` + `support/billing.tool.ts`, sub-directory
+        expect(registry.get("billing")!.hasTool("refund")).toBe(true);
+    });
+
+    it("reads ai/mcp for tools and resources", async () => {
+        const { syncMcpTools } = await import("../lib/mcp");
+        await syncMcpTools();
+
+        expect(cfg.mcpTools?.some((tool) => tool._tenant_ === TENANT && tool.name === "echo")).toBe(true);
+        expect(cfg.mcpResources?.some((resource) => resource._tenant_ === TENANT && resource.name === "readme")).toBe(true);
+    });
+});

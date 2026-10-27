@@ -396,9 +396,12 @@ describe("working memory — Anthropic", () => {
 });
 
 describe("working memory — the registry exposes nothing new by accident", () => {
-    it("keeps `agents.memory` as the only store factory", () => {
-        // `summarize` is the one deliberate addition: a **processor** factory (it needs
-        // your model and your prompt), not a store
-        expect(Object.keys(agents.memory).sort()).toEqual(["InMemory", "Mongo", "Redis", "summarize"]);
+    it("lists exactly the store and processor factories", () => {
+        // Stores: InMemory, Mongo, Redis, custom (your own handlers).
+        // Processors: `semanticRecall` (your embeddings + vector index) and
+        // `summarize` (your model + prompt) — they shape the prompt, they store nothing.
+        expect(Object.keys(agents.memory).sort()).toEqual([
+            "InMemory", "Mongo", "Redis", "custom", "semanticRecall", "summarize",
+        ]);
     });
 });
