@@ -961,7 +961,7 @@ describe("@anteros/duckdb — Quack remote", () => {
             await expect(db.transaction(async () => {
                 expect(await db.update({
                     table: "tx_docs",
-                    filter: "data->>'ref' = 'A-1'",
+                    where: "data->>'ref' = 'A-1'",
                     set: { v: 2 },
                 })).toEqual({ table: "tx_docs", updated: 1 });
                 throw new Error("abort-update");
@@ -989,7 +989,7 @@ describe("@anteros/duckdb — Quack remote", () => {
         // …and through the instance shorthand, one options object.
         expect(await db.update({
             table: "docs_update",
-            filter: "data->>'ref' = 'A-2'",
+            where: "data->>'ref' = 'A-2'",
             set: { note: "via instance" },
         })).toEqual({
             table: "docs_update",
@@ -1005,19 +1005,19 @@ describe("@anteros/duckdb — Quack remote", () => {
             { ref: "A-2", zone: "B", prix: null, note: "via instance" },
         ]);
 
-        // A filter is mandatory — without it every document would be patched.
-        await expect(docs.update("   ", { zone: "Z" })).rejects.toThrow(/WHERE filter/i);
-        await expect(db.update({ table: "docs_update", filter: " ", set: { zone: "Z" } }))
-            .rejects.toThrow(/WHERE filter/i);
+        // `where` is mandatory — without it every document would be patched.
+        await expect(docs.update("   ", { zone: "Z" })).rejects.toThrow(/needs `where`/i);
+        await expect(db.update({ table: "docs_update", where: " ", set: { zone: "Z" } }))
+            .rejects.toThrow(/needs `where`/i);
         await expect(db.update({ table: "docs_update", set: { zone: "Z" } } as any))
-            .rejects.toThrow(/WHERE filter/i);
-        await expect(db.update({ table: "docs_update", filter: ["a"] as any, set: { zone: "Z" } }))
-            .rejects.toThrow(/WHERE filter/i);
+            .rejects.toThrow(/needs `where`/i);
+        await expect(db.update({ table: "docs_update", where: ["a"] as any, set: { zone: "Z" } }))
+            .rejects.toThrow(/needs `where`/i);
 
         // So is `set` — anything that is not an object has nothing to merge.
-        await expect(db.update({ table: "docs_update", filter: "1 = 1", set: null as any }))
+        await expect(db.update({ table: "docs_update", where: "1 = 1", set: null as any }))
             .rejects.toThrow(/set/i);
-        await expect(db.update({ table: "docs_update", filter: "1 = 1", set: ["zone"] as any }))
+        await expect(db.update({ table: "docs_update", where: "1 = 1", set: ["zone"] as any }))
             .rejects.toThrow(/set/i);
 
     }, 60_000);
@@ -1037,7 +1037,7 @@ describe("@anteros/duckdb — Quack remote", () => {
         // The instance shorthand does the same — one options object.
         expect(await db.replace({
             table: "docs_replace",
-            filter: "data->>'ref' = 'A-1'",
+            where: "data->>'ref' = 'A-1'",
             set: { ref: "A-1" },
         })).toEqual({
             table: "docs_replace",
@@ -1053,16 +1053,16 @@ describe("@anteros/duckdb — Quack remote", () => {
             { ref: "A-2", zone: "R", prix: null },
         ]);
 
-        await expect(docs.replace("", { ref: "X" })).rejects.toThrow(/WHERE filter/i);
-        await expect(db.replace({ table: "docs_replace", filter: " ", set: { ref: "X" } }))
-            .rejects.toThrow(/WHERE filter/i);
+        await expect(docs.replace("", { ref: "X" })).rejects.toThrow(/needs `where`/i);
+        await expect(db.replace({ table: "docs_replace", where: " ", set: { ref: "X" } }))
+            .rejects.toThrow(/needs `where`/i);
         await expect(db.replace({ table: "docs_replace", set: { ref: "X" } } as any))
-            .rejects.toThrow(/WHERE filter/i);
-        await expect(db.replace({ table: "docs_replace", filter: {}, set: { ref: "X" } } as any))
-            .rejects.toThrow(/WHERE filter/i);
-        await expect(db.replace({ table: "docs_replace", filter: "1 = 1", set: null as any }))
+            .rejects.toThrow(/needs `where`/i);
+        await expect(db.replace({ table: "docs_replace", where: {}, set: { ref: "X" } } as any))
+            .rejects.toThrow(/needs `where`/i);
+        await expect(db.replace({ table: "docs_replace", where: "1 = 1", set: null as any }))
             .rejects.toThrow(/set/i);
-        await expect(db.replace({ table: "docs_replace", filter: "1 = 1", set: ["a"] as any }))
+        await expect(db.replace({ table: "docs_replace", where: "1 = 1", set: ["a"] as any }))
             .rejects.toThrow(/set/i);
 
     }, 60_000);
@@ -1074,20 +1074,20 @@ describe("@anteros/duckdb — Quack remote", () => {
         await docs.flush();
 
         expect(await docs.delete("data->>'ref' = 'A-2'")).toEqual({ table: "docs_delete", deleted: 1 });
-        expect(await db.delete({ table: "docs_delete", filter: "data->>'ref' = 'A-3'" }))
+        expect(await db.delete({ table: "docs_delete", where: "data->>'ref' = 'A-3'" }))
             .toEqual({ table: "docs_delete", deleted: 1 });
 
         const { rows } = await db.exec("SELECT data->>'ref' AS ref FROM docs_delete ORDER BY ref");
         expect(rows).toEqual([{ ref: "A-1" }]);
 
-        // The filter is mandatory here too.
-        await expect(docs.delete(" ")).rejects.toThrow(/WHERE filter/i);
-        await expect(db.delete({ table: "docs_delete", filter: "" })).rejects.toThrow(/WHERE filter/i);
-        await expect(db.delete({ table: "docs_delete", filter: undefined as any }))
-            .rejects.toThrow(/WHERE filter/i);
-        await expect(db.delete({ table: "docs_delete", filter: ["a"] as any }))
-            .rejects.toThrow(/WHERE filter/i);
-        await expect(db.delete({ table: "docs_delete" } as any)).rejects.toThrow(/WHERE filter/i);
+        // `where` is mandatory here too.
+        await expect(docs.delete(" ")).rejects.toThrow(/needs `where`/i);
+        await expect(db.delete({ table: "docs_delete", where: "" })).rejects.toThrow(/needs `where`/i);
+        await expect(db.delete({ table: "docs_delete", where: undefined as any }))
+            .rejects.toThrow(/needs `where`/i);
+        await expect(db.delete({ table: "docs_delete", where: ["a"] as any }))
+            .rejects.toThrow(/needs `where`/i);
+        await expect(db.delete({ table: "docs_delete" } as any)).rejects.toThrow(/needs `where`/i);
 
     }, 60_000);
 
@@ -1227,7 +1227,7 @@ describe("@anteros/duckdb — Quack server", () => {
             await own.db.exec('CREATE TABLE own_docs ("data" JSON, "ts" TIMESTAMP)');
             await own.db.exec(`INSERT INTO own_docs VALUES (CAST('{"ref":"A-1","v":1}' AS JSON), now())`);
             await expect(own.db.transaction(async () => {
-                await own.db.update({ table: "own_docs", filter: "data->>'ref' = 'A-1'", set: { v: 2 } });
+                await own.db.update({ table: "own_docs", where: "data->>'ref' = 'A-1'", set: { v: 2 } });
                 throw new Error("abort-update");
             })).rejects.toThrow("abort-update");
             expect((await own.db.exec("SELECT data->>'v' AS v FROM own_docs")).rows).toEqual([{ v: "1" }]);

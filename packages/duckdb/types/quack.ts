@@ -548,32 +548,32 @@ export type DuckdbIngestResult = {
 /** A document of a data table — an arbitrary object, stored as one `data` value. */
 export type DuckdbDocument = Record<string, unknown>;
 
-/** `db.update()` request — the table, the filter, and the fields to merge. */
+/** `db.update()` request — the table, the `WHERE` predicate, and the fields to merge. */
 export type DuckdbUpdateOptions = {
     /** The table holding the documents. */
     table: string;
-    /** SQL predicate selecting the rows — mandatory. */
-    filter: string;
+    /** SQL predicate — the `WHERE` clause, mandatory. */
+    where: string;
     /** Fields merged into each matching document (`json_merge_patch`). */
     set: DuckdbDocument;
 };
 
-/** `db.replace()` request — the table, the filter, and the document to store. */
+/** `db.replace()` request — the table, the `WHERE` predicate, and the document to store. */
 export type DuckdbReplaceOptions = {
     /** The table holding the documents. */
     table: string;
-    /** SQL predicate selecting the rows — mandatory. */
-    filter: string;
+    /** SQL predicate — the `WHERE` clause, mandatory. */
+    where: string;
     /** The whole document stored in place of the previous one. */
     set: DuckdbDocument;
 };
 
-/** `db.delete()` request — the table and the filter selecting the rows. */
+/** `db.delete()` request — the table and the `WHERE` predicate selecting the rows. */
 export type DuckdbDeleteOptions = {
     /** The table holding the documents. */
     table: string;
-    /** SQL predicate selecting the rows — mandatory. */
-    filter: string;
+    /** SQL predicate — the `WHERE` clause, mandatory. */
+    where: string;
 };
 
 /** `db.table()` options. */

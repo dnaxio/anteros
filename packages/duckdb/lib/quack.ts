@@ -116,7 +116,7 @@ class DuckdbTable {
      * The filter is **mandatory**: without one, every document would be patched.
      */
     async update(where: string, patch: DuckdbDocument): Promise<DuckdbTableUpdateResult> {
-        const predicate = requireFilter(where, "update");
+        const predicate = requireWhere(where, "update");
         await this.#ready;
 
         const result = await this.#backend.query(
@@ -136,7 +136,7 @@ class DuckdbTable {
      * The filter is **mandatory**.
      */
     async replace(where: string, document: DuckdbDocument): Promise<DuckdbTableReplaceResult> {
-        const predicate = requireFilter(where, "replace");
+        const predicate = requireWhere(where, "replace");
         await this.#ready;
 
         const result = await this.#backend.query(
@@ -155,7 +155,7 @@ class DuckdbTable {
      * The filter is **mandatory**.
      */
     async delete(where: string): Promise<DuckdbTableDeleteResult> {
-        const predicate = requireFilter(where, "delete");
+        const predicate = requireWhere(where, "delete");
         await this.#ready;
 
         const result = await this.#backend.query(
@@ -616,12 +616,12 @@ class DuckdbQuackInstance {
     }
 
     /**
-     * Patch the documents matching `filter` — **filter mandatory**.
+     * Patch the documents matching `where` — **the predicate is mandatory**.
      *
      * ```ts
      * await db.update({
      *     table: "tickets",
-     *     filter: "data->>'ref' = 'A-1'",
+     *     where: "data->>'ref' = 'A-1'",
      *     set: { total: 43, zone: "Z" },
      * });
      * ```
@@ -631,7 +631,7 @@ class DuckdbQuackInstance {
      */
     async update(options: DuckdbUpdateOptions): Promise<DuckdbTableUpdateResult> {
         const table = normaliseName(options?.table);
-        const predicate = requireFilter(options?.filter, "update");
+        const predicate = requireWhere(options?.where, "update");
         const patch = options?.set;
         if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
             throw new DuckdbQuackError(
@@ -650,20 +650,20 @@ class DuckdbQuackInstance {
     }
 
     /**
-     * Replace the **whole** document of the rows matching `filter` — it is not
-     * merged with the previous one. Filter mandatory.
+     * Replace the **whole** document of the rows matching `where` — it is not
+     * merged with the previous one. The predicate is mandatory.
      *
      * ```ts
      * await db.replace({
      *     table: "tickets",
-     *     filter: "data->>'ref' = 'A-1'",
+     *     where: "data->>'ref' = 'A-1'",
      *     set: { ref: "A-1", total: 43 },
      * });
      * ```
      */
     async replace(options: DuckdbReplaceOptions): Promise<DuckdbTableReplaceResult> {
         const table = normaliseName(options?.table);
-        const predicate = requireFilter(options?.filter, "replace");
+        const predicate = requireWhere(options?.where, "replace");
         const document = options?.set;
         if (document === null || typeof document !== "object" || Array.isArray(document)) {
             throw new DuckdbQuackError(
@@ -682,15 +682,15 @@ class DuckdbQuackInstance {
     }
 
     /**
-     * Delete the rows matching `filter` — **filter mandatory**.
+     * Delete the rows matching `where` — **the predicate is mandatory**.
      *
      * ```ts
-     * await db.delete({ table: "tickets", filter: "data->>'ref' = 'A-2'" });
+     * await db.delete({ table: "tickets", where: "data->>'ref' = 'A-2'" });
      * ```
      */
     async delete(options: DuckdbDeleteOptions): Promise<DuckdbTableDeleteResult> {
         const table = normaliseName(options?.table);
-        const predicate = requireFilter(options?.filter, "delete");
+        const predicate = requireWhere(options?.where, "delete");
 
         if (this.#inTransaction && this.#options.url !== undefined) {
             const result = await this.#execOnRemote(
@@ -2100,14 +2100,14 @@ function splitExecArguments(input?: any[] | Record<string, any>): {
 }
 
 /**
- * A filter is mandatory, and must be a real SQL predicate — an update, replace
+ * `where` is mandatory, and must be a real SQL predicate — an update, replace
  * or delete without one would hit every row. A non-string (`undefined`, an
  * array…) is refused rather than stringified into something that runs.
  */
-function requireFilter(where: unknown, operation: string): string {
+function requireWhere(where: unknown, operation: string): string {
     const predicate = typeof where === "string" ? where.trim() : "";
     if (!predicate) {
-        throw new DuckdbQuackError(`\`${operation}\` needs a WHERE filter`, "DUCKDB_WHERE_REQUIRED");
+        throw new DuckdbQuackError(`\`${operation}\` needs \`where\` — a non-empty SQL predicate`, "DUCKDB_WHERE_REQUIRED");
     }
     return predicate;
 }
