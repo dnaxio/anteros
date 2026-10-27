@@ -1,6 +1,6 @@
 {
   "name": "@anteros/quack",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Anteros Quack — the `antq` CLI that serves a DuckDB instance over the Quack protocol",
   "type": "module",
   "license": "MIT",
