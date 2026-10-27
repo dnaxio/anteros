@@ -244,11 +244,11 @@ export type DuckdbVssSearchResult = {
     duration_ms: number;
 };
 
-/** A session variable, as `listVariables()` reports it. */
+/** A session variable, as `listVars()` reports it. */
 export type DuckdbVariable = {
     /** Variable name. */
     name: string;
-    /** Value as text (`getVariable` returns it typed). */
+    /** Value as text (`getVar` returns it typed). */
     value: string | null;
     /** DuckDB type (`INTEGER`, `VARCHAR`, `BIGINT[]`…). */
     type: string;
@@ -556,6 +556,15 @@ export type DuckdbUpdateOptions = {
     where: string;
     /** Fields merged into each matching document (`json_merge_patch`). */
     set: DuckdbDocument;
+    /**
+     * Insert `set` as a new document when no row matches `where`.
+     *
+     * The insert is **not keyed**: `set` becomes the whole document, so it has to
+     * carry the identifying fields (`ref`, `id`…) itself. There is no unique
+     * constraint either, so two concurrent upserts on the same missing row can
+     * both insert — serialise them (a transaction, or one writer) when it matters.
+     */
+    upsert?: boolean;
 };
 
 /** `db.replace()` request — the table, the `WHERE` predicate, and the document to store. */
@@ -599,6 +608,8 @@ export type DuckdbTableUpdateResult = {
     table: string;
     /** Documents updated. */
     updated: number;
+    /** `1` when `upsert: true` had no match and inserted `set` — absent otherwise. */
+    inserted?: number;
 };
 
 /** What `table.replace()` reports — documents matched by the filter, replaced. */

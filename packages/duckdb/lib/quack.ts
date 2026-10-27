@@ -628,11 +628,31 @@ class DuckdbQuackInstance {
      *
      * `set` is a **JSON merge patch**: the named fields are merged into each
      * document, the others are left as they are.
+     *
+     * With `upsert: true`, a `where` that matches nothing inserts `set` as a new
+     * document instead — `{ table, updated: 0, inserted: 1 }`. `set` then has to be
+     * the whole document, identifying fields included; the `ts` column gets the
+     * ingestion time.
+     *
+     * An **array** runs the updates in order and returns their results in the same
+     * order. The batch is atomic: it opens a transaction when none is open (and
+     * joins the caller's transaction otherwise), so a failure leaves nothing behind.
      */
-    async update(options: DuckdbUpdateOptions): Promise<DuckdbTableUpdateResult> {
+    async update(options: DuckdbUpdateOptions): Promise<DuckdbTableUpdateResult>;
+    async update(options: DuckdbUpdateOptions[]): Promise<DuckdbTableUpdateResult[]>;
+    async update(
+        options: DuckdbUpdateOptions | DuckdbUpdateOptions[],
+    ): Promise<DuckdbTableUpdateResult | DuckdbTableUpdateResult[]> {
+        if (!Array.isArray(options)) return this.#updateOne(options);
+        return this.#batchWrites(options, (one) => this.#updateOne(one));
+    }
+
+    /** One `update` — the single-request implementation, transaction-aware. */
+    async #updateOne(options: DuckdbUpdateOptions): Promise<DuckdbTableUpdateResult> {
         const table = normaliseName(options?.table);
         const predicate = requireWhere(options?.where, "update");
         const patch = options?.set;
+        const upsert = options?.upsert === true;
         if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
             throw new DuckdbQuackError(
                 "`update` needs `set` — an object of fields to merge into each document",
@@ -644,9 +664,24 @@ class DuckdbQuackInstance {
             const result = await this.#execOnRemote(
                 `UPDATE ${quotePath(this.#serverTable(table))} SET "data" = json_merge_patch("data", ${quoteLiteral(JSON.stringify(patch))}) WHERE ${predicate}`,
             );
-            return { table, updated: affectedRows(result) };
+            const updated = affectedRows(result);
+            if (updated === 0 && upsert) {
+                // The UPDATE got past the binder, so the table exists: its columns
+                // are read server-side, inside the open transaction. `#insertRemote`
+                // takes rows keyed by column, not documents — `set` is the `data`.
+                await this.#insertRemote(table, await this.#remoteColumns(table), [{ data: patch }]);
+                return { table, updated: 0, inserted: 1 };
+            }
+            return { table, updated };
         }
-        return (await this.table(table)).update(predicate, patch);
+
+        const handle = await this.table(table);
+        const { updated } = await handle.update(predicate, patch);
+        if (updated === 0 && upsert) {
+            await this.#insertDocuments(table, [patch]);
+            return { table, updated: 0, inserted: 1 };
+        }
+        return { table, updated };
     }
 
     /**
@@ -660,8 +695,21 @@ class DuckdbQuackInstance {
      *     set: { ref: "A-1", total: 43 },
      * });
      * ```
+     *
+     * An **array** runs the replacements in order and returns their results in the
+     * same order, as one atomic batch (see `update`).
      */
-    async replace(options: DuckdbReplaceOptions): Promise<DuckdbTableReplaceResult> {
+    async replace(options: DuckdbReplaceOptions): Promise<DuckdbTableReplaceResult>;
+    async replace(options: DuckdbReplaceOptions[]): Promise<DuckdbTableReplaceResult[]>;
+    async replace(
+        options: DuckdbReplaceOptions | DuckdbReplaceOptions[],
+    ): Promise<DuckdbTableReplaceResult | DuckdbTableReplaceResult[]> {
+        if (!Array.isArray(options)) return this.#replaceOne(options);
+        return this.#batchWrites(options, (one) => this.#replaceOne(one));
+    }
+
+    /** One `replace` — the single-request implementation, transaction-aware. */
+    async #replaceOne(options: DuckdbReplaceOptions): Promise<DuckdbTableReplaceResult> {
         const table = normaliseName(options?.table);
         const predicate = requireWhere(options?.where, "replace");
         const document = options?.set;
@@ -687,8 +735,21 @@ class DuckdbQuackInstance {
      * ```ts
      * await db.delete({ table: "tickets", where: "data->>'ref' = 'A-2'" });
      * ```
+     *
+     * An **array** runs the deletes in order and returns their results in the same
+     * order, as one atomic batch (see `update`).
      */
-    async delete(options: DuckdbDeleteOptions): Promise<DuckdbTableDeleteResult> {
+    async delete(options: DuckdbDeleteOptions): Promise<DuckdbTableDeleteResult>;
+    async delete(options: DuckdbDeleteOptions[]): Promise<DuckdbTableDeleteResult[]>;
+    async delete(
+        options: DuckdbDeleteOptions | DuckdbDeleteOptions[],
+    ): Promise<DuckdbTableDeleteResult | DuckdbTableDeleteResult[]> {
+        if (!Array.isArray(options)) return this.#deleteOne(options);
+        return this.#batchWrites(options, (one) => this.#deleteOne(one));
+    }
+
+    /** One `delete` — the single-request implementation, transaction-aware. */
+    async #deleteOne(options: DuckdbDeleteOptions): Promise<DuckdbTableDeleteResult> {
         const table = normaliseName(options?.table);
         const predicate = requireWhere(options?.where, "delete");
 
@@ -699,6 +760,25 @@ class DuckdbQuackInstance {
             return { table, deleted: affectedRows(result) };
         }
         return (await this.table(table)).delete(predicate);
+    }
+
+    /**
+     * Run a write for each entry, **in order**, as one unit: the batch opens a
+     * transaction when none is open and joins the caller's otherwise. An empty
+     * list runs nothing; a failing entry rolls the whole batch back.
+     */
+    async #batchWrites<T, O>(options: O[], work: (one: O) => Promise<T>): Promise<T[]> {
+        if (!options.length) return [];
+        if (this.#inTransaction) {
+            const results: T[] = [];
+            for (const one of options) results.push(await work(one));
+            return results;
+        }
+        return this.transaction(async () => {
+            const results: T[] = [];
+            for (const one of options) results.push(await work(one));
+            return results;
+        });
     }
 
     /**
@@ -1389,28 +1469,28 @@ class DuckdbQuackInstance {
      * On an attached instance the statement runs **on the Quack server**, and the
      * variable stays for the following `exec` calls (session scope).
      */
-    async setVariable(name: string, value: unknown): Promise<{ name: string }> {
+    async setVar(name: string, value: unknown): Promise<{ name: string }> {
         const variable = normaliseName(name);
         await this.exec(`SET VARIABLE ${quoteIdent(variable)} = ${variableLiteral(value)}`);
         return { name: variable };
     }
 
     /** Read a session variable; `null` when it is not set (`getvariable`). */
-    async getVariable(name: string): Promise<unknown> {
+    async getVar(name: string): Promise<unknown> {
         const variable = normaliseName(name);
         const { rows } = await this.exec(`SELECT getvariable(${quoteLiteral(variable)}) AS value`);
         return rows[0]?.value ?? null;
     }
 
     /** Unset a session variable (`RESET VARIABLE`). */
-    async resetVariable(name: string): Promise<{ name: string }> {
+    async resetVar(name: string): Promise<{ name: string }> {
         const variable = normaliseName(name);
         await this.exec(`RESET VARIABLE ${quoteIdent(variable)}`);
         return { name: variable };
     }
 
     /** Every session variable with its type (`duckdb_variables()`). */
-    async listVariables(): Promise<DuckdbVariable[]> {
+    async listVars(): Promise<DuckdbVariable[]> {
         const { rows } = await this.exec(
             "SELECT name, value, type FROM duckdb_variables() ORDER BY name",
         );
@@ -1484,6 +1564,16 @@ class DuckdbQuackInstance {
         return this.#options.columns?.length ? this.#options.columns : DEFAULT_COLUMNS;
     }
 
+    /**
+     * Columns of an existing table, read **on the server** — the probes used
+     * outside a transaction would run in the client engine and cannot see it.
+     */
+    async #remoteColumns(table: string): Promise<Array<{ name: string; sql: string }>> {
+        const target = quotePath(this.#serverTable(table));
+        const probe = await this.#execOnRemote(`SELECT * FROM ${target} LIMIT 0`);
+        return probe.columns.map((name, index) => ({ name, sql: probe.types[index] ?? "VARCHAR" }));
+    }
+
     // ─── Ingest ───────────────────────────────────────────────────────────
 
     /**
@@ -1512,11 +1602,9 @@ class DuckdbQuackInstance {
         // Inside a server transaction, resolve the columns server-side: client-side
         // catalog probes do not see the open transaction and can end it.
         if (inTransaction && remote) {
-            const target = quotePath(this.#serverTable(table));
             let columns: Array<{ name: string; sql: string }>;
             try {
-                const probe = await this.#execOnRemote(`SELECT * FROM ${target} LIMIT 0`);
-                columns = probe.columns.map((name, index) => ({ name, sql: probe.types[index] ?? "VARCHAR" }));
+                columns = await this.#remoteColumns(table);
             } catch (err: any) {
                 throw new DuckdbQuackError(
                     `\`ingest\` inside a transaction needs an existing table '${table}' — ${firstLine(err?.message)}`,

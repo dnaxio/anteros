@@ -112,16 +112,16 @@ database fails at `connect()` with `DUCKDB_QUACK_DATABASE_FAILED`; `db` without 
 | `createVssIndex(table, options)`            | Builds/rebuilds an HNSW index on a `FLOAT[N]` column (`vss`).                      |
 | `searchVss(table, vector, options)`         | Nearest vectors, `distance` included — runs on the server when attached.           |
 | `dropVssIndex(table, options)`              | Drops the HNSW index; `dropped: false` when there was none.                        |
-| `setVariable(name, value)`                  | `SET VARIABLE name = value`; on the server when attached.                          |
-| `getVariable(name)` / `resetVariable(name)` | Read (`null` when unset) / `RESET VARIABLE`.                                        |
-| `listVariables()`                           | Every session variable with its type (`duckdb_variables()`).                        |
+| `setVar(name, value)`                       | `SET VARIABLE name = value`; on the server when attached.                          |
+| `getVar(name)` / `resetVar(name)`           | Read (`null` when unset) / `RESET VARIABLE`.                                        |
+| `listVars()`                                | Every session variable with its type (`duckdb_variables()`).                        |
 | `ingest({ table, rows })`                   | Queues rows **in the background**; creates the table if it is missing (on the remote when attached). |
 | `flush()`                                   | Waits for every queued write.                                                    |
 | `syncSchema()`                              | Waits for the startup reconciliation of `tables` — reports what changed.          |
 | `table(name, { ts? })`                      | A **data table** — `data` JSON + `ts` TIMESTAMP, created in the background.       |
-| `update({ table, where, set })`            | Patches matching documents (`json_merge_patch`) — `where` mandatory; `set` is merged.      |
-| `replace({ table, where, set })`           | Replaces matching documents entirely — `where` mandatory; `set` is stored whole.              |
-| `delete({ table, where })`                 | Deletes matching documents — `where` mandatory.                                    |
+| `update({ table, where, set, upsert? })`    | Patches matching documents (`json_merge_patch`); `upsert: true` inserts `set` on a miss.   |
+| `replace({ table, where, set })`            | Replaces matching documents entirely — `where` mandatory; `set` is stored whole.              |
+| `delete({ table, where })`                  | Deletes matching documents — `where` mandatory.                                    |
 | `raw()`                                     | The underlying `{ instance, connection }` — the escape hatch.                    |
 | `close()`                                   | Closes the instance; later calls are refused.                                    |
 | `isConnected` / `isAttached` / `url` / `alias` | State, readable at any time.                                                  |
@@ -154,22 +154,22 @@ no server.
 `SET VARIABLE` is available through `exec`, and wrapped by four methods:
 
 ```ts
-await db.setVariable("my_var", 30);
-await db.getVariable("my_var");        // 30
+await db.setVar("my_var", 30);
+await db.getVar("my_var");        // 30
 await db.exec("SELECT 20 + $my_var");  // 50
-await db.listVariables();              // [{ name, value, type }]
-await db.resetVariable("my_var");
+await db.listVars();              // [{ name, value, type }]
+await db.resetVar("my_var");
 ```
 
-- `setVariable` handles scalars: string, number, boolean, `null`, `Date` (`TIMESTAMP`). For a DuckDB
+- `setVar` handles scalars: string, number, boolean, `null`, `Date` (`TIMESTAMP`). For a DuckDB
   list/map or a query result, run the SQL yourself: `db.exec("SET VARIABLE files = (SELECT list(...) …)")`.
-- `getVariable` uses `getvariable()` and returns `null` for an unset variable.
+- `getVar` uses `getvariable()` and returns `null` for an unset variable.
 - On an attached instance, the four methods run **on the Quack server**, and variables are session-scoped:
   they persist across `exec` calls without values. A statement with bound `values` runs in the client engine,
   so it reads/writes **client** variables instead.
 - `$name` is DuckDB 2.0's shorthand for `getvariable('name')`. Our inliner leaves a `$name` it was not given
   a value for to DuckDB, so session variables still work; unlike `getvariable`, an unset `$name` raises.
-- `listVariables()` reads `duckdb_variables()`: `value` is text, `type` is the DuckDB type.
+- `listVars()` reads `duckdb_variables()`: `value` is text, `type` is the DuckDB type.
 - Variables are session state — nothing is persisted in the database file.
 
 ### Storage and files
@@ -268,7 +268,39 @@ await tickets.delete("data->>'ref' = 'A-2'");                  // { table, delet
 await db.update({ table: "tickets", where: "data->>'ref' = 'A-1'", set: { total: 44 } });
 await db.replace({ table: "tickets", where: "data->>'ref' = 'A-2'", set: { ref: "A-2" } });
 await db.delete({ table: "tickets", where: "data->>'ref' = 'A-2'" });
+
+// Upsert: insert `set` when nothing matches — returns { table, updated: 0, inserted: 1 }
+await db.update({
+  table: "tickets",
+  where: "data->>'ref' = 'A-3'",
+  set: { ref: "A-3", total: 7 },
+  upsert: true,
+});
 ```
+
+`upsert` inserts `set` **as the whole document**, with `ts = now()`. There is no key column and no
+unique constraint: include the identifying fields in `set`, and serialise concurrent upserts (a
+transaction, or one writer) when duplicates would matter.
+
+`update`, `replace` and `delete` also take an **array**, run in order, returning results in the same order.
+The batch is atomic — it opens a transaction, or joins the one you already have:
+
+```ts
+await db.update([
+  { table: "tickets", where: "data->>'ref' = 'A-1'", set: { total: 43 } },
+  { table: "tickets", where: "data->>'ref' = 'A-2'", set: { ref: "A-2", total: 7 }, upsert: true },
+]); // → [{ table, updated: 1 }, { table, updated: 0, inserted: 1 }]
+
+await db.replace([
+  { table: "tickets", where: "data->>'ref' = 'A-1'", set: { ref: "A-1", total: 50 } },
+]);
+
+await db.delete([
+  { table: "tickets", where: "data->>'ref' = 'A-3'" },
+]);
+```
+
+One failing entry rolls the whole batch back; an empty array returns `[]`.
 
 | Element | What it does |
 | --- | --- |

@@ -446,29 +446,29 @@ describe("@anteros/duckdb — local instance", () => {
     it("sets, reads, lists and resets session variables", async () => {
         const db = new DuckdbQuackInstance();
 
-        expect(await db.setVariable("my_var", 30)).toEqual({ name: "my_var" });
-        expect(await db.getVariable("my_var")).toBe(30);
+        expect(await db.setVar("my_var", 30)).toEqual({ name: "my_var" });
+        expect(await db.getVar("my_var")).toBe(30);
         expect((await db.exec("SELECT 20 + $my_var AS total")).rows).toEqual([{ total: 50 }]);
 
         // Quoted names work too.
-        await db.setVariable("my string", "hello");
-        expect(await db.getVariable("my string")).toBe("hello");
+        await db.setVar("my string", "hello");
+        expect(await db.getVar("my string")).toBe("hello");
 
-        await db.setVariable("my_date", new Date(2026, 0, 2, 3, 4, 5));
-        expect(String(await db.getVariable("my_date"))).toContain("2026-01-02 03:04:05");
+        await db.setVar("my_date", new Date(2026, 0, 2, 3, 4, 5));
+        expect(String(await db.getVar("my_date"))).toContain("2026-01-02 03:04:05");
 
-        const variables = await db.listVariables();
+        const variables = await db.listVars();
         expect(variables.find((variable) => variable.name === "my_var"))
             .toEqual({ name: "my_var", value: "30", type: "INTEGER" });
         expect(variables.find((variable) => variable.name === "my string")?.type).toBe("VARCHAR");
 
-        await db.resetVariable("my_var");
-        expect(await db.getVariable("my_var")).toBeNull();
-        expect(await db.getVariable("never_set")).toBeNull();
+        await db.resetVar("my_var");
+        expect(await db.getVar("my_var")).toBeNull();
+        expect(await db.getVar("never_set")).toBeNull();
 
         // A variable can hold a query result — raw SQL for the DuckDB types.
         await db.exec("SET VARIABLE my_list = (SELECT list(x) FROM range(3) t(x))");
-        expect(await db.getVariable("my_list")).toEqual(["0", "1", "2"]);
+        expect(await db.getVar("my_list")).toEqual(["0", "1", "2"]);
 
         await db.close();
     }, 60_000);
@@ -500,9 +500,105 @@ describe("@anteros/duckdb — local instance", () => {
         })).rejects.toThrow("abort-ingest");
         expect((await db.exec("SELECT count(*) AS n FROM tx")).rows).toEqual([{ n: "2" }]);
 
+        // An `upsert` insert joins the local transaction too.
+        const docs = await db.table("tx_docs_local");
+        await docs.ingest([{ ref: "A-1" }]);
+        await docs.flush();
+        await expect(db.transaction(async () => {
+            expect(await db.update({
+                table: "tx_docs_local",
+                where: "data->>'ref' = 'A-2'",
+                set: { ref: "A-2" },
+                upsert: true,
+            })).toEqual({ table: "tx_docs_local", updated: 0, inserted: 1 });
+            throw new Error("abort-upsert");
+        })).rejects.toThrow("abort-upsert");
+        expect((await db.exec("SELECT count(*) AS n FROM tx_docs_local")).rows).toEqual([{ n: "1" }]);
+
         await expect(db.transaction(async () => {
             await db.transaction(async () => {});
         })).rejects.toThrow(/Nested transactions/);
+
+        await db.close();
+    }, 60_000);
+
+    it("runs a batch of updates as one unit", async () => {
+        const db = new DuckdbQuackInstance();
+        const docs = await db.table("batch");
+        await docs.ingest([{ ref: "A-1", total: 1 }]);
+        await docs.flush();
+
+        expect(await db.update([])).toEqual([]);
+
+        const results = await db.update([
+            { table: "batch", where: "data->>'ref' = 'A-1'", set: { total: 2 } },
+            { table: "batch", where: "data->>'ref' = 'A-2'", set: { ref: "A-2", total: 7 }, upsert: true },
+        ]);
+        expect(results).toEqual([
+            { table: "batch", updated: 1 },
+            { table: "batch", updated: 0, inserted: 1 },
+        ]);
+        expect((await db.exec(
+            "SELECT data->>'ref' AS ref, CAST(data->>'total' AS INTEGER) AS total FROM batch ORDER BY ref",
+        )).rows).toEqual([{ ref: "A-1", total: 2 }, { ref: "A-2", total: 7 }]);
+
+        // A failure anywhere rolls the whole batch back.
+        await expect(db.update([
+            { table: "batch", where: "data->>'ref' = 'A-1'", set: { total: 99 } },
+            { table: "batch", where: "data->>'ref' = 'A-3'", set: null as any },
+        ])).rejects.toThrow(/set/i);
+        expect((await db.exec("SELECT CAST(data->>'total' AS INTEGER) AS total FROM batch WHERE data->>'ref' = 'A-1'")).rows)
+            .toEqual([{ total: 2 }]);
+
+        // Inside an open transaction, the batch joins it instead of nesting one.
+        await expect(db.transaction(async () => {
+            await db.update([
+                { table: "batch", where: "data->>'ref' = 'A-1'", set: { total: 50 } },
+                { table: "batch", where: "data->>'ref' = 'A-4'", set: { ref: "A-4" }, upsert: true },
+            ]);
+            throw new Error("abort-batch");
+        })).rejects.toThrow("abort-batch");
+        expect((await db.exec("SELECT count(*) AS n FROM batch")).rows).toEqual([{ n: "2" }]);
+        expect((await db.exec("SELECT CAST(data->>'total' AS INTEGER) AS total FROM batch WHERE data->>'ref' = 'A-1'")).rows)
+            .toEqual([{ total: 2 }]);
+
+        await db.close();
+    }, 60_000);
+
+    it("runs replace and delete batches as one unit", async () => {
+        const db = new DuckdbQuackInstance();
+        const docs = await db.table("batch_crud");
+        await docs.ingest([
+            { ref: "A-1", zone: "A" },
+            { ref: "A-2", zone: "B" },
+            { ref: "A-3", zone: "C" },
+        ]);
+        await docs.flush();
+
+        expect(await db.replace([
+            { table: "batch_crud", where: "data->>'ref' = 'A-1'", set: { ref: "A-1", zone: "R" } },
+            { table: "batch_crud", where: "data->>'ref' = 'A-2'", set: { ref: "A-2", zone: "S" } },
+        ])).toEqual([
+            { table: "batch_crud", replaced: 1 },
+            { table: "batch_crud", replaced: 1 },
+        ]);
+
+        expect(await db.delete([
+            { table: "batch_crud", where: "data->>'ref' = 'A-3'" },
+            { table: "batch_crud", where: "data->>'ref' = 'ZZ'" },
+        ])).toEqual([
+            { table: "batch_crud", deleted: 1 },
+            { table: "batch_crud", deleted: 0 },
+        ]);
+        expect(await db.delete([])).toEqual([]);
+
+        // A failing entry rolls the whole batch back.
+        await expect(db.delete([
+            { table: "batch_crud", where: "data->>'ref' = 'A-1'" },
+            { table: "batch_crud", where: " " },
+        ])).rejects.toThrow(/needs `where`/i);
+        expect((await db.exec("SELECT data->>'ref' AS ref FROM batch_crud ORDER BY ref")).rows)
+            .toEqual([{ ref: "A-1" }, { ref: "A-2" }]);
 
         await db.close();
     }, 60_000);
@@ -858,14 +954,14 @@ describe("@anteros/duckdb — Quack remote", () => {
     it("keeps session variables on the Quack server across exec", async () => {
         const db = defaultDb;
 
-        await db.setVariable("remote_var", 30);
-        expect(await db.getVariable("remote_var")).toBe(30);
+        await db.setVar("remote_var", 30);
+        expect(await db.getVar("remote_var")).toBe(30);
         expect((await db.exec("SELECT 20 + $remote_var AS total")).rows).toEqual([{ total: 50 }]);
-        expect((await db.listVariables()).find((variable) => variable.name === "remote_var"))
+        expect((await db.listVars()).find((variable) => variable.name === "remote_var"))
             .toMatchObject({ value: "30", type: "INTEGER" });
 
-        await db.resetVariable("remote_var");
-        expect(await db.getVariable("remote_var")).toBeNull();
+        await db.resetVar("remote_var");
+        expect(await db.getVar("remote_var")).toBeNull();
 
         // A client-side variable is left to DuckDB even when other named values
         // are inlined (the client engine resolves `$client_var`).
@@ -967,6 +1063,19 @@ describe("@anteros/duckdb — Quack remote", () => {
                 throw new Error("abort-update");
             })).rejects.toThrow("abort-update");
             expect((await serverDb.exec("SELECT data->>'v' AS v FROM tx_docs")).rows).toEqual([{ v: "1" }]);
+
+            // An `upsert` insert joins it too.
+            await expect(db.transaction(async () => {
+                expect(await db.update({
+                    table: "tx_docs",
+                    where: "data->>'ref' = 'A-99'",
+                    set: { ref: "A-99", v: 9 },
+                    upsert: true,
+                })).toEqual({ table: "tx_docs", updated: 0, inserted: 1 });
+                throw new Error("abort-upsert");
+            })).rejects.toThrow("abort-upsert");
+            expect((await serverDb.exec("SELECT count(*) AS n FROM tx_docs WHERE data->>'ref' = 'A-99'")).rows)
+                .toEqual([{ n: "0" }]);
         } finally {
             await db.deleteTable("tx_remote").catch(() => {});
             await db.deleteTable("tx_docs").catch(() => {});
@@ -1021,6 +1130,101 @@ describe("@anteros/duckdb — Quack remote", () => {
             .rejects.toThrow(/set/i);
 
     }, 60_000);
+
+    it("upserts a document when the filter matches nothing", async () => {
+        const db = defaultDb;
+        const docs = await db.table("docs_upsert");
+        await docs.ingest([{ ref: "A-1", zone: "A" }]);
+        await docs.flush();
+
+        // A match patches, as usual.
+        expect(await db.update({
+            table: "docs_upsert",
+            where: "data->>'ref' = 'A-1'",
+            set: { zone: "Z" },
+            upsert: true,
+        })).toEqual({ table: "docs_upsert", updated: 1 });
+
+        // No match → `set` becomes the new document.
+        expect(await db.update({
+            table: "docs_upsert",
+            where: "data->>'ref' = 'A-9'",
+            set: { ref: "A-9", zone: "new", total: 7 },
+            upsert: true,
+        })).toEqual({ table: "docs_upsert", updated: 0, inserted: 1 });
+
+        expect((await db.exec(
+            "SELECT data->>'ref' AS ref, data->>'zone' AS zone, CAST(data->>'total' AS INTEGER) AS total FROM docs_upsert WHERE data->>'ref' = 'A-9'",
+        )).rows).toEqual([{ ref: "A-9", zone: "new", total: 7 }]);
+
+        // A second call finds the row: it patches, and does not duplicate it.
+        expect(await db.update({
+            table: "docs_upsert",
+            where: "data->>'ref' = 'A-9'",
+            set: { zone: "again" },
+            upsert: true,
+        })).toEqual({ table: "docs_upsert", updated: 1 });
+        expect((await db.exec("SELECT count(*) AS n FROM docs_upsert WHERE data->>'ref' = 'A-9'")).rows)
+            .toEqual([{ n: "1" }]);
+
+        // Without `upsert`, a miss writes nothing.
+        expect(await db.update({
+            table: "docs_upsert",
+            where: "data->>'ref' = 'A-10'",
+            set: { ref: "A-10" },
+        })).toEqual({ table: "docs_upsert", updated: 0 });
+        expect((await db.exec("SELECT count(*) AS n FROM docs_upsert WHERE data->>'ref' = 'A-10'")).rows)
+            .toEqual([{ n: "0" }]);
+
+        await db.deleteTable("docs_upsert").catch(() => {});
+    }, 60_000);
+
+    it("runs write batches on the Quack server", async () => {
+        const db = defaultDb;
+        const docs = await db.table("docs_batch");
+        await docs.ingest([{ ref: "A-1", total: 1 }]);
+        await docs.flush();
+
+        try {
+            expect(await db.update([
+                { table: "docs_batch", where: "data->>'ref' = 'A-1'", set: { total: 2 } },
+                { table: "docs_batch", where: "data->>'ref' = 'A-2'", set: { ref: "A-2" }, upsert: true },
+            ])).toEqual([
+                { table: "docs_batch", updated: 1 },
+                { table: "docs_batch", updated: 0, inserted: 1 },
+            ]);
+
+            // Both writes went to the server.
+            expect((await serverDb.exec("SELECT count(*) AS n FROM docs_batch")).rows).toEqual([{ n: "2" }]);
+
+            // A failure rolls the batch back on the server too.
+            await expect(db.update([
+                { table: "docs_batch", where: "data->>'ref' = 'A-1'", set: { total: 99 } },
+                { table: "docs_batch", where: "data->>'ref' = 'A-3'", set: null as any },
+            ])).rejects.toThrow(/set/i);
+            expect((await serverDb.exec("SELECT CAST(data->>'total' AS INTEGER) AS total FROM docs_batch WHERE data->>'ref' = 'A-1'")).rows)
+                .toEqual([{ total: 2 }]);
+
+            // `replace` and `delete` take a batch the same way.
+            expect(await db.replace([
+                { table: "docs_batch", where: "data->>'ref' = 'A-1'", set: { ref: "A-1", total: 5 } },
+                { table: "docs_batch", where: "data->>'ref' = 'A-2'", set: { ref: "A-2" } },
+            ])).toEqual([
+                { table: "docs_batch", replaced: 1 },
+                { table: "docs_batch", replaced: 1 },
+            ]);
+            expect(await db.delete([
+                { table: "docs_batch", where: "data->>'ref' = 'A-1'" },
+                { table: "docs_batch", where: "data->>'ref' = 'A-2'" },
+            ])).toEqual([
+                { table: "docs_batch", deleted: 1 },
+                { table: "docs_batch", deleted: 1 },
+            ]);
+            expect((await serverDb.exec("SELECT count(*) AS n FROM docs_batch")).rows).toEqual([{ n: "0" }]);
+        } finally {
+            await db.deleteTable("docs_batch").catch(() => {});
+        }
+    }, 120_000);
 
     it("replaces the whole document of matching rows", async () => {
         const db = defaultDb;
