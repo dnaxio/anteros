@@ -8,7 +8,6 @@ Security fixes are released on the **latest published version** of each package:
 - `@anteros/cli`
 - `@anteros/sdk`
 - `@anteros/duckdb`
-- `@anteros/quack`
 
 Older 0.x versions are not maintained — upgrade before reporting, when you can.
 
@@ -39,7 +38,7 @@ disclosure, or coordinate a date with us if you need longer.
 - Request handling: body parsing, validation, uploads, file paths, size limits, error responses that could
   leak internals.
 - Secret handling: what reaches logs, audit entries, error payloads and agent memory.
-- The SDK, the CLI (`anteros`, `antq`) and the DuckDB/Quack wrappers.
+- The SDK, the CLI (`anteros`, `antd`) and the DuckDB/Quack wrappers.
 
 **Out of scope**
 

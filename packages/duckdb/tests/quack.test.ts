@@ -410,6 +410,114 @@ describe("@anteros/duckdb — local instance", () => {
         await db.close();
     }, 120_000);
 
+    it("creates the folder of a new database file", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "quack-dir-"));
+        const file = join(directory, "nested", "deeper", "analytics.duckdb");
+
+        const db = new DuckdbQuackInstance({ dbPath: file });
+        try {
+            await db.connect();
+            await db.exec("CREATE TABLE t AS SELECT 1 AS n");
+            expect(await Bun.file(file).exists()).toBe(true);
+        } finally {
+            await db.close();
+            await rm(directory, { recursive: true, force: true });
+        }
+    }, 60_000);
+
+    it("takes httpfs settings from options", async () => {
+        const db = new DuckdbQuackInstance({ options: { httpfs_connection_caching: false } });
+        try {
+            await db.connect();
+            const { rows } = await db.exec(
+                "SELECT current_setting('httpfs_connection_caching') AS caching",
+            );
+            expect(rows).toEqual([{ caching: false }]);
+        } finally {
+            await db.close();
+        }
+    }, 60_000);
+
+    it("purges rows older than a retention window", async () => {
+        const db = new DuckdbQuackInstance();
+        await db.exec("CREATE TABLE ttl (id VARCHAR, ts TIMESTAMP)");
+        await db.exec(`INSERT INTO ttl VALUES ('old', now() - INTERVAL 40 DAY), ('new', now())`);
+
+        expect(await db.purge({ table: "ttl", column: "ts", ttl: "30d" }))
+            .toEqual({ table: "ttl", deleted: 1 });
+        expect((await db.exec("SELECT id FROM ttl")).rows).toEqual([{ id: "new" }]);
+
+        await db.close();
+    }, 60_000);
+
+    it("batches a purge instead of one giant delete", async () => {
+        const db = new DuckdbQuackInstance();
+        await db.exec("CREATE TABLE ttl (id VARCHAR, ts TIMESTAMP)");
+        await db.exec(`INSERT INTO ttl VALUES
+            ('a', now() - INTERVAL 40 DAY),
+            ('b', now() - INTERVAL 41 DAY),
+            ('c', now() - INTERVAL 42 DAY),
+            ('d', now())`);
+
+        expect(await db.purge({ table: "ttl", column: "ts", ttl: "30d", batch: 1 }))
+            .toEqual({ table: "ttl", deleted: 3 });
+        expect((await db.exec("SELECT id FROM ttl")).rows).toEqual([{ id: "d" }]);
+
+        await db.close();
+    }, 60_000);
+
+    it("narrows the window with a predicate, or uses an explicit Date", async () => {
+        const db = new DuckdbQuackInstance();
+        await db.exec("CREATE TABLE logs (id VARCHAR, kind VARCHAR, ts TIMESTAMP)");
+        await db.exec(`INSERT INTO logs VALUES
+            ('l1', 'log', now() - INTERVAL 40 DAY),
+            ('l2', 'log', now() - INTERVAL 50 DAY),
+            ('a1', 'audit', now() - INTERVAL 40 DAY)`);
+
+        expect(await db.purge({ table: "logs", column: "ts", ttl: "30d", where: "kind = 'log'" }))
+            .toEqual({ table: "logs", deleted: 2 });
+        expect((await db.exec("SELECT id FROM logs")).rows).toEqual([{ id: "a1" }]);
+
+        // A Date is an explicit cutoff — anything older than tomorrow goes.
+        expect(await db.purge({ table: "logs", column: "ts", ttl: new Date(Date.now() + 86_400_000) }))
+            .toEqual({ table: "logs", deleted: 1 });
+        expect((await db.exec("SELECT count(*) AS n FROM logs")).rows).toEqual([{ n: "0" }]);
+
+        await db.close();
+    }, 60_000);
+
+    it("schedules a retention job on a timer", async () => {
+        const db = new DuckdbQuackInstance();
+        await db.exec("CREATE TABLE ttl (id VARCHAR, ts TIMESTAMP)");
+        await db.exec(`INSERT INTO ttl VALUES ('old', now() - INTERVAL 40 DAY)`);
+
+        const job = db.retention({ table: "ttl", column: "ts", ttl: "30d", every: "1s" });
+        try {
+            expect(job.running).toBe(true);
+            await Bun.sleep(1300); // runOnStart is immediate; the timer would catch a miss
+            expect((await db.exec("SELECT count(*) AS n FROM ttl")).rows).toEqual([{ n: "0" }]);
+        } finally {
+            job.stop();
+            expect(job.running).toBe(false);
+            await db.close();
+        }
+    }, 60_000);
+
+    it("rolls a purge back inside a transaction", async () => {
+        const db = new DuckdbQuackInstance();
+        await db.exec("CREATE TABLE ttl (id VARCHAR, ts TIMESTAMP)");
+        await db.exec(`INSERT INTO ttl VALUES ('old', now() - INTERVAL 40 DAY)`);
+
+        await expect(db.transaction(async () => {
+            expect(await db.purge({ table: "ttl", column: "ts", ttl: "30d" }))
+                .toEqual({ table: "ttl", deleted: 1 });
+            throw new Error("abort-purge");
+        })).rejects.toThrow("abort-purge");
+        expect((await db.exec("SELECT count(*) AS n FROM ttl")).rows).toEqual([{ n: "1" }]);
+
+        await db.close();
+    }, 60_000);
+
     it("persists an HNSW index in a file when asked", async () => {
         const directory = await mkdtemp(join(tmpdir(), "quack-vss-"));
         const file = join(directory, "vecs.duckdb");
@@ -632,6 +740,29 @@ describe("@anteros/duckdb — Quack remote", () => {
         expect(reader.getRowObjectsJson()).toEqual([{ s: "world" }]);
 
         await db.close();
+    }, 60_000);
+
+    it("sends the ATTACH options it was given", async () => {
+        const db = new DuckdbQuackInstance({
+            url: serverUrl,
+            token: TOKEN,
+            clientId: "test-client",
+            heartbeatTimeout: 30,
+        });
+        try {
+            expect((await db.exec("SELECT 42 AS n")).rows).toEqual([{ n: 42 }]);
+        } finally {
+            await db.close();
+        }
+    }, 60_000);
+
+    it("refuses a client id shorter than Quack's minimum", async () => {
+        const db = new DuckdbQuackInstance({ url: serverUrl, token: TOKEN, clientId: "abc" });
+        try {
+            await expect(db.connect()).rejects.toThrow(/client id/i);
+        } finally {
+            await db.close().catch(() => {});
+        }
     }, 60_000);
 
     it("writes on the remote, and the server sees it", async () => {
@@ -1226,6 +1357,20 @@ describe("@anteros/duckdb — Quack remote", () => {
         }
     }, 120_000);
 
+    it("purges old rows on the Quack server", async () => {
+        const db = defaultDb;
+        await db.exec("CREATE TABLE ttl_remote (id VARCHAR, ts TIMESTAMP)");
+        await db.exec(`INSERT INTO ttl_remote VALUES ('old', now() - INTERVAL 40 DAY), ('new', now())`);
+
+        try {
+            expect(await db.purge({ table: "ttl_remote", column: "ts", ttl: "30d" }))
+                .toEqual({ table: "ttl_remote", deleted: 1 });
+            expect((await serverDb.exec("SELECT id FROM ttl_remote")).rows).toEqual([{ id: "new" }]);
+        } finally {
+            await db.deleteTable("ttl_remote").catch(() => {});
+        }
+    }, 60_000);
+
     it("replaces the whole document of matching rows", async () => {
         const db = defaultDb;
         const docs = await db.table("docs_replace");
@@ -1455,6 +1600,35 @@ describe("@anteros/duckdb — Quack server", () => {
         }
     }, 120_000);
 
+    it("keeps the process alive without a keep-alive of its own", async () => {
+        const proc = Bun.spawn(["bun", join(import.meta.dir, "fixtures", "quack-idle.ts")], {
+            cwd: import.meta.dir,
+            env: { ...process.env, QUACK_TEST_PORT: String(freePort()), QUACK_TEST_TOKEN: "idle-token" },
+            stdout: "pipe",
+            stderr: "pipe",
+        });
+
+        try {
+            const reader = (proc.stdout as ReadableStream).getReader();
+            const decoder = new TextDecoder();
+            let output = "";
+
+            while (!output.includes("READY")) {
+                const chunk = await reader.read();
+                if (chunk.done) break;
+                output += decoder.decode(chunk.value);
+            }
+            expect(output).toContain("READY quack:");
+
+            // The fixture has no `setInterval`: without the library's timer, Bun
+            // would exit here (nothing else keeps the event loop alive).
+            await Bun.sleep(1200);
+            expect(proc.exitCode).toBeNull();
+        } finally {
+            proc.kill();
+        }
+    }, 60_000);
+
     it("starts twice without serving twice", async () => {
         const own = new DuckdbQuackServer({ port: freePort(), token: "twice" });
         await own.start();
@@ -1488,6 +1662,21 @@ describe("@anteros/duckdb — Quack server: options", () => {
         await rm(directory, { recursive: true, force: true });
     }, 120_000);
 
+    it("creates the folders of a new dbPath", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "quack-"));
+        const file = join(directory, "nested", "deeper", "analytics.duckdb");
+
+        const own = new DuckdbQuackServer({ port: freePort(), token: "own-token", dbPath: file });
+        await own.start();
+        try {
+            await own.db.exec("CREATE TABLE t AS SELECT 1 AS n");
+            expect(await Bun.file(file).exists()).toBe(true);
+        } finally {
+            await own.stop();
+            await rm(directory, { recursive: true, force: true });
+        }
+    }, 60_000);
+
     it("applies the settings it was given, readable back", async () => {
         const own = new DuckdbQuackServer({
             port: freePort(),
@@ -1510,6 +1699,36 @@ describe("@anteros/duckdb — Quack server: options", () => {
 
         await own.stop();
         expect(own.listenUrl).toBeUndefined();
+    }, 60_000);
+
+    it("passes DuckDB and Quack settings through, typed or not", async () => {
+        const own = new DuckdbQuackServer({
+            port: freePort(),
+            token: "own-token",
+            options: {
+                threads: 2,
+                default_null_order: "NULLS_LAST",
+                quack_server_max_connections: 512,
+                quack_enable_reconnects: true,
+            },
+        });
+        await own.start();
+        try {
+            const { rows } = await own.db.exec(
+                `SELECT current_setting('threads') AS threads,
+                        current_setting('default_null_order') AS ordering,
+                        current_setting('quack_server_max_connections') AS connections,
+                        current_setting('quack_enable_reconnects') AS reconnects`,
+            );
+            expect(rows).toEqual([{
+                threads: "2",
+                ordering: "NULLS_LAST",
+                connections: "512",
+                reconnects: true,
+            }]);
+        } finally {
+            await own.stop();
+        }
     }, 60_000);
 
     it("builds declared full-text indexes before it starts serving", async () => {

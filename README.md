@@ -71,8 +71,7 @@ bun run index.ts
 | `@anteros/core` | The framework: server, collections, services, routes, hooks, scripts, workflows, agents |
 | `@anteros/cli` | The `anteros` binary — `create`, `dev`, `doctor` |
 | `@anteros/sdk` | Typed client for the HTTP API |
-| `@anteros/duckdb` | DuckDB over the Quack protocol — local instance, attached client, server, FTS, VSS, transactions |
-| `@anteros/quack` | The `antq` CLI — serves a DuckDB instance over Quack |
+| `@anteros/duckdb` | DuckDB over the Quack protocol — instance, attached client, server, the `antd` CLI, FTS, VSS, retention |
 
 Agents and their tools live under `{tenant.dir}/ai/`:
 
@@ -110,7 +109,6 @@ Per-package type checking:
 
 ```bash
 bunx tsc --noEmit -p packages/duckdb/tsconfig.json
-bunx tsc --noEmit -p packages/quack/tsconfig.json
 ```
 
 ## License

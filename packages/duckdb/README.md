@@ -14,10 +14,10 @@ A DuckDB instance over the **[Quack](https://duckdb.org/quack/)** protocol — t
 
 ## CLI
 
-Serving a database from the terminal is the other package's job: [`@anteros/quack`](../quack) ships the
-`antq` binary — `bunx @anteros/quack start --token …`. That package is standalone (it depends on
-`@duckdb/node-api`, not on this one); this package keeps the library: the two classes, their options, and
-the protocol's traps.
+The package ships the **`antd`** binary as well: same server, from the terminal, no code —
+`bunx @anteros/duckdb start --token …`, or `antd start …` once installed. It is a thin layer over
+`DuckdbQuackServer`: flags, banner, signals. The options and examples are under
+[The `antd` CLI](#the-antd-cli).
 
 ## Install
 
@@ -43,7 +43,7 @@ import { DuckdbQuackInstance } from "@anteros/duckdb";
 const db = new DuckdbQuackInstance({
   url: "quack:localhost:9494",
   token: process.env.QUACK_TOKEN,
-  options: { threads: "2" },     // the client instance: pin the threads
+  options: { threads: 2 },     // the client instance: pin the threads
 });
 
 // One table, two columns: `data` (JSON) and `ts` (TIMESTAMP).
@@ -77,9 +77,12 @@ await db.close();
 | `db`       | `string`                                | —                  | Select a database **on the server** (`USE`) — for a server exposing several attached databases; requires `url`. |
 | `readOnly` | `boolean`                               | —                  | **Refused** — Quack 2.0 accepts `READ_ONLY` on `ATTACH` and ignores it. Enforce it on the server (`authorizationFunction`). |
 | `disableSsl` | `boolean`                             | Quack's default    | `true` = plain HTTP, `false` = forced TLS (even localhost), omitted = plain for a local URI and TLS otherwise (`DISABLE_SSL`). |
+| `sslFingerprint` | `string`                          | —                  | Trust a **self-signed** certificate (`SSL_FINGERPRINT`) — the value `quack_generate_keys` returns. |
+| `clientId` | `string`                                | random             | Client id sent to the server (`CLIENT_ID`), at least 4 characters.          |
+| `heartbeatTimeout` | `number`                        | `60`               | Heartbeat lease in seconds (`HEARTBEAT_TIMEOUT`).                           |
 | `secret`   | `string`                                | `'anteros_quack'`  | Name given to the created secret.                                              |
 | `dbPath`   | `string`                                | —                  | Open a **local** DuckDB file instead of memory. The remote's data is never here. |
-| `options`  | `Record<string, string \| number \| boolean>` | —            | DuckDB configuration of the local instance (`threads`, `memory_limit`…).        |
+| `options`  | `DuckdbOptions`                      | —            | DuckDB configuration of the local instance — `threads`, `memory_limit`… autocomplete; any other setting passes through. |
 | `columns`  | `DuckdbColumn[]`                        | `id`/`ts`/`data`   | Shape of a table created without a schema.                                     |
 | `tables`   | `DuckdbTableSchema[]`                   | —                  | Tables the instance must have — reconciled at startup (see below).             |
 | `onError`  | `(error: Error) => void`                | `console.error`    | Where a failed **background** `ingest` reports itself.                         |
@@ -95,6 +98,24 @@ await db.exec("SELECT * FROM orders"); // runs on PROD_RTL, not the server defau
 The choice is **per client session** (`USE` on the server). Without `db`, the server's **default database** is
 used — the `dbPath` file's database (e.g. `DEMO_ST` for `DEMO_ST.duckdb`), or `memory`. A missing named
 database fails at `connect()` with `DUCKDB_QUACK_DATABASE_FAILED`; `db` without `url` is refused.
+
+### HTTP connection caching
+
+Quack clients talk HTTP through `httpfs`, which **reuses the connection** by default
+(`httpfs_connection_caching = true`): the instance pays one TCP — and, when remote, one TLS — handshake, not one
+per query. It is a setting like any other, so it belongs in `options`:
+
+```ts
+const db = new DuckdbQuackInstance({
+  url,
+  token,
+  options: { httpfs_connection_caching: false }, // disable — debugging only
+});
+```
+
+Keep the default on: a long-lived instance (or a pool of them) is what makes small, frequent queries cheap.
+Turn it off to debug a proxy or a load balancer, or to force a fresh connection per request. It applies to the
+whole `httpfs` client of the instance — Quack, S3, GCS — not just the remote.
 
 ## Methods
 
@@ -122,6 +143,8 @@ database fails at `connect()` with `DUCKDB_QUACK_DATABASE_FAILED`; `db` without 
 | `update({ table, where, set, upsert? })`    | Patches matching documents (`json_merge_patch`); `upsert: true` inserts `set` on a miss.   |
 | `replace({ table, where, set })`            | Replaces matching documents entirely — `where` mandatory; `set` is stored whole.              |
 | `delete({ table, where })`                  | Deletes matching documents — `where` mandatory.                                    |
+| `purge({ table, column, ttl, where?, batch? })` | Deletes rows older than `ttl` on a date column — no native DuckDB TTL.        |
+| `retention({ …, every })`                   | Repeats the purge on a timer; returns `{ run, stop, running }`.                     |
 | `raw()`                                     | The underlying `{ instance, connection }` — the escape hatch.                    |
 | `close()`                                   | Closes the instance; later calls are refused.                                    |
 | `isConnected` / `isAttached` / `url` / `alias` | State, readable at any time.                                                  |
@@ -130,6 +153,45 @@ database fails at `connect()` with `DUCKDB_QUACK_DATABASE_FAILED`; `db` without 
 **row materialisation** (columns + `rows` built as JS objects) — opening/attaching the instance is not counted.
 A query returning 500k rows costs far more than the same scan aggregated to one row, and that difference *is*
 in `duration_ms`.
+
+### Quack settings
+
+The extension registers ordinary DuckDB settings — set them in `options` at creation, or with
+`SET GLOBAL` at run time. Defaults are Quack's own.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `quack_target_batch_bytes` | 32 MiB | Target size of one wire batch |
+| `quack_prepare_inline_rows` | 24 576 | Rows returned inline in the PREPARE response |
+| `quack_fetch_read_ahead` | 0 (async threads) | FETCH requests kept in flight ahead of the scan |
+| `quack_rebalance_buffer_bytes` | 0 (auto) | Pending bytes the batch rebalancer buffers |
+| `quack_server_stream_buffer_bytes` | 256 MiB | Server-side per-stream byte budget |
+| `quack_server_max_connections` | 1024 | Maximum concurrent connections |
+| `quack_server_keep_alive_timeout` | 300 | Seconds an idle keep-alive connection stays open |
+| `quack_default_client_id` | random (`QUACK_CLIENT_ID`) | Client id sent to the server — at least 4 characters |
+| `quack_default_heartbeat_timeout` | 60 | Heartbeat lease in seconds |
+| `quack_enable_reconnects` | false | Acknowledge results and cache them for reconnects |
+| `quack_result_ttl` | 3600 | Seconds an idle cached result is kept (0 = never) |
+| `quack_cache_max_rows` | 100 000 | Maximum rows kept in the server result cache |
+| `quack_authentication_function` | `quack_check_token` | 3-arg callback `(sid, client_token, server_token)` |
+| `quack_authorization_function` | `quack_nop_authorization` | 2-arg callback `(sid, query)` |
+
+```ts
+const server = new DuckdbQuackServer({
+  token: "super-secret",
+  options: {
+    quack_server_max_connections: 2048,
+    quack_server_keep_alive_timeout: 600,
+    quack_enable_reconnects: true,
+    quack_result_ttl: 600,
+  },
+});
+```
+
+The client side takes the same settings in its own `options`, plus the ATTACH-level `sslFingerprint`,
+`clientId` and `heartbeatTimeout` at the top level. A **client** setting (`quack_fetch_read_ahead`,
+`quack_default_client_id`, reconnects…) only matters on the instance that talks to the server; the **server**
+settings only on the instance that serves.
 
 ### Where a statement runs
 
@@ -234,6 +296,31 @@ concurrent queries on the same instance while it runs. Manual `db.exec("BEGIN TR
 `id` (VARCHAR), `ts` (TIMESTAMP), `data` (JSON) — an append-only event log. A row that leaves `ts` or `id` out gets the current time and a UUID; a `Date` is written as the local wall clock (`formatTimestamp`, exported).
 
 A `JSON` column reads back as the **string** DuckDB stores: `JSON.parse` it for the object.
+
+### Retention (TTL)
+
+DuckDB has **no native TTL** — no background job, no expiry index. `purge()` deletes what a date column says is
+too old, and `retention()` repeats it on a timer:
+
+```ts
+// Once
+const { deleted } = await db.purge({ table: "events", column: "ts", ttl: "30d" });
+
+// …or on a schedule (`runOnStart` is the default)
+const job = db.retention({ table: "events", column: "ts", ttl: "30d", every: "1h" });
+// … later
+job.stop();
+```
+
+- `ttl` — `'30d'`, `'24h'`, `'90m'`, `'3600s'`, `'2w'`, or a `Date` (rows older than that instant).
+- `column` — a `DATE`, `TIMESTAMP`, `TIMESTAMPTZ` or ISO-string column; it is cast to `TIMESTAMP`.
+- `where` — extra predicate, ANDed with the window (`"data->>'kind' = 'log'"`).
+- `batch` — rows per `DELETE` (default 100 000). The call loops until the table is clean, so a large table
+  never runs one giant statement.
+- On an attached instance the delete runs **on the server**; inside `db.transaction(…)` it joins the
+  transaction and rolls back with it.
+- The timer is **unref'd** (a cleanup job never keeps the process alive), and a run is **skipped while a
+  transaction is open**. Failures go to `onError` — or the instance's `onError` — and the timer keeps going.
 
 ### Data tables (JSON documents)
 
@@ -641,10 +728,16 @@ const server = new DuckdbQuackServer({
   targetBatchBytes: 33_554_432,      // quack_target_batch_bytes (32 MiB, Quack's default)
   // sslCertFile: "./certs/server.pem", // TLS pair; omitted → Quack generates a self-signed one
   // sslKeyFile: "./certs/private_key.pem",
-  options: { threads: "4" },
+  options: { threads: 4 },
 });
 
 await server.start();                            // CALL quack_serve(…), idempotent
+
+// `start()` keeps the **Bun process alive** while serving: the Quack listener is
+// a native thread, invisible to the event loop, so a plain script would exit as
+// soon as `start()` resolved. `stop()` releases the timer.
+// Ctrl-C is yours to wire — it is what runs `quack_stop` and unlocks a `dbPath`:
+process.once("SIGINT", () => void server.stop().then(() => process.exit(0)));
 
 // The server owns the data, and builds it with the very same methods:
 await server.db.createTable("orders");
@@ -665,9 +758,74 @@ Quack has **no storage option of its own**: the server *is* a DuckDB database, a
 | omitted | in memory | no — the tables serve every attached client for the lifetime of the process, then die with it |
 | set | a DuckDB file | yes — the file *is* the database; copy it to back it up, and `stop()` releases the lock |
 
+`dbPath` may point into a folder that does not exist yet: **the directory is created on connect**
+(`mkdir -p` semantics), for the server and for a local `DuckdbQuackInstance` alike.
+
 This is the one place a DuckDB **file** is the right answer: a Quack server is a **single** process owning its database, so the cross-process lock that rules a file out for per-worker instances cannot happen — that is exactly the architecture Quack exists to allow (one writer, N readers).
 
 > The token is at least **4 characters** (Quack's rule, checked at construction), and a non-loopback `host` is **not enough** to accept a remote client: Quack checks the `Host` header and refuses anything but localhost unless `allowOtherHostname` is set. A server meant to be reached sets both — and then the token (and TLS) is all that stands between the network and the data.
+
+### The `antd` CLI
+
+The same server, from the terminal — no code to write. `bun add @anteros/duckdb` installs the library **and**
+the `antd` binary; without installing, `bunx @anteros/duckdb start …` works too.
+
+```bash
+antd start --token super-secret
+antd start --dbPath ./data/analytics.duckdb --port 9494 --token super-secret
+antd start --host 0.0.0.0 --allowOtherHostname --token super-secret
+antd start --dbPath ./data/docs.duckdb --fts documents:document_identifier:text_content,author --token super-secret
+antd start --dbPath ./data/docs.duckdb --ftsConfig ./fts.json --token super-secret
+antd start --dbPath ./data/vecs.duckdb --vss embeddings:vec:cosine --vssPersist --token super-secret
+```
+
+The banner names the URI actually bound, the data source and the masked token; the process then serves until
+`Ctrl-C`, which runs `quack_stop` and releases a `--dbPath` lock:
+
+```
+  @anteros/duckdb — antd
+    mode     quack
+    url      quack:127.0.0.1:9494
+    db       in memory (nothing is persisted)
+    token    ******** (12 characters)
+```
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `--quack` | on | The serving mode — the only one; `--quack=false` is refused |
+| `--dbPath <path>` | memory | DuckDB file to serve; its folder is created if missing |
+| `--port <n>` | `9494` | Port to listen on |
+| `--host <addr>` | `127.0.0.1` | Interface to bind |
+| `--token <secret>` | — | Required (`QUACK_TOKEN` / `DUCKDB_QUACK_TOKEN` work); at least 4 characters |
+| `--allowOtherHostname` | `false` | Accept a non-localhost `Host` header — required for a remote client |
+| `--disableSsl` | Quack's default | Plain HTTP; `false` forces TLS, omitted keeps Quack's default |
+| `--threads <n>` | — | DuckDB threads of the server instance |
+| `--targetBatchBytes <n>` | 32 MiB | Target size of one wire batch |
+| `--fts <table:id:fields>` | — | Full-text index built at startup; repeatable |
+| `--ftsConfig <path>` | — | JSON array of indexes `{ table, id, fields, … }` |
+| `--ftsStemmer <name>` | `porter` | Default stemmer (`french`, `english`, `none`…) |
+| `--ftsIncremental` | `false` | Keep `--fts` indexes current with triggers |
+| `--vss <table:column[:metric]>` | — | HNSW index; repeatable (`l2sq`, `cosine`, `ip`) |
+| `--vssConfig <path>` | — | JSON array of vector indexes `{ table, column, metric, … }` |
+| `--vssMetric <metric>` | `l2sq` | Default metric for `--vss` / `--vssConfig` |
+| `--vssPersist` | `false` | Experimental HNSW persistence — required for a file database |
+| `--sslCertFile` / `--sslKeyFile` | generated | TLS pair; refused with `--disableSsl` |
+| `--name` / `--region` / `--provider` / `--hostname` | — | Identity advertised by `whoami()` |
+| `--printToken` | `false` | Show the token in the banner (masked by default) |
+
+Option names are forgiving (`--dbPath`, `--db-path`, `--DBPATH`). Index flags are repeatable; the JSON
+configs carry the same per-index options as `ftsIndexes` / `vssIndexes`:
+
+```json
+[
+  { "table": "documents", "id": "document_identifier", "fields": ["text_content", "author"], "stemmer": "french" },
+  { "table": "docs", "id": "id", "fields": "body" }
+]
+```
+
+All indexes are built **before** the port opens, so a client can search as soon as it attaches. `vss` is not
+autoloaded: the CLI loads it (installing on first use) before building. An in-memory database does not need
+`--vssPersist`.
 
 ### The rest of Quack
 
@@ -691,8 +849,8 @@ Reachable from `server.db.exec(...)` / `server.db.raw()` — the options `Duckdb
 
 | Member        | What it is                                                                        |
 | ------------- | --------------------------------------------------------------------------------- |
-| `start()`     | Opens the instance and serves. Idempotent.                                         |
-| `stop()`      | `quack_stop`, then closes the instance. Idempotent.                                 |
+| `start()`     | Opens the instance and serves. Keeps the Bun process alive. Idempotent.            |
+| `stop()`      | `quack_stop`, closes the instance, releases the keep-alive. Idempotent.             |
 | `db`          | The local `DuckdbQuackInstance` being served — the tables the clients see.         |
 | `listenUri`   | The URI `quack_serve` actually bound, e.g. `quack:127.0.0.1:9494`.                  |
 | `listenUrl`   | The HTTP(S) URL behind it, once started — `undefined` before `start()` / after `stop()`. |

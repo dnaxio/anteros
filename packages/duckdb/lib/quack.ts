@@ -1,4 +1,6 @@
 import { DuckDBInstance, type DuckDBConnection } from "@duckdb/node-api";
+import { mkdir } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import type {
     DuckdbColumn,
     DuckdbDocument,
@@ -12,7 +14,11 @@ import type {
     DuckdbFtsSearchResult,
     DuckdbIngestOptions,
     DuckdbIngestResult,
+    DuckdbPurgeOptions,
+    DuckdbPurgeResult,
     DuckdbReplaceOptions,
+    DuckdbRetentionHandle,
+    DuckdbRetentionOptions,
     DuckdbSchemaChange,
     DuckdbSchemaReport,
     DuckdbTableDeleteResult,
@@ -288,7 +294,9 @@ class DuckdbQuackInstance {
 
     async #open(): Promise<void> {
         // A file when one is asked for (that is what the server does), memory
-        // otherwise — a client is a workspace.
+        // otherwise — a client is a workspace. The folder is created first: a
+        // `dbPath` under a missing directory is configuration, not an error.
+        if (this.#options.dbPath) await ensureDbDirectory(this.#options.dbPath);
         this.#instance = await DuckDBInstance.create(this.#options.dbPath, optionsOf(this.#options));
         this.#connection = await this.#instance.connect();
         if (this.#options.url) await this.#attach();
@@ -308,6 +316,23 @@ class DuckdbQuackInstance {
         }
 
         const secret = quoteIdent(quack.secret ?? "anteros_quack");
+
+        // ATTACH options are validated before the secret is created: a bad client id
+        // should name the cause, not surface as an attach failure.
+        const clientId = quack.clientId?.trim();
+        if (clientId !== undefined && clientId.length < 4) {
+            throw new DuckdbQuackError(
+                "A Quack client id must be at least 4 characters",
+                "DUCKDB_QUACK_CLIENT_ID_INVALID",
+            );
+        }
+        if (quack.heartbeatTimeout !== undefined && !(Number.isFinite(quack.heartbeatTimeout) && quack.heartbeatTimeout >= 1)) {
+            throw new DuckdbQuackError(
+                "`heartbeatTimeout` must be a number of seconds, at least 1",
+                "DUCKDB_QUACK_HEARTBEAT_INVALID",
+            );
+        }
+
         try {
             // The secret first: the ATTACH resolves it by type. `SCOPE` pins it to
             // this server, so another quack URI in the session cannot pick the token up.
@@ -320,6 +345,9 @@ class DuckdbQuackInstance {
             // for a local URI and TLS otherwise, and an explicit `false` forces TLS.
             const attachOptions: string[] = [];
             if (quack.disableSsl !== undefined) attachOptions.push(`DISABLE_SSL ${quack.disableSsl}`);
+            if (quack.sslFingerprint !== undefined) attachOptions.push(`SSL_FINGERPRINT ${quoteLiteral(quack.sslFingerprint)}`);
+            if (clientId !== undefined) attachOptions.push(`CLIENT_ID ${quoteLiteral(clientId)}`);
+            if (quack.heartbeatTimeout !== undefined) attachOptions.push(`HEARTBEAT_TIMEOUT ${Math.trunc(quack.heartbeatTimeout)}`);
             const suffix = attachOptions.length ? ` (${attachOptions.join(", ")})` : "";
 
             await this.#connection!.run(
@@ -779,6 +807,126 @@ class DuckdbQuackInstance {
             for (const one of options) results.push(await work(one));
             return results;
         });
+    }
+
+    // ─── Retention (TTL) ──────────────────────────────────────────────────
+
+    /**
+     * Delete the rows older than a retention window — DuckDB has **no native
+     * TTL**, so this is the mechanism: one `DELETE` per batch, on the server when
+     * the instance is attached.
+     *
+     * ```ts
+     * await db.purge({ table: "events", column: "ts", ttl: "30d" });
+     * // → { table: "events", deleted: 12_430 }
+     * ```
+     *
+     * `ttl` is a duration (`'30d'`, `'24h'`, `'90m'`, `'3600s'`, `'2w'`) or a
+     * `Date`; `where` narrows it further. The column is cast to `TIMESTAMP`, so a
+     * `DATE` or an ISO string works as well as a `TIMESTAMP`. A `batch`-sized
+     * `DELETE` loops until the table is clean — no giant single statement.
+     */
+    async purge(options: DuckdbPurgeOptions): Promise<DuckdbPurgeResult> {
+        const table = normaliseName(options?.table);
+        const column = normaliseName(options?.column);
+        if (options?.ttl === undefined) {
+            throw new DuckdbQuackError(
+                "`purge` needs `ttl` — a duration ('30d', '24h') or a Date",
+                "DUCKDB_RETENTION_INVALID",
+            );
+        }
+        const predicate = retentionPredicate(
+            column,
+            options.ttl,
+            options.where === undefined ? undefined : requireWhere(options.where, "purge"),
+        );
+        const batch = Math.max(1, Math.trunc(options.batch ?? RETENTION_BATCH));
+        const target = quotePath(this.#serverTable(table));
+
+        let deleted = 0;
+        for (;;) {
+            const result = await this.exec(
+                `DELETE FROM ${target} WHERE rowid IN (SELECT rowid FROM ${target} WHERE ${predicate} LIMIT ${batch})`,
+            );
+            const rows = affectedRows(result);
+            deleted += rows;
+            if (rows < batch) break;
+        }
+        return { table, deleted };
+    }
+
+    /**
+     * Purge a table on a timer — the scheduled form of `purge`.
+     *
+     * ```ts
+     * const job = db.retention({ table: "events", column: "ts", ttl: "30d", every: "1h" });
+     * // … later
+     * job.stop();
+     * ```
+     *
+     * The timer is **unref'd**: a cleanup job never keeps the Bun process alive on
+     * its own. A run is skipped while a transaction is open (the same connection is
+     * shared), and failures go to `onError` — the timer keeps going.
+     */
+    retention(options: DuckdbRetentionOptions): DuckdbRetentionHandle {
+        const table = normaliseName(options?.table);
+        const column = normaliseName(options?.column);
+        if (options?.ttl === undefined) {
+            throw new DuckdbQuackError(
+                "`retention` needs `ttl` — a duration ('30d', '24h') or a Date",
+                "DUCKDB_RETENTION_INVALID",
+            );
+        }
+        // Validate eagerly: a bad window should fail at declaration, not at 3 a.m.
+        retentionPredicate(
+            column,
+            options.ttl,
+            options.where === undefined ? undefined : requireWhere(options.where, "retention"),
+        );
+        const everyMs = retentionMs(options.every);
+        if (everyMs < 1_000) {
+            throw new DuckdbQuackError(
+                "`retention` needs `every` of at least one second ('1s', '1h')",
+                "DUCKDB_RETENTION_INVALID",
+            );
+        }
+
+        const report = options.onError
+            ?? this.#options.onError
+            ?? ((error: Error) => console.error(error.message));
+
+        let stopped = false;
+        let inFlight = false;
+
+        const run = async (): Promise<DuckdbPurgeResult> => {
+            if (stopped || inFlight || this.#inTransaction) return { table, deleted: 0 };
+            inFlight = true;
+            try {
+                return await this.purge(options);
+            } catch (err: any) {
+                report(err instanceof Error ? err : new Error(String(err)));
+                return { table, deleted: 0 };
+            } finally {
+                inFlight = false;
+            }
+        };
+
+        const timer = setInterval(() => { void run(); }, everyMs);
+        // A cleanup job must not be the reason the process stays up.
+        timer.unref?.();
+
+        if (options.runOnStart !== false) void run();
+
+        return {
+            run,
+            stop: () => {
+                stopped = true;
+                clearInterval(timer);
+            },
+            get running() {
+                return !stopped;
+            },
+        };
     }
 
     /**
@@ -1753,6 +1901,12 @@ class DuckdbQuackServer {
     #running = false;
     #listenUri: string | null = null;
     #listenUrl: string | null = null;
+    /**
+     * Keeps the Bun process alive while serving. The Quack listener is a native
+     * thread, invisible to the event loop — without a ref'd timer a script exits
+     * as soon as `start()` resolves. Cleared by `stop()`.
+     */
+    #keepAlive: ReturnType<typeof setInterval> | null = null;
 
     constructor(options: QuackServerOptions) {
         const token = String(options?.token ?? "");
@@ -1890,6 +2044,9 @@ class DuckdbQuackServer {
         }
 
         this.#running = true;
+        // A native listener does not keep Bun's event loop alive: a ref'd timer does,
+        // until `stop()` clears it. This is what makes `bun start` stay up.
+        this.#keepAlive = setInterval(() => { }, 60_000);
         return this;
     }
 
@@ -1925,6 +2082,10 @@ class DuckdbQuackServer {
     async stop(): Promise<void> {
         const wasRunning = this.#running;
         this.#running = false;
+        if (this.#keepAlive) {
+            clearInterval(this.#keepAlive);
+            this.#keepAlive = null;
+        }
 
         if (wasRunning) {
             try {
@@ -2371,6 +2532,66 @@ function toWallClock(value: unknown): string {
         if (!Number.isNaN(parsed.getTime())) return formatTimestamp(parsed);
     }
     return formatTimestamp();
+}
+
+/**
+ * Create the folder a database file lives in — `./data/analytics.duckdb` should
+ * work on a fresh checkout, without a `mkdir` in front of it. `:memory:` and other
+ * URI-style paths resolve to the current directory, so the call is a no-op there.
+ */
+async function ensureDbDirectory(dbPath: string): Promise<void> {
+    await mkdir(dirname(resolve(dbPath)), { recursive: true });
+}
+
+// ─── Retention helpers ──────────────────────────────────────────────────
+
+/** Rows per `DELETE` — one statement must not rewrite a whole table. */
+const RETENTION_BATCH = 100_000;
+
+const RETENTION_UNITS = { s: "seconds", m: "minutes", h: "hours", d: "days", w: "weeks" } as const;
+type RetentionUnit = keyof typeof RETENTION_UNITS;
+
+/** `'30d'` → `{ amount: 30, unit: 'd' }`; anything else is refused. */
+function parseRetention(value: unknown): { amount: number; unit: RetentionUnit } {
+    const match = /^(\d+)\s*(s|m|h|d|w)$/i.exec(String(value ?? "").trim());
+    if (!match) {
+        throw new DuckdbQuackError(
+            `Invalid duration '${value}' — use '30d', '24h', '90m', '3600s' or '2w'`,
+            "DUCKDB_RETENTION_INVALID",
+        );
+    }
+    return { amount: Number(match[1]), unit: match[2]!.toLowerCase() as RetentionUnit };
+}
+
+/** `'30d'` → `INTERVAL '30 days'`. */
+function retentionInterval(value: string): string {
+    const { amount, unit } = parseRetention(value);
+    return `INTERVAL '${amount} ${RETENTION_UNITS[unit]}'`;
+}
+
+/** `'30d'` → milliseconds, for the scheduler. */
+function retentionMs(value: unknown): number {
+    const { amount, unit } = parseRetention(value);
+    const factor: Record<RetentionUnit, number> = {
+        s: 1_000,
+        m: 60_000,
+        h: 3_600_000,
+        d: 86_400_000,
+        w: 604_800_000,
+    };
+    return amount * factor[unit];
+}
+
+/**
+ * `CAST(column AS TIMESTAMP) < cutoff` — the cutoff comes from a duration
+ * (`now() - INTERVAL …`, the database clock) or from an explicit `Date`.
+ */
+function retentionPredicate(column: string, ttl: string | Date, where?: string): string {
+    const cutoff = ttl instanceof Date
+        ? `CAST(${quoteLiteral(formatTimestamp(ttl))} AS TIMESTAMP)`
+        : `CAST(now() - ${retentionInterval(ttl)} AS TIMESTAMP)`;
+    const predicate = `CAST(${quoteIdent(column)} AS TIMESTAMP) < ${cutoff}`;
+    return where ? `(${predicate}) AND (${where})` : predicate;
 }
 
 export {

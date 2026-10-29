@@ -6,7 +6,7 @@ import { DuckDBInstance, type DuckDBConnection } from "@duckdb/node-api";
 import { freePort, sleep } from "./helpers";
 
 /**
- * The CLI, spawned as a real process — `antq start …`.
+ * The CLI, spawned as a real process — `antd start …`.
  *
  * Nothing here is mocked: the process must actually serve, actually stay alive
  * (the Quack listener is a native thread, invisible to Bun's event loop) and
@@ -103,15 +103,15 @@ async function attach(port: number, token = TOKEN, timeoutMs = 40_000): Promise<
     throw new Error(`the CLI never came up on port ${port}: ${last}`);
 }
 
-describe("antq — the CLI", () => {
+describe("antd — the CLI", () => {
     it("declares a bin that exists and runs", async () => {
         // A typo in `bin` is silent until publish, and the name is the command
         // users type: pin both.
         const manifest = (await Bun.file(join(import.meta.dir, "..", "package.json")).json()) as { bin?: Record<string, string> };
-        expect(manifest.bin).toEqual({ "antq": "./bin/cli.ts" });
+        expect(manifest.bin).toEqual({ "antd": "./bin/cli.ts" });
 
         const [name, path] = Object.entries(manifest.bin ?? {})[0]!;
-        expect(name).toBe("antq");
+        expect(name).toBe("antd");
 
         const file = join(import.meta.dir, "..", path!);
         expect(await Bun.file(file).exists()).toBe(true);
@@ -180,7 +180,7 @@ describe("antq — the CLI", () => {
     });
 });
 
-describe("antq — the CLI serving", () => {
+describe("antd — the CLI serving", () => {
     it("starts in quack mode, and says so", async () => {
         const port = freePort();
         const proc = cli(["start", "--quack", "--port", String(port), "--token", TOKEN]);
@@ -206,7 +206,7 @@ describe("antq — the CLI serving", () => {
     });
 
     it("serves on --port and keeps the data in --dbPath across a restart", async () => {
-        const directory = await mkdtemp(join(tmpdir(), "antq-cli-"));
+        const directory = await mkdtemp(join(tmpdir(), "antd-cli-"));
         const file = join(directory, "cli.duckdb");
         const port = freePort();
 
@@ -237,6 +237,23 @@ describe("antq — the CLI serving", () => {
         await rm(directory, { recursive: true, force: true });
     }, 180_000);
 
+    it("creates the folder of --dbPath", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "antd-cli-"));
+        const file = join(directory, "nested", "deeper", "cli.duckdb");
+        const port = freePort();
+
+        const proc = cli(["start", "--port", String(port), "--token", TOKEN, "--dbPath", file]);
+        try {
+            const client = await attach(port);
+            await client.close();
+            expect(await Bun.file(file).exists()).toBe(true);
+        } finally {
+            proc.kill("SIGINT");
+            await proc.exited;
+            await rm(directory, { recursive: true, force: true });
+        }
+    }, 60_000);
+
     it("takes the token from the environment", async () => {
         const port = freePort();
         const proc = cli(["start", "--port", String(port)], { QUACK_TOKEN: "from-env-secret" });
@@ -250,7 +267,7 @@ describe("antq — the CLI serving", () => {
     }, 120_000);
 
     it("builds a --fts index before serving, and the client can search it", async () => {
-        const directory = await mkdtemp(join(tmpdir(), "antq-fts-"));
+        const directory = await mkdtemp(join(tmpdir(), "antd-fts-"));
         const file = join(directory, "docs.duckdb");
 
         // Seed the file the server will open — the index needs a table to index.
@@ -297,7 +314,7 @@ describe("antq — the CLI serving", () => {
     }, 180_000);
 
     it("builds several indexes from --ftsConfig and repeated --fts", async () => {
-        const directory = await mkdtemp(join(tmpdir(), "antq-fts-config-"));
+        const directory = await mkdtemp(join(tmpdir(), "antd-fts-config-"));
         const file = join(directory, "docs.duckdb");
         const config = join(directory, "fts.json");
 
@@ -358,7 +375,7 @@ describe("antq — the CLI serving", () => {
     });
 
     it("builds a --vss index before serving, and the client can search it", async () => {
-        const directory = await mkdtemp(join(tmpdir(), "antq-vss-"));
+        const directory = await mkdtemp(join(tmpdir(), "antd-vss-"));
         const file = join(directory, "vecs.duckdb");
 
         const instance = await DuckDBInstance.create(file);
@@ -390,7 +407,7 @@ describe("antq — the CLI serving", () => {
     }, 180_000);
 
     it("builds several vector indexes from --vssConfig", async () => {
-        const directory = await mkdtemp(join(tmpdir(), "antq-vss-config-"));
+        const directory = await mkdtemp(join(tmpdir(), "antd-vss-config-"));
         const file = join(directory, "vecs.duckdb");
         const config = join(directory, "vss.json");
 
@@ -433,7 +450,7 @@ describe("antq — the CLI serving", () => {
     }, 180_000);
 
     it("refuses a file database without --vssPersist", async () => {
-        const directory = await mkdtemp(join(tmpdir(), "antq-vss-nopersist-"));
+        const directory = await mkdtemp(join(tmpdir(), "antd-vss-nopersist-"));
         const file = join(directory, "vecs.duckdb");
 
         const { code, err } = await capture([

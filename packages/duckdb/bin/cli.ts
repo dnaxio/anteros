@@ -1,14 +1,14 @@
 #!/usr/bin/env bun
-// `antq` — the @anteros/quack CLI.
+// `antd` — the Quack server CLI, shipped by `@anteros/duckdb`.
 //
-//   antq start --dbPath ./data/analytics.duckdb --port 9494 --token super-secret
+//   antd start --dbPath ./data/analytics.duckdb --port 9494 --token super-secret
 //
 // One command, because the package does one thing: run a Quack server. The CLI is
-// standalone: it drives DuckDB through `@duckdb/node-api`, not through the
-// `@anteros/duckdb` library.
+// a thin layer over `DuckdbQuackServer` — flag parsing, the banner and the signal
+// handling; serving, index creation, keep-alive and shutdown live in the library.
 
 import { join } from "node:path";
-import { DuckDBInstance, type DuckDBConnection } from "@duckdb/node-api";
+import { DuckdbQuackServer, type DuckdbFtsIndex, type DuckdbVssIndex, type DuckdbVssMetric } from "../index";
 
 // ─── Options ──────────────────────────────────────────────────────────────
 
@@ -134,23 +134,23 @@ function parse(argv: string[]): Parsed {
     return { command, flags };
 }
 
-const USAGE = `antq — a DuckDB instance served over the Quack protocol
+const USAGE = `antd — a DuckDB instance served over the Quack protocol
 
 Usage:
-  antq start [options]
+  antd start [options]
 
 Options:
 ${OPTIONS.map((option) => `  --${option.key}${option.type === "boolean" ? "" : " <value>"}`.padEnd(30) + option.help).join("\n")}
 
 Examples:
-  antq start --quack --token super-secret
-  antq start --dbPath ./data/analytics.duckdb --port 9494 --token super-secret
-  antq start --host 0.0.0.0 --allowOtherHostname --token super-secret
-  antq start --dbPath ./data/docs.duckdb --fts documents:document_identifier:text_content,author --fts docs:id:body --token super-secret
-  antq start --dbPath ./data/docs.duckdb --ftsConfig ./fts.json --token super-secret
-  antq start --dbPath ./data/docs.duckdb --fts documents:document_identifier:text_content,author --ftsStemmer french --token super-secret
-  antq start --dbPath ./data/vecs.duckdb --vss embeddings:vec:cosine --vssPersist --token super-secret
-  antq start --dbPath ./data/vecs.duckdb --vssConfig ./vss.json --vssPersist --token super-secret
+  antd start --quack --token super-secret
+  antd start --dbPath ./data/analytics.duckdb --port 9494 --token super-secret
+  antd start --host 0.0.0.0 --allowOtherHostname --token super-secret
+  antd start --dbPath ./data/docs.duckdb --fts documents:document_identifier:text_content,author --fts docs:id:body --token super-secret
+  antd start --dbPath ./data/docs.duckdb --ftsConfig ./fts.json --token super-secret
+  antd start --dbPath ./data/docs.duckdb --fts documents:document_identifier:text_content,author --ftsStemmer french --token super-secret
+  antd start --dbPath ./data/vecs.duckdb --vss embeddings:vec:cosine --vssPersist --token super-secret
+  antd start --dbPath ./data/vecs.duckdb --vssConfig ./vss.json --vssPersist --token super-secret
 `;
 
 // ─── Version ──────────────────────────────────────────────────────────────
@@ -160,14 +160,9 @@ async function version(): Promise<string> {
     return manifest.version ?? "0.0.0";
 }
 
-// ─── start ────────────────────────────────────────────────────────────────
+// ─── Index specs ──────────────────────────────────────────────────────────
 
 const DEFAULT_PORT = 9494;
-
-/** A SQL string literal — quoted and escaped. */
-function quote(value: string): string {
-    return `'${value.replace(/'/g, "''")}'`;
-}
 
 function firstLine(message: unknown): string {
     return String(message ?? "").split("\n")[0]!.trim();
@@ -182,24 +177,6 @@ function ftsFields(value: unknown, origin: string): string[] {
         throw new CliError(`${origin}: \`fields\` needs a column name, a list, or '*'`);
     }
     return fields;
-}
-
-/** The `PRAGMA create_fts_index(...)` for one index. */
-function ftsArgs(index: FtsSpec, defaults: { stemmer?: string; incremental?: boolean } = {}): string {
-    const args = [quote(index.table), quote(index.id), ...index.fields.map(quote)];
-    args.push(`overwrite = ${index.overwrite ?? true}`);
-
-    const stemmer = index.stemmer ?? defaults.stemmer;
-    if (stemmer !== undefined) args.push(`stemmer = ${quote(stemmer)}`);
-    if (index.stopwords !== undefined) args.push(`stopwords = ${quote(index.stopwords)}`);
-    if (index.ignore !== undefined) args.push(`ignore = ${quote(index.ignore)}`);
-    if (index.stripAccents !== undefined) args.push(`strip_accents = ${index.stripAccents === true}`);
-    if (index.lower !== undefined) args.push(`lower = ${index.lower === true}`);
-
-    const incremental = index.incremental ?? defaults.incremental;
-    if (incremental !== undefined) args.push(`incremental = ${incremental === true}`);
-
-    return `PRAGMA create_fts_index(${args.join(", ")})`;
 }
 
 /** Read and validate a `--ftsConfig` JSON file. */
@@ -250,20 +227,6 @@ async function readFtsConfig(path: string): Promise<FtsSpec[]> {
     });
 }
 
-function masked(token: string): string {
-    return `${"*".repeat(Math.min(token.length, 8))} (${token.length} characters)`;
-}
-
-/** A SQL identifier, quoted. */
-function ident(value: string): string {
-    return `"${value.replace(/"/g, '""')}"`;
-}
-
-/** A possibly qualified name, each part quoted. */
-function identPath(name: string): string {
-    return name.split(".").map(ident).join(".");
-}
-
 /** A supported VSS metric, defaulting to l2sq. */
 function vssMetric(value: unknown, origin: string): string {
     const metric = String(value ?? "l2sq").toLowerCase();
@@ -271,37 +234,6 @@ function vssMetric(value: unknown, origin: string): string {
         throw new CliError(`${origin}: metric must be l2sq, cosine or ip`);
     }
     return metric;
-}
-
-/** The default HNSW index name for a column. */
-function vssIndexName(table: string, column: string): string {
-    const tableName = table.split(".").pop()!;
-    return `vss_${tableName}_${column}`.replace(/[^a-z0-9_]/gi, "_").toLowerCase();
-}
-
-/** The index name qualified with the table's schema, for DROP INDEX. */
-function vssIndexRef(table: string, index: string): string {
-    const parts = table.split(".");
-    return parts.length >= 2 ? `${parts[parts.length - 2]}.${index}` : index;
-}
-
-/** The CREATE INDEX statement for one vector index. */
-function vssSql(index: VssSpec): string {
-    const name = index.name ?? vssIndexName(index.table, index.column);
-    const options = [`metric = ${quote(index.metric ?? "l2sq")}`];
-    for (const [key, option] of [
-        ["efConstruction", "ef_construction"],
-        ["efSearch", "ef_search"],
-        ["m", "M"],
-        ["m0", "M0"],
-    ] as const) {
-        const value = index[key];
-        if (value !== undefined) {
-            if (!Number.isFinite(Number(value))) throw new CliError(`VSS \`${key}\` must be a number`);
-            options.push(`${option} = ${Math.trunc(Number(value))}`);
-        }
-    }
-    return `CREATE INDEX IF NOT EXISTS ${ident(name)} ON ${identPath(index.table)} USING HNSW (${ident(index.column)}) WITH (${options.join(", ")})`;
 }
 
 /** Read and validate a `--vssConfig` JSON file. */
@@ -355,21 +287,87 @@ async function readVssConfig(path: string): Promise<VssSpec[]> {
     });
 }
 
-/** Load the vss extension once, installing it when it is missing. */
-async function ensureVss(connection: DuckDBConnection): Promise<void> {
-    try {
-        await connection.run("LOAD vss");
-    } catch {
-        await connection.run("INSTALL vss");
-        await connection.run("LOAD vss");
+/** Collect full-text indexes from `--fts` and `--ftsConfig`. */
+async function collectFts(flags: Record<string, any>): Promise<FtsSpec[]> {
+    const defaults = {
+        stemmer: flags.ftsStemmer !== undefined ? String(flags.ftsStemmer) : undefined,
+        incremental: flags.ftsIncremental === true ? true : undefined,
+    };
+    const specs: FtsSpec[] = [];
+
+    for (const spec of flags.fts ?? []) {
+        const [rawTable, rawId, fields] = String(spec).split(":");
+        const table = (rawTable ?? "").trim();
+        const id = (rawId ?? "").trim();
+        if (!table || !id || !fields) {
+            throw new CliError(`--fts expects table:id:field1,field2 — got '${spec}'`);
+        }
+        specs.push({
+            table,
+            id,
+            fields: ftsFields(fields, `--fts '${spec}'`),
+            stemmer: defaults.stemmer,
+            incremental: defaults.incremental,
+        });
     }
+
+    if (flags.ftsConfig !== undefined) {
+        specs.push(...await readFtsConfig(String(flags.ftsConfig)));
+    }
+    return specs;
+}
+
+/** Collect vector indexes from `--vss` and `--vssConfig`. */
+async function collectVss(flags: Record<string, any>): Promise<VssSpec[]> {
+    const specs: VssSpec[] = [];
+
+    for (const spec of flags.vss ?? []) {
+        const [rawTable, rawColumn, metric] = String(spec).split(":");
+        const table = (rawTable ?? "").trim();
+        const column = (rawColumn ?? "").trim();
+        if (!table || !column) {
+            throw new CliError(`--vss expects table:column[:metric] — got '${spec}'`);
+        }
+        specs.push({
+            table,
+            column,
+            metric: metric !== undefined ? vssMetric(metric, `--vss '${spec}'`) : undefined,
+        });
+    }
+
+    if (flags.vssConfig !== undefined) {
+        specs.push(...await readVssConfig(String(flags.vssConfig)));
+    }
+    return specs;
+}
+
+/** The CLI's specs are the library's, with `'*'` expressed the way it expects. */
+function toFtsIndex(spec: FtsSpec): DuckdbFtsIndex {
+    return {
+        ...spec,
+        fields: spec.fields.length === 1 && spec.fields[0] === "*" ? "*" : spec.fields,
+    };
+}
+
+function toVssIndex(spec: VssSpec, persist: boolean): DuckdbVssIndex {
+    return {
+        ...spec,
+        metric: spec.metric === undefined ? undefined : (spec.metric as DuckdbVssMetric),
+        persist,
+    };
+}
+
+// ─── start ────────────────────────────────────────────────────────────────
+
+function masked(token: string): string {
+    return `${"*".repeat(Math.min(token.length, 8))} (${token.length} characters)`;
 }
 
 function banner(url: string, dbPath: string | undefined, token: string, showToken: boolean, mode: Mode): string {
     const where = dbPath ?? "in memory (nothing is persisted)";
     return [
         "",
-        "  @anteros/quack — serving",
+        "  @anteros/duckdb — antd",
         `    mode     ${mode}`,
         `    url      ${url}`,
         `    db       ${where}`,
@@ -377,7 +375,7 @@ function banner(url: string, dbPath: string | undefined, token: string, showToke
         `    pid      ${process.pid}`,
         "",
         "  Attach from another process:",
-        `    new DuckdbQuackInstance({ url: '${url}', token: '…' })   // @anteros/duckdb`,
+        `    new DuckdbQuackInstance({ url: '${url}', token: '…' })`,
         "",
         "  Ctrl-C to stop.",
         "",
@@ -400,20 +398,6 @@ function resolveMode(flags: Record<string, any>): Mode {
     return "quack";
 }
 
-/** Release both handles, without letting a close failure mask the real error. */
-function closeQuietly(connection: DuckDBConnection, instance: DuckDBInstance): void {
-    try {
-        connection.closeSync();
-    } catch {
-        // Already gone.
-    }
-    try {
-        instance.closeSync();
-    } catch {
-        // Already gone.
-    }
-}
-
 async function start(flags: Record<string, any>): Promise<void> {
     const mode = resolveMode(flags);
 
@@ -428,10 +412,6 @@ async function start(flags: Record<string, any>): Promise<void> {
         throw new CliError("A Quack server token must be at least 4 characters — DuckDB refuses anything shorter");
     }
 
-    const host = flags.host ?? "127.0.0.1";
-    const port = flags.port ?? DEFAULT_PORT;
-    const url = `quack:${host}:${port}`;
-
     if ((flags.sslCertFile === undefined) !== (flags.sslKeyFile === undefined)) {
         throw new CliError("--sslCertFile and --sslKeyFile go together — pass both, or neither");
     }
@@ -439,141 +419,50 @@ async function start(flags: Record<string, any>): Promise<void> {
         throw new CliError("--disableSsl and --sslCertFile are exclusive — a plain-HTTP server cannot serve a certificate");
     }
 
-    let instance: DuckDBInstance;
-    try {
-        const options = flags.threads !== undefined ? { threads: String(flags.threads) } : undefined;
-        instance = await DuckDBInstance.create(flags.dbPath, options);
-    } catch (err: any) {
-        throw new CliError(`Cannot open DuckDB — ${firstLine(err?.message ?? err)}`);
-    }
-    const connection = await instance.connect();
-
-    let listenUri = url;
-    try {
-        // Settings first: they are what `quack_serve` then honours.
-        if (flags.targetBatchBytes !== undefined) {
-            await connection.run(`SET GLOBAL quack_target_batch_bytes = ${Number(flags.targetBatchBytes)}`);
-        }
-        const identity = { name: flags.name, region: flags.region, provider: flags.provider, hostname: flags.hostname };
-        const named = Object.entries(identity)
-            .filter(([, value]) => value !== undefined)
-            .map(([key, value]) => `${key} := ${quote(String(value))}`);
-        if (named.length) await connection.run(`CALL quack_identify(${named.join(", ")})`);
-
-        // Full-text indexes — before the port opens, so a client can search at once.
-        // `--fts` is for one-offs; `--ftsConfig` carries several indexes with their
-        // own options. Global `--ftsStemmer` / `--ftsIncremental` fill the gaps.
-        const ftsDefaults = {
-            stemmer: flags.ftsStemmer !== undefined ? String(flags.ftsStemmer) : undefined,
-            incremental: flags.ftsIncremental === true ? true : undefined,
-        };
-        const ftsSpecs: FtsSpec[] = [];
-
-        for (const spec of flags.fts ?? []) {
-            const [rawTable, rawId, fields] = String(spec).split(":");
-            const table = (rawTable ?? "").trim();
-            const id = (rawId ?? "").trim();
-            if (!table || !id || !fields) {
-                throw new CliError(`--fts expects table:id:field1,field2 — got '${spec}'`);
-            }
-            ftsSpecs.push({
-                table,
-                id,
-                fields: ftsFields(fields, `--fts '${spec}'`),
-                stemmer: ftsDefaults.stemmer,
-                incremental: ftsDefaults.incremental,
-            });
-        }
-        if (flags.ftsConfig !== undefined) {
-            ftsSpecs.push(...await readFtsConfig(String(flags.ftsConfig)));
-        }
-        for (const index of ftsSpecs) {
-            await connection.run(ftsArgs(index, ftsDefaults));
-        }
-
-        // Vector indexes — `vss` is not autoloaded: load it once, then build each
-        // HNSW index before the port opens.
-        const vssSpecs: VssSpec[] = [];
-        for (const spec of flags.vss ?? []) {
-            const [rawTable, rawColumn, metric] = String(spec).split(":");
-            const table = (rawTable ?? "").trim();
-            const column = (rawColumn ?? "").trim();
-            if (!table || !column) {
-                throw new CliError(`--vss expects table:column[:metric] — got '${spec}'`);
-            }
-            vssSpecs.push({
-                table,
-                column,
-                metric: metric !== undefined ? vssMetric(metric, `--vss '${spec}'`) : undefined,
-            });
-        }
-        if (flags.vssConfig !== undefined) {
-            vssSpecs.push(...await readVssConfig(String(flags.vssConfig)));
-        }
-        if (vssSpecs.length) {
-            if (flags.dbPath !== undefined && flags.vssPersist !== true) {
-                throw new CliError(
-                    "HNSW indexes in a file database need --vssPersist (experimental persistence)",
-                );
-            }
-
-            await ensureVss(connection);
-            if (flags.vssPersist === true) {
-                await connection.run("SET GLOBAL hnsw_enable_experimental_persistence = true");
-            }
-
-            for (const index of vssSpecs) {
-                const resolved: VssSpec = {
-                    ...index,
-                    metric: vssMetric(index.metric ?? flags.vssMetric, "--vssMetric"),
-                };
-                if (resolved.overwrite ?? true) {
-                    const name = resolved.name ?? vssIndexName(resolved.table, resolved.column);
-                    await connection.run(`DROP INDEX IF EXISTS ${identPath(vssIndexRef(resolved.table, name))}`);
-                }
-                await connection.run(vssSql(resolved));
-            }
-        }
-
-        // Named arguments: `quack_serve(uri, token := …)`. The transport is only
-        // stated when the caller chose one — Quack's default is plain for a local
-        // URI and TLS otherwise, while `disable_ssl := false` forces TLS even here.
-        const serveArgs = [
-            quote(url),
-            `token := ${quote(secret)}`,
-            `allow_other_hostname := ${flags.allowOtherHostname === true}`,
-        ];
-        if (flags.disableSsl !== undefined) serveArgs.push(`disable_ssl := ${flags.disableSsl}`);
-        if (flags.sslCertFile !== undefined) {
-            serveArgs.push(`ssl_cert_file := ${quote(String(flags.sslCertFile))}`);
-            serveArgs.push(`ssl_key_file := ${quote(String(flags.sslKeyFile))}`);
-        }
-
-        // `quack_serve` returns the URI and URL it actually bound: show those.
-        const served = (await connection.runAndReadAll(
-            `CALL quack_serve(${serveArgs.join(", ")})`,
-        )).getRowObjectsJson() as Array<Record<string, unknown>>;
-        if (served[0]?.listen_uri !== undefined) listenUri = String(served[0].listen_uri);
-    } catch (err: any) {
-        closeQuietly(connection, instance);
-        throw new CliError(`Cannot start the Quack server on ${url} — ${firstLine(err?.message ?? err)}`);
+    const fts = await collectFts(flags);
+    const vss = await collectVss(flags);
+    if (vss.length && flags.dbPath !== undefined && flags.vssPersist !== true) {
+        throw new CliError("HNSW indexes in a file database need --vssPersist (experimental persistence)");
     }
 
-    console.log(banner(listenUri, flags.dbPath, secret, flags.printToken === true, mode));
+    // `--vssMetric` fills what an index did not specify; a per-entry metric wins.
+    const vssDefault = flags.vssMetric !== undefined ? vssMetric(flags.vssMetric, "--vssMetric") : undefined;
+    const vssIndexes = vss.map((index) => toVssIndex(
+        { ...index, metric: index.metric ?? vssDefault },
+        flags.vssPersist === true,
+    ));
 
-    // Nothing else keeps the event loop alive: the Quack listener is a native
-    // thread, invisible to Bun's scheduler.
-    const keepAlive = setInterval(() => { }, 60 * 60 * 1000);
+    const identity = { name: flags.name, region: flags.region, provider: flags.provider, hostname: flags.hostname };
+    const hasIdentity = Object.values(identity).some((value) => value !== undefined);
+
+    const server = new DuckdbQuackServer({
+        port: flags.port ?? DEFAULT_PORT,
+        host: flags.host ?? "127.0.0.1",
+        token: secret,
+        dbPath: flags.dbPath,
+        allowOtherHostname: flags.allowOtherHostname === true,
+        disableSsl: flags.disableSsl,
+        sslCertFile: flags.sslCertFile,
+        sslKeyFile: flags.sslKeyFile,
+        targetBatchBytes: flags.targetBatchBytes,
+        ...(hasIdentity ? { identity } : {}),
+        options: flags.threads !== undefined ? { threads: flags.threads } : undefined,
+        ftsIndexes: fts.length ? fts.map(toFtsIndex) : undefined,
+        vssIndexes: vssIndexes.length ? vssIndexes : undefined,
+        vssPersist: flags.vssPersist === true,
+    });
+
+    try {
+        await server.start();
+    } catch (err: any) {
+        throw new CliError(firstLine(err?.message ?? err));
+    }
+
+    console.log(banner(server.listenUri, flags.dbPath, secret, flags.printToken === true, mode));
 
     const shutdown = async (signal: string) => {
-        clearInterval(keepAlive);
         console.log(`\n${signal} received — stopping the Quack server…`);
-        try {
-            await connection.run(`CALL quack_stop(${quote(listenUri)})`);
-        } catch {
-            // Already gone — closing the instance releases the rest.
-        }
-        closeQuietly(connection, instance);
+        await server.stop().catch(() => {});
         process.exit(0);
     };
 
@@ -610,6 +499,6 @@ try {
     await main();
 } catch (err: any) {
     console.error(`error: ${err?.message ?? err}`);
-    console.error("\nRun `antq --help` for the options.");
+    console.error("\nRun `antd --help` for the options.");
     process.exit(1);
 }

@@ -255,6 +255,86 @@ export type DuckdbVariable = {
 };
 
 /**
+ * DuckDB's own configuration, applied when the instance is created.
+ *
+ * Keys are DuckDB's names (`threads`, `memory_limit`…), and values are converted
+ * to strings before the engine sees them. The common settings are spelled out so
+ * the editor completes them; **any other DuckDB setting is accepted as-is** — the
+ * index signature is the escape hatch, not a recommendation.
+ *
+ * ```ts
+ * options: { threads: 8, memory_limit: "4GB", temp_directory: "./data/tmp" }
+ * ```
+ *
+ * @see https://duckdb.org/docs/current/configuration/overview
+ */
+export type DuckdbOptions = {
+    /** Worker threads the engine uses. Omitted → one per core. */
+    threads?: number | string;
+    /** Soft memory limit, e.g. `'4GB'` (`memory_limit`). */
+    memory_limit?: string;
+    /** Directory for spill files (`temp_directory`). */
+    temp_directory?: string;
+    /** Cap on the spill directory, e.g. `'50GB'` (`max_temp_directory_size`). */
+    max_temp_directory_size?: string;
+    /** Let extensions read outside the database (`enable_external_access`). */
+    enable_external_access?: boolean | string;
+    /** Refuse further `SET` once the database is open (`lock_configuration`). */
+    lock_configuration?: boolean | string;
+    /** WAL size that triggers a checkpoint, e.g. `'1GB'` (`checkpoint_threshold`). */
+    checkpoint_threshold?: string;
+    /** Ordering of `NULL`s — `'NULLS_FIRST'` / `'NULLS_LAST'` (`default_null_order`). */
+    default_null_order?: string;
+    /** Format new files are written in, e.g. `'v1.0.0'` (`storage_compatibility_version`). */
+    storage_compatibility_version?: string;
+    /**
+     * Reuse the HTTP(S) connection between requests — `httpfs_connection_caching`,
+     * **`true` by default**. This is the client-side cache Quack relies on: one TCP
+     * and TLS handshake per instance, not per query. Turn it off (`false`) to debug
+     * a proxy or a load balancer, or to force a fresh connection per request.
+     *
+     * Applies to the whole `httpfs` client of the instance (Quack, S3, GCS…), not
+     * just the Quack remote.
+     */
+    httpfs_connection_caching?: boolean | string;
+
+    // ── Quack settings (DuckDB session/global options) ────────────────────
+    // Everything the extension registers; set here or at run time with
+    // `SET GLOBAL`. Defaults are Quack's own.
+
+    /** Target size of one wire batch, in bytes (default 32 MiB). */
+    quack_target_batch_bytes?: number | string;
+    /** Rows returned inline in the PREPARE response (default 24 576). */
+    quack_prepare_inline_rows?: number | string;
+    /** FETCH requests kept in flight ahead of the scan (0 = async threads). */
+    quack_fetch_read_ahead?: number | string;
+    /** Pending bytes the batch rebalancer buffers (0 = automatic). */
+    quack_rebalance_buffer_bytes?: number | string;
+    /** Server-side per-stream byte budget (default 256 MiB). */
+    quack_server_stream_buffer_bytes?: number | string;
+    /** Maximum concurrent connections the server accepts (default 1024). */
+    quack_server_max_connections?: number | string;
+    /** Seconds an idle keep-alive connection stays open (default 300). */
+    quack_server_keep_alive_timeout?: number | string;
+    /** Client id sent to the server — at least 4 characters. */
+    quack_default_client_id?: string;
+    /** Heartbeat lease timeout in seconds (default 60). */
+    quack_default_heartbeat_timeout?: number | string;
+    /** Acknowledge results and cache them for reconnects (default false). */
+    quack_enable_reconnects?: boolean | string;
+    /** Seconds an idle cached result is kept (default 3600; 0 = never). */
+    quack_result_ttl?: number | string;
+    /** Maximum rows kept in the server result cache (default 100 000). */
+    quack_cache_max_rows?: number | string;
+    /** Authentication callback — a 3-arg scalar function (`sid, client, server`). */
+    quack_authentication_function?: string;
+    /** Authorization callback — a 2-arg scalar function (`sid, query`). */
+    quack_authorization_function?: string;
+    /** Any other DuckDB setting — forwarded untouched. */
+    [setting: string]: string | number | boolean | undefined;
+};
+
+/**
  * What `new DuckdbQuackInstance()` takes.
  *
  * The Quack part is at the top level, because it is what the class is for; leaving
@@ -308,6 +388,19 @@ export type QuackInstanceOptions = {
      */
     disableSsl?: boolean;
     /**
+     * Expected fingerprint of the server's certificate — required to trust a
+     * **self-signed** certificate (`SSL_FINGERPRINT`). The value is the one
+     * `quack_generate_keys` returns.
+     */
+    sslFingerprint?: string;
+    /**
+     * Client id sent to the server (`CLIENT_ID`), at least 4 characters. Useful in
+     * the server logs and in `quack_active_connections()`.
+     */
+    clientId?: string;
+    /** Heartbeat lease timeout in seconds (`HEARTBEAT_TIMEOUT`, default 60). */
+    heartbeatTimeout?: number;
+    /**
      * Refused: Quack 2.0 accepts `READ_ONLY` on ATTACH and ignores it, so the flag
      * cannot protect anything. Enforce read-only on the server with
      * `QuackServerOptions.authorizationFunction` instead.
@@ -323,14 +416,15 @@ export type QuackInstanceOptions = {
     dbPath?: string;
     /**
      * DuckDB configuration options applied to the local instance —
-     * `{ threads: '2', memory_limit: '1GB' }`.
+     * `{ threads: 4, memory_limit: '1GB' }`. Typed as `DuckdbOptions`: the common
+     * settings autocomplete, anything else is forwarded as-is.
      *
      * `threads` is the one worth pinning: left alone, DuckDB takes one thread per
      * core of the machine.
      *
      * @see https://duckdb.org/docs/current/configuration/overview
      */
-    options?: Record<string, string | number | boolean>;
+    options?: DuckdbOptions;
     /**
      * Columns of a table created without a schema — the shape `createTable(name)`
      * and `ingest()` use. Default: `id` (string), `ts` (timestamp), `data` (json).
@@ -437,8 +531,8 @@ export type QuackServerOptions = {
         /** Free-form JSON string. */
         meta?: string;
     };
-    /** DuckDB configuration of the server instance (`{ threads: '4' }`…). */
-    options?: Record<string, string | number | boolean>;
+    /** DuckDB configuration of the server instance (`{ threads: 4 }`…) — same `DuckdbOptions` as a client. */
+    options?: DuckdbOptions;
     /** Columns of a table created without a schema. Default: `id` / `ts` / `data`. */
     columns?: DuckdbColumn[];
     /** Tables the server owns, with their fields — reconciled like `QuackInstanceOptions.tables`. */
@@ -583,6 +677,59 @@ export type DuckdbDeleteOptions = {
     table: string;
     /** SQL predicate — the `WHERE` clause, mandatory. */
     where: string;
+};
+
+/** `db.purge()` request — delete the rows older than a retention window. */
+export type DuckdbPurgeOptions = {
+    /** The table to clean. */
+    table: string;
+    /**
+     * The date column the window is measured on. A `DATE`, `TIMESTAMP`,
+     * `TIMESTAMPTZ` or ISO-string column — it is cast to `TIMESTAMP` for the
+     * comparison, so a text date works too.
+     */
+    column: string;
+    /**
+     * Keep this long: `'30d'`, `'24h'`, `'90m'`, `'3600s'`, `'2w'` — or a `Date`,
+     * in which case rows strictly older than that instant go.
+     */
+    ttl: string | Date;
+    /** Extra SQL predicate, ANDed with the window (e.g. `"data->>'kind' = 'log'"`). */
+    where?: string;
+    /**
+     * Rows deleted per statement (default `100 000`). The purge loops until a
+     * statement deletes less than that, so a huge table never runs one giant
+     * `DELETE`.
+     */
+    batch?: number;
+};
+
+/** What `purge()` reports. */
+export type DuckdbPurgeResult = {
+    /** Table cleaned. */
+    table: string;
+    /** Rows deleted by this call. */
+    deleted: number;
+};
+
+/** `db.retention()` — same window as `purge`, repeated on a timer. */
+export type DuckdbRetentionOptions = DuckdbPurgeOptions & {
+    /** How often the purge runs, e.g. `'1h'`. Minimum one second. */
+    every: string;
+    /** Run once immediately (default `true`). */
+    runOnStart?: boolean;
+    /** Where a failed run reports itself (default: the instance's `onError`, else `console.error`). */
+    onError?: (error: Error) => void;
+};
+
+/** The handle of a scheduled retention. */
+export type DuckdbRetentionHandle = {
+    /** Run the purge now (skipped while a transaction is open). */
+    run(): Promise<DuckdbPurgeResult>;
+    /** Stop the timer. Idempotent. */
+    stop(): void;
+    /** `false` once stopped. */
+    readonly running: boolean;
 };
 
 /** `db.table()` options. */
