@@ -467,6 +467,22 @@ export type QuackInstanceOptions = {
      */
     debug?: boolean;
     /**
+     * **Backpressure** for the background write queue: how many `ingest()` /
+     * `table.ingest()` calls may wait in memory before `ingest()` starts waiting for
+     * room instead of returning immediately.
+     *
+     * Default `64`. Without a cap, a producer that outruns the engine grows the
+     * process until it is killed — the rows are held in JS until they are written.
+     * `0` disables the cap (unbounded, the old behaviour).
+     */
+    maxQueuedBatches?: number;
+    /**
+     * How long `close()` waits for queued writes before interrupting them (default
+     * `30_000` ms). On expiry the connection is interrupted, the instance closed,
+     * and `DUCKDB_FLUSH_TIMEOUT` thrown — a shutdown never hangs forever.
+     */
+    closeTimeoutMs?: number;
+    /**
      * Tables the instance must have, with their fields. Reconciled **in the
      * background** when it opens — see `syncSchema()`: create, add columns, retype;
      * a field the declaration does not know about is **never dropped**.
@@ -584,6 +600,37 @@ export type QuackServerOptions = {
     onError?: (error: Error) => void;
     /** Log the server's operations and errors (`start`, `stop`, serving URI, queries). */
     debug?: boolean;
+    /** Backpressure of the server's own write queue — see `QuackInstanceOptions`. */
+    maxQueuedBatches?: number;
+    /** How long `stop()` waits for queued writes before interrupting them (default `30_000` ms). */
+    closeTimeoutMs?: number;
+    /**
+     * Serve a **readiness endpoint** on `127.0.0.1:<healthPort>` while the server
+     * runs: `GET /health` (and `/`) answers `200 {"ok":true,…}` while the database
+     * really answers, `503` otherwise.
+     *
+     * For a load balancer, Kubernetes or a container healthcheck. The Quack port
+     * also answers `GET /` with a fixed banner, but that only proves the listener
+     * thread is alive; this endpoint runs `quack_server_list()` on the instance, so
+     * an invalidated database or a stuck engine turns it to `503`.
+     *
+     * Bun only (it uses `Bun.serve`); refused elsewhere with
+     * `DUCKDB_QUACK_HEALTH_UNAVAILABLE`.
+     */
+    healthPort?: number;
+};
+
+/** What `server.stats()` returns. */
+export type DuckdbServerStats = {
+    running: boolean;
+    healthy: boolean;
+    listenUri: string;
+    /** Milliseconds since the last successful `start()`. */
+    uptimeMs: number;
+    /** Quack sessions attached right now (`quack_active_connections()`). */
+    connections: number;
+    /** The served instance's counters, or `null` when it is not running. */
+    db: DuckdbStats | null;
 };
 
 /** What `exec()` returns. */
@@ -608,6 +655,48 @@ export type DuckdbExecResult = {
      * `CALL enable_logging('Quack')` + `duckdb_logs_parsed('Quack')`.
      */
     duration_ms: number;
+};
+
+/**
+ * One batch of `stream()` — a chunk of the result, not the whole of it.
+ *
+ * `rows` carry the **native** values of `@duckdb/node-api` (a `BIGINT` is a
+ * `bigint`, a `TIMESTAMP` a `DuckDBTimestampValue`…), exactly what `raw()` gives:
+ * streaming avoids the JSON conversion `exec()` pays for. Convert in your loop if
+ * you need JSON-safe rows.
+ */
+export type DuckdbBatch = {
+    /** Position of the batch in the stream, from `0`. */
+    index: number;
+    columns: string[];
+    types: string[];
+    rows: Record<string, unknown>[];
+};
+
+/** Options of `stream()`. */
+export type DuckdbStreamOptions = {
+    /** Stop the stream: the native result is closed, the connection released. */
+    signal?: AbortSignal;
+};
+
+/** Live counters of one instance — what `db.stats()` returns. */
+export type DuckdbStats = {
+    /** Statements sent (local or remote), including the ones that failed. */
+    queries: number;
+    /** Statements that failed. */
+    errors: number;
+    /** Rows returned by `exec()` / `stream()`. */
+    rows: number;
+    /** Rows written by `ingest()` / `table.ingest()`. */
+    written: number;
+    /** Automatic and explicit `reattach()` calls. */
+    reconnects: number;
+    /** Background writes waiting right now (`maxQueuedBatches` bounds it). */
+    pendingWrites: number;
+    connected: boolean;
+    attached: boolean;
+    /** Milliseconds since the instance opened (`0` before `connect()`). */
+    uptimeMs: number;
 };
 
 /**
@@ -663,6 +752,16 @@ export type DuckdbIngestOptions = {
      * constant-vector path.
      */
     insertBatchSize?: number;
+    /**
+     * Write through DuckDB's **Appender** instead of `INSERT` statements — faster
+     * for a bulk load into the local instance (and the server's own tables).
+     *
+     * Local only: Quack cannot carry an appender over the wire
+     * (`DUCKDB_APPENDER_REMOTE`), and it is refused inside `db.transaction(…)`.
+     * Column types it cannot append exactly (nested, `FLOAT[N]`, `DATE`, `DECIMAL`…)
+     * are refused with `DUCKDB_APPENDER_UNSUPPORTED_TYPE` rather than written wrong.
+     */
+    appender?: boolean;
 };
 
 /** What `ingest()` reports — it does **not** wait for the write (`flush()` does). */

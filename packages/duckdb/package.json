@@ -1,6 +1,6 @@
 {
   "name": "@anteros/duckdb",
-  "version": "0.0.12",
+  "version": "0.0.13",
   "main": "index.ts",
   "module": "index.ts",
   "description": "Anteros DuckDB \u2014 a DuckDB instance over the Quack protocol",

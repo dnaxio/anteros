@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, spyOn } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DuckdbQuackInstance, DuckdbQuackServer, DuckdbQuackError, DEFAULT_PORT, formatTimestamp } from "../index";
+import { DuckdbQuackInstance, DuckdbQuackPool, DuckdbQuackServer, DuckdbQuackError, DEFAULT_PORT, formatTimestamp } from "../index";
 import { freePort } from "./helpers";
 
 /**
@@ -2163,6 +2163,25 @@ describe("server lifecycle", () => {
         }
     }, 180_000);
 
+    it("serves and attaches over IPv6", async () => {
+        const port = freePort();
+        const server = new DuckdbQuackServer({ port, host: "::1", token: "own-token" });
+        try {
+            // Unbracketed, `quack:::1:port` reads `:1:port` as the port and the
+            // server cannot start at all.
+            expect(server.url).toBe(`quack:[::1]:${port}`);
+            await server.start();
+            const client = new DuckdbQuackInstance({ url: server.url, token: "own-token" });
+            try {
+                expect((await client.exec("SELECT 1 AS ok")).rows).toEqual([{ ok: 1 }]);
+            } finally {
+                await client.close();
+            }
+        } finally {
+            await server.stop();
+        }
+    }, 120_000);
+
     it("reports itself unhealthy once stopped", async () => {
         const server = new DuckdbQuackServer({ port: freePort(), token: "own-token" });
         await server.start();
@@ -2192,11 +2211,272 @@ describe("client reattach", () => {
 
     it("releases the native instance when the attach fails", async () => {
         const db = new DuckdbQuackInstance({ url: "quack:127.0.0.1:1", token: "own-token" });
-        await expect(db.connect()).rejects.toMatchObject({ code: "DUCKDB_QUACK_ATTACH_FAILED" });
+        const error = await db.connect().catch((err) => err);
+        expect(error.code).toBe("DUCKDB_QUACK_ATTACH_FAILED");
+        // The engine's own `IO Error` names none of the causes: the message adds them.
+        expect(String(error.message)).toContain("saturated");
         // A leaked handle would keep the instance open (and, with a dbPath, the file
         // locked) and make the next attempt build a second one on top of it.
         expect(db.isConnected).toBe(false);
         await expect(db.connect()).rejects.toMatchObject({ code: "DUCKDB_QUACK_ATTACH_FAILED" });
         expect(db.isConnected).toBe(false);
     }, 60_000);
+});
+
+// ─── Backpressure and shutdown ────────────────────────────────────────────
+
+describe("write queue", () => {
+    it("bounds the queued writes instead of growing without limit", async () => {
+        const db = new DuckdbQuackInstance({ maxQueuedBatches: 2 });
+        try {
+            await db.createTable("queue", [
+                { name: "id", type: "string", primaryKey: true },
+                { name: "n", type: "integer" },
+            ]);
+
+            let peak = db.pendingWrites;
+            const sampler = setInterval(() => { peak = Math.max(peak, db.pendingWrites); }, 1);
+            const rows = (call: number) => Array.from({ length: 200 }, (_, index) => ({ id: `r-${call}-${index}`, n: index }));
+
+            const calls = Array.from({ length: 40 }, (_, call) =>
+                db.ingest({ table: "queue", rows: rows(call), insertBatchSize: 200 }));
+            await Promise.all(calls);
+            await db.flush();
+            clearInterval(sampler);
+
+            // The cap holds: producers wait for room rather than piling rows up in JS.
+            expect(peak).toBeLessThanOrEqual(2);
+            expect(db.pendingWrites).toBe(0);
+            const { rows: counted } = await db.exec("SELECT count(*) AS n FROM queue");
+            expect(Number(counted[0]!.n)).toBe(8_000);
+        } finally {
+            await db.close().catch(() => { });
+        }
+    }, 180_000);
+
+    it("does not let close hang on a stuck write", async () => {
+        const db = new DuckdbQuackInstance();
+        await db.createTable("slow", [{ name: "id", type: "string" }]);
+        // One big batch, closed with a deadline shorter than the write: the
+        // connection is interrupted instead of holding the shutdown forever.
+        const rows = Array.from({ length: 20_000 }, (_, index) => ({ id: `r-${index}` }));
+        await db.ingest({ table: "slow", rows, insertBatchSize: 20_000 });
+        await expect(db.close({ timeoutMs: 1 })).rejects.toMatchObject({ code: "DUCKDB_FLUSH_TIMEOUT" });
+    }, 120_000);
+});
+
+describe("server restart", () => {
+    it("restarts in place, and keeps the file", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "quack-restart-method-"));
+        const file = join(directory, "restart.duckdb");
+        const server = new DuckdbQuackServer({ port: freePort(), token: "own-token", dbPath: file });
+        try {
+            await server.start();
+            await server.db.createTable("orders", [{ name: "id", type: "string", primaryKey: true }]);
+            await server.db.ingest({ table: "orders", rows: [{ id: "a-1" }] });
+            await server.db.flush();
+
+            await server.restart();
+
+            expect(await server.health()).toBe(true);
+            const { rows } = await server.db.exec("SELECT count(*) AS n FROM orders");
+            expect(Number(rows[0]!.n)).toBe(1);
+        } finally {
+            await server.stop();
+            await rm(directory, { recursive: true, force: true });
+        }
+    }, 180_000);
+});
+
+// ─── Streaming, stats, readiness, pool, appender ──────────────────────────
+
+describe("streaming", () => {
+    it("reads a result in batches, local and remote", async () => {
+        const db = new DuckdbQuackInstance();
+        const server = new DuckdbQuackServer({ port: freePort(), token: "own-token" });
+        const client = new DuckdbQuackInstance({ url: server.url, token: "own-token" });
+        try {
+            await db.createTable("events", [
+                { name: "id", type: "string", primaryKey: true },
+                { name: "ts", type: "timestamp" },
+                { name: "data", type: "json" },
+            ]);
+            await db.ingest({
+                table: "events",
+                rows: Array.from({ length: 5_000 }, (_, index) => ({ id: `e-${index}`, data: { index } })),
+            });
+            await db.flush();
+            await server.start();
+
+            for (const [label, source] of [["local", db], ["remote", client]] as const) {
+                if (label === "remote") await client.createTable("events", [
+                    { name: "id", type: "string", primaryKey: true },
+                    { name: "ts", type: "timestamp" },
+                    { name: "data", type: "json" },
+                ]);
+                if (label === "remote") {
+                    await client.ingest({
+                        table: "events",
+                        rows: Array.from({ length: 5_000 }, (_, index) => ({ id: `e-${index}`, data: { index } })),
+                    });
+                    await client.flush();
+                }
+
+                let batches = 0;
+                let rows = 0;
+                for await (const batch of source.stream("SELECT id FROM events")) {
+                    batches += 1;
+                    rows += batch.rows.length;
+                    expect(batch.columns).toEqual(["id"]);
+                }
+                expect(rows).toBe(5_000);
+                // A chunk is ~2048 rows: a 5000-row result cannot be one batch.
+                expect(batches).toBeGreaterThanOrEqual(2);
+            }
+        } finally {
+            await client.close().catch(() => { });
+            await server.stop();
+            await db.close();
+        }
+    }, 180_000);
+
+    it("stops on an aborted signal and closes the result", async () => {
+        const db = new DuckdbQuackInstance();
+        try {
+            await db.createTable("rows", [{ name: "id", type: "string" }]);
+            await db.ingest({ table: "rows", rows: Array.from({ length: 5_000 }, (_, index) => ({ id: `r-${index}` })) });
+            await db.flush();
+
+            const controller = new AbortController();
+            let seen = 0;
+            await expect((async () => {
+                for await (const batch of db.stream("SELECT id FROM rows", { signal: controller.signal })) {
+                    seen += batch.rows.length;
+                    controller.abort();
+                }
+            })()).rejects.toMatchObject({ code: "DUCKDB_STREAM_ABORTED" });
+            expect(seen).toBeGreaterThan(0);
+            expect(seen).toBeLessThan(5_000);
+        } finally {
+            await db.close();
+        }
+    }, 120_000);
+});
+
+describe("stats and readiness", () => {
+    it("counts queries, rows and writes", async () => {
+        const db = new DuckdbQuackInstance();
+        try {
+            await db.createTable("counted", [{ name: "id", type: "string", primaryKey: true }]);
+            await db.ingest({ table: "counted", rows: [{ id: "a" }, { id: "b" }, { id: "c" }] });
+            await db.flush();
+            const { rows } = await db.exec("SELECT count(*) AS n FROM counted");
+
+            const stats = db.stats;
+            expect(Number(rows[0]!.n)).toBe(3);
+            expect(stats.written).toBe(3);
+            expect(stats.queries).toBeGreaterThanOrEqual(1);
+            expect(stats.rows).toBeGreaterThanOrEqual(1);
+            expect(stats.errors).toBe(0);
+            expect(stats.pendingWrites).toBe(0);
+            expect(stats.connected).toBe(true);
+            expect(stats.uptimeMs).toBeGreaterThan(0);
+        } finally {
+            await db.close();
+        }
+    }, 120_000);
+
+    it("serves a readiness endpoint that follows the listener", async () => {
+        const port = freePort();
+        const server = new DuckdbQuackServer({ port, token: "own-token", healthPort: freePort() });
+        try {
+            await server.start();
+            const url = `http://127.0.0.1:${server.healthPort}/`;
+            const response = await fetch(url);
+            expect(response.status).toBe(200);
+            expect(await response.json()).toMatchObject({ ok: true, listenUri: server.listenUri });
+
+            const stats = await server.stats();
+            expect(stats).toMatchObject({ running: true, healthy: true, connections: 0 });
+
+            await server.stop();
+            await expect(fetch(url)).rejects.toThrow();
+        } finally {
+            await server.stop();
+        }
+    }, 120_000);
+});
+
+describe("client pool", () => {
+    it("never exceeds its size, and refuses once closed", async () => {
+        const server = new DuckdbQuackServer({ port: freePort(), token: "own-token" });
+        await server.start();
+        const pool = new DuckdbQuackPool({ url: server.url, token: "own-token", size: 2 });
+        try {
+            const results = await Promise.all(
+                Array.from({ length: 8 }, (_, index) => pool.exec(`SELECT ${index} AS n`)),
+            );
+            expect(results.map((result) => Number(result.rows[0]!.n)).sort((a, b) => a - b))
+                .toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+            expect(pool.created).toBeLessThanOrEqual(2);
+            expect(pool.idle).toBe(2);
+
+            await pool.close();
+            await expect(pool.exec("SELECT 1")).rejects.toMatchObject({ code: "DUCKDB_CLOSED" });
+        } finally {
+            await pool.close();
+            await server.stop();
+        }
+    }, 180_000);
+
+    it("never hands out a client the callback closed", async () => {
+        const server = new DuckdbQuackServer({ port: freePort(), token: "own-token" });
+        await server.start();
+        const pool = new DuckdbQuackPool({ url: server.url, token: "own-token", size: 1 });
+        try {
+            // Closing a borrowed client is a caller mistake — the pool must notice
+            // and replace it instead of returning a dead handle to the next call.
+            await pool.withClient(async (db) => {
+                await db.exec("SELECT 1");
+                await db.close();
+            });
+            expect(pool.created).toBe(0);
+            expect((await pool.exec("SELECT 2 AS ok")).rows).toEqual([{ ok: 2 }]);
+            expect(pool.created).toBe(1);
+        } finally {
+            await pool.close();
+            await server.stop();
+        }
+    }, 180_000);
+});
+
+describe("appender ingest", () => {
+    it("writes typed rows locally, and refuses the remote", async () => {
+        const db = new DuckdbQuackInstance();
+        const server = new DuckdbQuackServer({ port: freePort(), token: "own-token" });
+        const client = new DuckdbQuackInstance({ url: server.url, token: "own-token" });
+        try {
+            await db.createTable("appended", [
+                { name: "id", type: "string", primaryKey: true },
+                { name: "ts", type: "timestamp" },
+                { name: "data", type: "json" },
+            ]);
+            await db.ingest({
+                table: "appended",
+                appender: true,
+                rows: [{ id: "a-1", ts: "2026-10-01 08:30:00", data: { ref: "A-1" } }],
+            });
+            await db.flush();
+            const { rows } = await db.exec("SELECT id, ts, data FROM appended");
+            expect(rows).toEqual([{ id: "a-1", ts: "2026-10-01 08:30:00", data: '{"ref":"A-1"}' }]);
+
+            await server.start();
+            await expect(client.ingest({ table: "appended", rows: [{ id: "b" }], appender: true }))
+                .rejects.toMatchObject({ code: "DUCKDB_APPENDER_REMOTE" });
+        } finally {
+            await client.close().catch(() => { });
+            await server.stop();
+            await db.close();
+        }
+    }, 180_000);
 });

@@ -71,7 +71,7 @@ await db.close();
 
 | Option     | Type                                    | Default            | Description                                                                    |
 | ---------- | --------------------------------------- | ------------------ | ------------------------------------------------------------------------------ |
-| `url`      | `string`                                | —                  | The Quack server, `'quack:host'` (9494) or `'quack:host:port'`. Omit for a purely local instance. |
+| `url`      | `string`                                | —                  | The Quack server, `'quack:host'` (9494) or `'quack:host:port'`. IPv6: `'quack:[::1]:9494'`. Omit for a purely local instance. |
 | `token`    | `string`                                | `DUCKDB_QUACK_TOKEN` | The shared secret, sent as a secret **scoped to `url`** (`CREATE SECRET … SCOPE '…'`). |
 | `as`       | `string`                                | `'quack'`          | The catalog name the remote is attached under — and then made the **default catalog** (`USE`). |
 | `db`       | `string`                                | —                  | Select a database **on the server** (`USE`) — for a server exposing several attached databases; requires `url`. |
@@ -88,6 +88,8 @@ await db.close();
 | `tables`   | `DuckdbTableSchema[]`                   | —                  | Tables the instance must have — reconciled at startup (see below).             |
 | `onError`  | `(error: Error) => void`                | `console.error`    | Where a failed background `ingest` is reported immediately (`flush()` also throws it).                         |
 | `debug`    | `boolean`                               | `false`            | Log every operation and failure to the console — `[duckdb]` for the instance, `[quack]` for the server (see below). |
+| `maxQueuedBatches` | `number`                        | `64`               | **Backpressure**: queued `ingest()` calls before the producer waits. `0` = unbounded (see below). |
+| `closeTimeoutMs` | `number`                          | `30_000`           | How long `close()` waits for queued writes; past it the statement is interrupted and `DUCKDB_FLUSH_TIMEOUT` thrown. |
 
 `as` names the attachment on the **client**; `db` selects a database **inside the server**. If the
 server has attached several files (`ATTACH 'PROD_RTL.duckdb' AS PROD_RTL`), a client can pick one:
@@ -100,6 +102,29 @@ await db.exec("SELECT * FROM orders"); // runs on PROD_RTL, not the server defau
 The choice is **per client session** (`USE` on the server). Without `db`, the server's **default database** is
 used — the `dbPath` file's database (e.g. `DEMO_ST` for `DEMO_ST.duckdb`), or `memory`. A missing named
 database fails at `connect()` with `DUCKDB_QUACK_DATABASE_FAILED`; `db` without `url` is refused.
+
+#### Why `USE`, not `CONNECT`
+
+Quack's overview recommends `CONNECT qk` to route a whole session to the remote. This wrapper does not: it
+attaches the remote as a catalog, runs `USE quack`, and sends each `exec` through
+`quack_query_by_name('quack', sql)` — one statement, executed remotely, result streamed back.
+
+- **`CONNECT` does not lift the parameter limit.** Verified against DuckDB 2.0: on a routed session,
+  `run('SELECT $1', [42])` still fails with *"Values were not provided for the following parameters"* — so the
+  inlining of literals stays necessary either way, and `CONNECT` buys nothing there.
+- **The workspace stays usable.** With `USE`, `db.raw()` is still the client's own catalog (`memory.orders`),
+  and `db.exec('…')` targets the server explicitly. Routing the whole session makes every statement remote —
+  including the local bookkeeping (`CREATE TEMP TABLE`, `SET`), which then lands on the server.
+- **Re-attaching stays simple.** `reattach()` steps back with `USE <local>`, `DETACH`, `ATTACH`; a routed
+  session needs `DISCONNECT` first, and one forgotten `DISCONNECT` sends the next local statement to the server.
+
+If you want the routed session, it is one statement away — `db.raw()` gives the connection:
+
+```ts
+const { connection } = await db.raw();
+await connection.run("CONNECT quack");   // now plain SQL runs on the server
+await connection.run("DISCONNECT");      // back to the attached catalog
+```
 
 ### HTTP connection caching
 
@@ -126,6 +151,8 @@ whole `httpfs` client of the instance — Quack, S3, GCS — not just the remote
 | `connect()`                                 | Opens the local instance and attaches the remote. Idempotent, called for you.    |
 | `reattach()`                                | DETACH + ATTACH after a server restart; drops the schema caches.                  |
 | `exec(sql, values?)`                        | Runs one statement, returns `{ columns, types, rows, duration_ms }`. On an attached instance it runs **on the Quack server** (`quack_query_by_name`); `values` run in the client engine, inlined as SQL literals (Quack 2.0 cannot bind parameters on a remote catalog). |
+| `stream(sql, { signal? })`                  | The same statement, **in batches** (~2048 rows) — memory-safe reading of a big result. |
+| `stats`                                     | Live counters: `queries`, `errors`, `rows`, `written`, `reconnects`, `pendingWrites`, `uptimeMs`. |
 | `transaction(fn)`                           | `BEGIN TRANSACTION` / `COMMIT` around `fn(tx)`, `ROLLBACK` on throw; `tx.exec` stays server-side. |
 | `createTable(table, columns?)`              | `CREATE TABLE IF NOT EXISTS` — on the attached remote when there is one.         |
 | `deleteTable(table)`                        | `DROP TABLE IF EXISTS` — on the attached remote when there is one.               |
@@ -139,8 +166,10 @@ whole `httpfs` client of the instance — Quack, S3, GCS — not just the remote
 | `setVar(name, value)`                       | `SET VARIABLE name = value`; on the server when attached.                          |
 | `getVar(name)` / `resetVar(name)`           | Read (`null` when unset) / `RESET VARIABLE`.                                        |
 | `listVars()`                                | Every session variable with its type (`duckdb_variables()`).                        |
-| `ingest({ table, rows, insertBatchSize? })` | Queues rows **in the background**; creates the table if it is missing (on the remote when attached). |
+| `ingest({ table, rows, insertBatchSize?, appender? })` | Queues rows **in the background**; creates the table if it is missing (on the remote when attached). Waits for room past `maxQueuedBatches`. |
 | `flush()`                                   | Waits for every queued write, then throws the first failure once.                |
+| `pendingWrites`                             | How many background writes are queued right now — the number `maxQueuedBatches` bounds. |
+| `close({ timeoutMs? })`                     | Releases the instance; queued writes are awaited up to the deadline, then interrupted. |
 | `syncSchema()`                              | Waits for the startup reconciliation of `tables` — reports what changed.          |
 | `table(name, { ts? })`                      | A **data table** — `data` JSON + `ts` TIMESTAMP, created in the background.       |
 | `update({ table, where, set, upsert? })`    | Patches matching documents (`json_merge_patch`); `upsert: true` inserts `set` on a miss.   |
@@ -382,6 +411,99 @@ const { rows } = await db.exec(`
     FROM tickets ORDER BY ts
 `);
 ```
+
+### Backpressure and shutdown
+
+The queue is **bounded**: past `maxQueuedBatches` queued calls (default `64`), `ingest()` waits for room
+instead of returning immediately. Without that cap, a producer faster than the engine grows the process until
+it is killed — the rows live in JS until they are written. `ingest()` therefore stops being instant exactly
+when the engine is behind, which is the point; `pendingWrites` is the current depth:
+
+```ts
+const db = new DuckdbQuackInstance({ maxQueuedBatches: 64 }); // 0 = unbounded
+
+for await (const page of pages()) {
+  await db.ingest({ table: "events", rows: page }); // waits when the queue is full
+}
+await db.flush();        // everything landed, or the first failure is thrown
+await db.close();        // bounded: 30 s by default, then interrupt + DUCKDB_FLUSH_TIMEOUT
+```
+
+`close()` never hangs on a dead socket: past `closeTimeoutMs` (`30_000`, or `close({ timeoutMs })`) it
+interrupts the running statement and throws `DUCKDB_FLUSH_TIMEOUT` after releasing the instance — the rows
+still queued did not land, and the caller is told. A batch that legitimately needs longer is a `flush()`
+first, then `close()`.
+
+### Appender ingest (local only)
+
+`ingest({ table, rows, appender: true })` writes through DuckDB's **Appender** instead of
+building one `INSERT` per batch — faster for a bulk load into the local instance (and the
+server's own tables):
+
+```ts
+await db.ingest({ table: "events", rows, appender: true });
+```
+
+- **Local only.** Quack cannot carry an appender over the wire: an attached instance refuses
+  with `DUCKDB_APPENDER_REMOTE`, and an open `db.transaction(…)` refuses with
+  `DUCKDB_APPENDER_IN_TRANSACTION`.
+- Values are appended **by column type** (`appendInteger`, `appendBoolean`, `appendBigInt`,
+  `appendTimestamp`, `appendVarchar` for VARCHAR and JSON). A `TIMESTAMP` accepts a `Date` or
+  a `'YYYY-MM-DD HH:MM:SS'` string.
+- The types are checked **before the first row**: nested lists, `FLOAT[N]`, `DATE`, `DECIMAL`…
+  are refused with `DUCKDB_APPENDER_UNSUPPORTED_TYPE` rather than written wrong.
+- `flush()`, `insertBatchSize`-style batching do not apply (the appender streams rows itself);
+  `stats.written` counts them like the SQL path.
+
+### Streaming a big result
+
+`exec()` builds one array of every row: a `SELECT *` over millions of rows is an OOM waiting for a place to
+happen. `stream()` reads the same statement **one wire chunk at a time** and yields it:
+
+```ts
+for await (const batch of db.stream("SELECT id, data FROM events")) {
+  for (const row of batch.rows) await sink.write(row); // ~2048 rows, then freed
+}
+```
+
+- On an attached instance the statement still runs **on the server** (`quack_query_by_name`); only the
+  result is consumed in chunks. No `LIMIT`/`OFFSET` pagination, one remote execution.
+- Each batch is a `DuckdbBatch`: `{ index, columns, types, rows }`.
+- `batch.rows` carry **native** values (a `BIGINT` is a `bigint`, a `TIMESTAMP` a `DuckDBTimestampValue`) —
+  no JSON conversion, unlike `exec()`. Convert in your loop if you need JSON-safe rows.
+- `break` out of the loop to stop early, or pass `{ signal }`: the native result is closed either way,
+  releasing the connection.
+- The counters `stats.rows` include what a stream read, even when it stopped early.
+
+### Client pool
+
+One `DuckdbQuackInstance` is one Quack session. Opening one per request is exactly how a deployment reaches
+`quack_server_max_connections` (1024) and starts refusing clients with an opaque IO error — so the package
+ships a bounded pool:
+
+```ts
+import { DuckdbQuackPool } from "@anteros/duckdb";
+
+const pool = new DuckdbQuackPool({ url, token, size: 4 });
+
+const { rows } = await pool.exec("SELECT count(*) AS n FROM tickets");
+
+await pool.withClient(async (db) => {
+  await db.ingest({ table: "events", rows });
+  await db.flush();
+});
+
+console.log(pool.created, pool.idle, pool.waiting); // never above `size`
+await pool.close();
+```
+
+- `withClient()` returns the client even when the callback throws; callers past `size` wait instead of
+  opening a new session.
+- A client whose attachment was **invalidated** is re-attached before it goes back to the pool; one that is
+  closed or cannot re-attach is dropped and replaced on the next call.
+- The pool does not retry the failed call: the error reaches you, with the client already made usable.
+- **Never close a borrowed client.** `await db.close()` inside `withClient` is a caller mistake — the pool
+  notices the dead handle, drops it, and builds a replacement for the next caller (covered by a test).
 
 CRUD on the matching documents — the **`where` predicate is mandatory**: a non-empty SQL string. Omitted, blank,
 or not a string (`undefined`, an array…) → `DUCKDB_WHERE_REQUIRED`, because an update without one would
@@ -775,6 +897,9 @@ const server = new DuckdbQuackServer({
   // sslKeyFile: "./certs/private_key.pem",
   settings: { threads: 4 },
   debug: true,                       // every operation and failure → console.debug / console.error
+  maxQueuedBatches: 64,              // backpressure of the server's own writes
+  // closeTimeoutMs: 30_000,         // stop() gives up on a stuck write after this
+  healthPort: 9495,                  // GET / → 200/503, for a load balancer or k8s
 });
 
 await server.start();                            // CALL quack_serve(…), idempotent
@@ -859,6 +984,7 @@ The banner names the URI actually bound, the data source and the masked token; t
 | `--name` / `--region` / `--provider` / `--hostname` | — | Identity advertised by `whoami()` |
 | `--printToken` | `false` | Show the token in the banner (masked by default) |
 | `--debug` | `false` | Log every operation and failure to the console (see *Debug logging*) |
+| `--healthPort <n>` | — | Readiness endpoint on `127.0.0.1:<n>`: `GET /` → 200/503 (Bun only) |
 
 Option names are forgiving (`--dbPath`, `--db-path`, `--DBPATH`). Index flags are repeatable; the JSON
 configs carry the same per-index options as `ftsIndexes` / `vssIndexes`:
@@ -919,7 +1045,10 @@ every failure into one console line, as it happens:
 | ------------- | --------------------------------------------------------------------------------- |
 | `start()`     | Opens the instance and serves. Keeps the Bun process alive. Idempotent, **including under concurrency**. |
 | `stop()`      | `quack_stop`, closes the instance, releases the keep-alive. Idempotent.             |
+| `restart()`   | `stop()` then `start()` — recovery for an invalidated database, or a supervised cycle. |
 | `health()`    | Asks the engine (`quack_server_list()`) whether the listener is still there — `isRunning` is only the wrapper's flag. |
+| `stats()`     | `{ running, healthy, listenUri, uptimeMs, connections, db }` — one call for a dashboard or a supervisor. |
+| `healthPort`  | The readiness port, when one was configured. |
 | `db`          | The local `DuckdbQuackInstance` being served — the tables the clients see. Recreated by the next `start()` after a `stop()`. |
 | `listenUri`   | The URI `quack_serve` actually bound, e.g. `quack:127.0.0.1:9494`.                  |
 | `listenUrl`   | The HTTP(S) URL behind it, once started — `undefined` before `start()` / after `stop()`. |
@@ -936,6 +1065,8 @@ every failure into one console line, as it happens:
   fail, it takes half the traffic — and the first server's clients start failing with
   `Authentication failed` while it still reports `isRunning: true`. `start()` probes the port first and
   refuses with `DUCKDB_QUACK_PORT_IN_USE`, so a duplicate deploy is loud instead of silent.
+- **IPv6 hosts are bracketed.** `host: '::1'` serves on `quack:[::1]:9494`; unbracketed, Quack reads the URI
+  as `:1:9494` and refuses to start (fixed, and covered by a test that binds `::1` and attaches to it).
 - **A failed `start()` is retryable.** It releases the instance it opened and forgets it; the next call
   builds a fresh one. Nothing is left open, nothing holds a `dbPath` lock.
 - **A server restarts, in place.** `stop()` closes the instance and drops it; the next `start()` recreates
@@ -944,15 +1075,27 @@ every failure into one console line, as it happens:
 - **`health()` is what a supervisor should call.** A native listener can disappear while the process and its
   keep-alive timer are fine; `isRunning` would still say `true`. `await server.health()` asks the engine and
   returns `false` when the URI is no longer served (or the database was invalidated).
+- **A readiness port for the infrastructure.** `healthPort` starts a tiny HTTP endpoint on
+  `127.0.0.1:<port>` — `GET /` (or `/health`) answers `200 {"ok":true,…}` while the Quack listener really
+  answers, `503` otherwise.
+  Why a second port: the Quack port does answer `GET /` (`200`, a fixed banner "This is a DuckDB Quack RPC
+  endpoint…"), but that string is static — it proves the **listener thread** is alive, not that the database
+  answers. `health()` runs a real query (`quack_server_list()`), so it drops to `503` when the database is
+  invalidated or the engine stops responding. Point the container or load-balancer probe at `healthPort`.
+  Bun only (`Bun.serve`); elsewhere `start()` refuses with `DUCKDB_QUACK_HEALTH_UNAVAILABLE` instead of
+  silently serving nothing.
 
 ```ts
 setInterval(async () => {
   if (!(await server.health())) {
-    await server.stop();
-    await server.start(); // same port, same file
+    await server.restart(); // stop() + start(): same port, same file
   }
 }, 30_000).unref();
 ```
+
+`restart()` is also the recovery path when the engine **invalidates** the served database (an `INTERNAL
+Error` on one query kills the database instance for every client until the server is restarted). The wrapper
+cannot prevent that — it can only notice it (`health()` returns `false`) and rebuild.
 
 ### Operating limits
 
@@ -974,8 +1117,10 @@ come and go.
 
 - **Attaching makes the remote the default catalog.** The client attaches it as `quack` and runs `USE quack`, so `db.exec('SELECT * FROM orders')` reads the **server's** table — and runs there. The client's own in-memory catalog stays reachable through `db.raw()` (`SELECT * FROM memory.orders`). A local-only instance (no `url`) keeps its own database as the default.
 - **`readOnly` is refused.** Quack 2.0 accepts `READ_ONLY` on `ATTACH` and ignores it — writes still land — so the option throws `DUCKDB_QUACK_READ_ONLY_UNSUPPORTED` instead of pretending to protect. Enforce it on the server (`quack_authorization_function`, e.g. a `read_only` macro), which sees every query.
+- **`ATTACH` is all-or-nothing.** The client binds every table definition the server exposes; a single one that cannot bind (a lazy Iceberg catalog, a view over a missing extension) fails the **whole** attachment with `DUCKDB_QUACK_ATTACH_FAILED`. Nothing in the wrapper can work around it — fix or hide the offending object on the server, or use `quack_query(…)` for a one-off statement instead of attaching.
+- **`quack_cancel` is a best-effort acknowledgement.** Verified against DuckDB 2.0: it returns `cancelled: true` while a long remote scan still runs to completion. Do not build a timeout on it — bound local work with `close({ timeoutMs })`, and keep server-side queries short.
 - **The client's own database is in memory** (`dbPath` opens a file instead). Build a report, aggregate, discard — what has to be shared between processes, or survive a restart, belongs on the server, whose tables live as long as the serving process (give it a reason to stay up, and rebuild at boot if it matters).
-- **`ingest` is a background write**, and on an attached instance it targets the remote. `await db.ingest(...)` returns as soon as the rows are queued; `await db.flush()` waits, then **throws the first failure once** (`onError` sees it immediately). When a batch is refused, it is replayed **row by row** so the error names the row and its id (`DUCKDB_ROW_FAILED`). A batch that dies on a dead attachment or an internal error is not replayed — every row would fail on the first one.
+- **`ingest` is a background write**, and on an attached instance it targets the remote. `await db.ingest(...)` returns as soon as the rows are queued — or once the queue has room (`maxQueuedBatches`), so a producer cannot outrun the engine; `await db.flush()` waits, then **throws the first failure once** (`onError` sees it immediately). When a batch is refused, it is replayed **row by row** so the error names the row and its id (`DUCKDB_ROW_FAILED`). A batch that dies on a dead attachment or an internal error is not replayed — every row would fail on the first one.
 - **One instance per object.** Use `raw()` for what this class does not wrap (the `Appender`, prepared statements, Arrow, extensions, UDFs) rather than opening a second instance.
 - Local names are **quoted**, and values are **bound** on a local instance; on a remote they are **inlined as escaped literals** (Quack 2.0 cannot take parameters on an attached catalog) — a name, a token or a value never reaches the SQL unescaped.
 

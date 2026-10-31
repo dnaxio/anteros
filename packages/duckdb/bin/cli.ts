@@ -72,6 +72,7 @@ const OPTIONS: OptionSpec[] = [
     { key: "hostname", type: "string", help: "Node hostname advertised by whoami()" },
     { key: "printToken", type: "boolean", help: "Show the token in the banner (masked by default)" },
     { key: "debug", type: "boolean", help: "Log every operation and failure to the console" },
+    { key: "healthPort", type: "number", help: "Readiness endpoint on 127.0.0.1:GET / → 200/503 (Bun only)" },
     { key: "help", type: "boolean", help: "Show this help" },
     { key: "version", type: "boolean", help: "Show the package version" },
 ];
@@ -450,6 +451,7 @@ async function start(flags: Record<string, any>): Promise<void> {
         ftsIndexes: fts.length ? fts.map(toFtsIndex) : undefined,
         vssIndexes: vssIndexes.length ? vssIndexes : undefined,
         debug: flags.debug === true,
+        healthPort: flags.healthPort,
     });
 
     try {

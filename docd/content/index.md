@@ -58,7 +58,7 @@ JWT, access rules, rate limiting, IP restriction, field-level encryption.
   ::package-icon{name="duckdb"}
   ::
 #default
-DuckDB over Quack: client/server, the `antd` CLI, JSON tables, full-text and vector search.
+DuckDB over Quack: client/server, the `antd` CLI, JSON tables, full-text and vector search, streaming results and a bounded client pool.
 ::
 
 ::prose-card{title="@anteros/sdk" to="/docs/manage-data/sdk"}

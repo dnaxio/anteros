@@ -1,8 +1,11 @@
 import { DuckdbQuackInstance, DuckdbQuackServer, DuckdbTable, DuckdbQuackError, DEFAULT_COLUMNS, DEFAULT_PORT, formatTimestamp } from "./lib/quack";
+import { DuckdbQuackPool } from "./lib/pool";
 
-export { DuckdbQuackInstance, DuckdbQuackServer, DuckdbTable, DuckdbQuackError, DEFAULT_COLUMNS, DEFAULT_PORT, formatTimestamp };
+export { DuckdbQuackInstance, DuckdbQuackServer, DuckdbQuackPool, DuckdbTable, DuckdbQuackError, DEFAULT_COLUMNS, DEFAULT_PORT, formatTimestamp };
+export type { DuckdbQuackPoolOptions } from "./lib/pool";
 
 export type {
+    DuckdbBatch,
     DuckdbColumn,
     DuckdbColumnType,
     DuckdbDocument,
@@ -25,6 +28,9 @@ export type {
     DuckdbRetentionOptions,
     DuckdbSchemaChange,
     DuckdbSchemaReport,
+    DuckdbServerStats,
+    DuckdbStats,
+    DuckdbStreamOptions,
     DuckdbTableInfo,
     DuckdbTableDeleteResult,
     DuckdbTableIngestResult,
