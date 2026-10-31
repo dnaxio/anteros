@@ -43,7 +43,7 @@ import { DuckdbQuackInstance } from "@anteros/duckdb";
 const db = new DuckdbQuackInstance({
   url: "quack:localhost:9494",
   token: process.env.QUACK_TOKEN,
-  options: { threads: 2 },     // the client instance: pin the threads
+  settings: { threads: 2 },     // the client instance: pin the threads
 });
 
 // One table, two columns: `data` (JSON) and `ts` (TIMESTAMP).
@@ -80,12 +80,14 @@ await db.close();
 | `sslFingerprint` | `string`                          | —                  | Trust a **self-signed** certificate (`SSL_FINGERPRINT`) — the value `quack_generate_keys` returns. |
 | `clientId` | `string`                                | random             | Client id sent to the server (`CLIENT_ID`), at least 4 characters.          |
 | `heartbeatTimeout` | `number`                        | `60`               | Heartbeat lease in seconds (`HEARTBEAT_TIMEOUT`).                           |
+| `autoReattach` | `boolean \| 'reads' \| 'always'`           | `'reads'`          | Re-attach and retry after a server restart — reads only by default; `true` retries any statement. |
 | `secret`   | `string`                                | `'anteros_quack'`  | Name given to the created secret.                                              |
 | `dbPath`   | `string`                                | —                  | Open a **local** DuckDB file instead of memory. The remote's data is never here. |
-| `options`  | `DuckdbOptions`                      | —            | DuckDB configuration of the local instance — `threads`, `memory_limit`… autocomplete; any other setting passes through. |
+| `settings` | `DuckdbOptions`                      | —            | DuckDB configuration of the local instance — `threads`, `memory_limit`… autocomplete; any other setting passes through. |
 | `columns`  | `DuckdbColumn[]`                        | `id`/`ts`/`data`   | Shape of a table created without a schema.                                     |
 | `tables`   | `DuckdbTableSchema[]`                   | —                  | Tables the instance must have — reconciled at startup (see below).             |
-| `onError`  | `(error: Error) => void`                | `console.error`    | Where a failed **background** `ingest` reports itself.                         |
+| `onError`  | `(error: Error) => void`                | `console.error`    | Where a failed background `ingest` is reported immediately (`flush()` also throws it).                         |
+| `debug`    | `boolean`                               | `false`            | Log every operation and failure to the console — `[duckdb]` for the instance, `[quack]` for the server (see below). |
 
 `as` names the attachment on the **client**; `db` selects a database **inside the server**. If the
 server has attached several files (`ATTACH 'PROD_RTL.duckdb' AS PROD_RTL`), a client can pick one:
@@ -103,13 +105,13 @@ database fails at `connect()` with `DUCKDB_QUACK_DATABASE_FAILED`; `db` without 
 
 Quack clients talk HTTP through `httpfs`, which **reuses the connection** by default
 (`httpfs_connection_caching = true`): the instance pays one TCP — and, when remote, one TLS — handshake, not one
-per query. It is a setting like any other, so it belongs in `options`:
+per query. It is a setting like any other, so it belongs in `settings`:
 
 ```ts
 const db = new DuckdbQuackInstance({
   url,
   token,
-  options: { httpfs_connection_caching: false }, // disable — debugging only
+  settings: { httpfs_connection_caching: false }, // disable — debugging only
 });
 ```
 
@@ -122,6 +124,7 @@ whole `httpfs` client of the instance — Quack, S3, GCS — not just the remote
 | Method                                      | What it does                                                                    |
 | ------------------------------------------- | ------------------------------------------------------------------------------- |
 | `connect()`                                 | Opens the local instance and attaches the remote. Idempotent, called for you.    |
+| `reattach()`                                | DETACH + ATTACH after a server restart; drops the schema caches.                  |
 | `exec(sql, values?)`                        | Runs one statement, returns `{ columns, types, rows, duration_ms }`. On an attached instance it runs **on the Quack server** (`quack_query_by_name`); `values` run in the client engine, inlined as SQL literals (Quack 2.0 cannot bind parameters on a remote catalog). |
 | `transaction(fn)`                           | `BEGIN TRANSACTION` / `COMMIT` around `fn(tx)`, `ROLLBACK` on throw; `tx.exec` stays server-side. |
 | `createTable(table, columns?)`              | `CREATE TABLE IF NOT EXISTS` — on the attached remote when there is one.         |
@@ -136,8 +139,8 @@ whole `httpfs` client of the instance — Quack, S3, GCS — not just the remote
 | `setVar(name, value)`                       | `SET VARIABLE name = value`; on the server when attached.                          |
 | `getVar(name)` / `resetVar(name)`           | Read (`null` when unset) / `RESET VARIABLE`.                                        |
 | `listVars()`                                | Every session variable with its type (`duckdb_variables()`).                        |
-| `ingest({ table, rows })`                   | Queues rows **in the background**; creates the table if it is missing (on the remote when attached). |
-| `flush()`                                   | Waits for every queued write.                                                    |
+| `ingest({ table, rows, insertBatchSize? })` | Queues rows **in the background**; creates the table if it is missing (on the remote when attached). |
+| `flush()`                                   | Waits for every queued write, then throws the first failure once.                |
 | `syncSchema()`                              | Waits for the startup reconciliation of `tables` — reports what changed.          |
 | `table(name, { ts? })`                      | A **data table** — `data` JSON + `ts` TIMESTAMP, created in the background.       |
 | `update({ table, where, set, upsert? })`    | Patches matching documents (`json_merge_patch`); `upsert: true` inserts `set` on a miss.   |
@@ -156,7 +159,7 @@ in `duration_ms`.
 
 ### Quack settings
 
-The extension registers ordinary DuckDB settings — set them in `options` at creation, or with
+The extension registers ordinary DuckDB settings — set them in `settings` at creation, or with
 `SET GLOBAL` at run time. Defaults are Quack's own.
 
 | Setting | Default | What it does |
@@ -179,7 +182,7 @@ The extension registers ordinary DuckDB settings — set them in `options` at cr
 ```ts
 const server = new DuckdbQuackServer({
   token: "super-secret",
-  options: {
+  settings: {
     quack_server_max_connections: 2048,
     quack_server_keep_alive_timeout: 600,
     quack_enable_reconnects: true,
@@ -188,10 +191,43 @@ const server = new DuckdbQuackServer({
 });
 ```
 
-The client side takes the same settings in its own `options`, plus the ATTACH-level `sslFingerprint`,
+The client side takes the same settings in its own `settings`, plus the ATTACH-level `sslFingerprint`,
 `clientId` and `heartbeatTimeout` at the top level. A **client** setting (`quack_fetch_read_ahead`,
 `quack_default_client_id`, reconnects…) only matters on the instance that talks to the server; the **server**
 settings only on the instance that serves.
+
+### When the server restarts
+
+An attachment is tied to the **server's database instance**, not just to its URL. A restart — deploy, crash,
+`stop()` then `start()`, or a fatal I/O error — invalidates it: DuckDB says "invalidated its database" or
+"invalid connection id", and the attachment cannot be reused as is. The wrapper maps both to
+`DUCKDB_QUACK_DATABASE_INVALIDATED` and handles it according to `autoReattach`:
+
+| `autoReattach` | Behaviour |
+| --- | --- |
+| `'reads'` (**default**) | `exec` re-attaches and retries **read-only** statements (SELECT/FROM/WITH/SHOW/DESCRIBE/EXPLAIN…) |
+| `true` / `'always'` | Retries any statement — a write may have committed before the invalidation, so make it idempotent first |
+| `false` | Throws the typed error; you call `reattach()` and retry |
+
+```ts
+const db = new DuckdbQuackInstance({
+  url,
+  token,
+  // autoReattach: "reads", // default — reads recover by themselves
+});
+```
+
+- `reattach()` steps back to the client's own catalog (`USE`), detaches the alias, attaches again with the
+  same token/settings, re-applies `db`, and drops the schema caches. It is always available for an explicit
+  retry, whatever the option says. Concurrent calls are **single-flight**: a burst of failed reads (exactly
+  what a restart produces) shares one DETACH/ATTACH instead of racing on the same connection.
+- An `exec` **inside** `db.transaction(…)` is never retried: the transaction is gone, and re-attaching would
+  silently start a new one.
+- `quack_enable_reconnects` only covers a **dropped HTTP connection** with a cached result — it cannot
+  survive a restarted server.
+- Server side: keep `dbPath` on a persistent volume, stop gracefully (`stop()` / `Ctrl-C`), supervise the
+  process. A restart is expected; the client is what re-attaches.
+- `whoami()` (or `quack_server_list()`) reports the server's uptime — the quickest way to confirm a restart.
 
 ### Where a statement runs
 
@@ -326,6 +362,11 @@ job.stop();
 
 The canonical shape: **two columns**, `data` (`JSON`) and `ts` (`TIMESTAMP`). `db.table(name)` returns a
 handle and creates the table **in the background** when it is missing — `ingest()` waits for that creation.
+
+A call can lower the batch size: `db.ingest({ table, rows, insertBatchSize: 1 })` writes **one row per
+statement**. That is the safe setting for a `FLOAT[N]` column, where a multi-row `INSERT` built from constant
+vectors is the shape DuckDB's engine is most likely to reject. The table handle takes the same option:
+`tickets.ingest(docs, { insertBatchSize: 1 })`.
 
 ```ts
 const tickets = await db.table("tickets", { ts: "createdAt" });   // ts ← data.createdAt
@@ -641,20 +682,24 @@ await db.dropVssIndex("embeddings", { column: "vec" });
 `ORDER BY <distance>(col, constant) LIMIT n` shape — a `where` predicate may make the planner fall back to a
 scan. Check with `EXPLAIN`: the plan shows `Hnsw Index Scan`.
 
-A **file** database refuses HNSW indexes unless `hnsw_enable_experimental_persistence` is enabled — either per
-call (`createVssIndex(..., { persist: true })`) or for the whole server (`vssPersist: true`). DuckDB marks that
-persistence as experimental: WAL recovery is not implemented for custom indexes.
+Experimental persistence is **enabled by default** (`hnsw_enable_experimental_persistence`): a **file**
+database accepts HNSW indexes, and a persisted index stays writable after a restart, without any option. It
+must be set when the database is opened — loading `vss` later on a file that already holds such an index
+**hangs** (DuckDB 2.0.0-r.1), which is why the wrapper sets it at creation.
 
 ```ts
 new DuckdbQuackServer({
   token: process.env.QUACK_TOKEN!,
   dbPath: "./data/vecs.duckdb",
-  vssPersist: true,
   vssIndexes: [
     { table: "embeddings", column: "vec", metric: "cosine" },
   ],
 });
 ```
+
+Opt out only deliberately: `settings: { hnsw_enable_experimental_persistence: false }`. A persisted index then
+cannot be bound, and writes fail with `DUCKDB_VSS_INDEX_NOT_LOADED` ("unknown index type 'HNSW'"). DuckDB marks
+the persistence as experimental — WAL recovery is not implemented for custom indexes.
 
 ### Search vectors from SQL
 
@@ -728,7 +773,8 @@ const server = new DuckdbQuackServer({
   targetBatchBytes: 33_554_432,      // quack_target_batch_bytes (32 MiB, Quack's default)
   // sslCertFile: "./certs/server.pem", // TLS pair; omitted → Quack generates a self-signed one
   // sslKeyFile: "./certs/private_key.pem",
-  options: { threads: 4 },
+  settings: { threads: 4 },
+  debug: true,                       // every operation and failure → console.debug / console.error
 });
 
 await server.start();                            // CALL quack_serve(…), idempotent
@@ -776,7 +822,7 @@ antd start --dbPath ./data/analytics.duckdb --port 9494 --token super-secret
 antd start --host 0.0.0.0 --allowOtherHostname --token super-secret
 antd start --dbPath ./data/docs.duckdb --fts documents:document_identifier:text_content,author --token super-secret
 antd start --dbPath ./data/docs.duckdb --ftsConfig ./fts.json --token super-secret
-antd start --dbPath ./data/vecs.duckdb --vss embeddings:vec:cosine --vssPersist --token super-secret
+antd start --dbPath ./data/vecs.duckdb --vss embeddings:vec:cosine --token super-secret
 ```
 
 The banner names the URI actually bound, the data source and the masked token; the process then serves until
@@ -808,10 +854,11 @@ The banner names the URI actually bound, the data source and the masked token; t
 | `--vss <table:column[:metric]>` | — | HNSW index; repeatable (`l2sq`, `cosine`, `ip`) |
 | `--vssConfig <path>` | — | JSON array of vector indexes `{ table, column, metric, … }` |
 | `--vssMetric <metric>` | `l2sq` | Default metric for `--vss` / `--vssConfig` |
-| `--vssPersist` | `false` | Experimental HNSW persistence — required for a file database |
+| `--vssPersist` | on | Experimental HNSW persistence — on by default; `--vssPersist=false` opts out |
 | `--sslCertFile` / `--sslKeyFile` | generated | TLS pair; refused with `--disableSsl` |
 | `--name` / `--region` / `--provider` / `--hostname` | — | Identity advertised by `whoami()` |
 | `--printToken` | `false` | Show the token in the banner (masked by default) |
+| `--debug` | `false` | Log every operation and failure to the console (see *Debug logging*) |
 
 Option names are forgiving (`--dbPath`, `--db-path`, `--DBPATH`). Index flags are repeatable; the JSON
 configs carry the same per-index options as `ftsIndexes` / `vssIndexes`:
@@ -825,7 +872,7 @@ configs carry the same per-index options as `ftsIndexes` / `vssIndexes`:
 
 All indexes are built **before** the port opens, so a client can search as soon as it attaches. `vss` is not
 autoloaded: the CLI loads it (installing on first use) before building. An in-memory database does not need
-`--vssPersist`.
+`--vssPersist` is only needed to opt out.
 
 ### The rest of Quack
 
@@ -845,28 +892,90 @@ Reachable from `server.db.exec(...)` / `server.db.raw()` — the options `Duckdb
 | `vss` extension / HNSW indexes | Vector similarity search — wrapped by `createVssIndex` / `searchVss` / `dropVssIndex` |
 | `enable_logging('Quack' \| 'HTTP')` + `duckdb_logs_parsed(...)` | Per-message logs (`quack_connection_id`, `client_query_id`, `duration_ms`) and the HTTP transport |
 
+### Debug logging
+
+`debug: true` — on the client, on the server, or with `antd start --debug` — turns every wrapped operation and
+every failure into one console line, as it happens:
+
+```
+[duckdb] open { database: "memory", dbPath: "memory" }
+[duckdb] client { sql: "SELECT 1 AS ok", ms: 0, rows: 1 }
+[duckdb] insert { table: "tickets", rows: 500, offset: 0, batchSize: 500 }
+[duckdb] client failed { sql: "SELECT * FROM missing", code: "…", error: "Catalog Error: …" }
+[quack] serving { listenUri: "quack:127.0.0.1:9494", listenUrl: "http://127.0.0.1:9494" }
+```
+
+- Operations go to `console.debug`, failures to `console.error`; the error is still thrown — `debug` only observes.
+- The instance logs `open`, `attached`, `client` / `server` (which side ran the SQL, how long, how many rows),
+  `insert` (batch progress), `create table`, `delete table`, `purge`, `reattach`. The server logs `starting`,
+  `serving`, `stopped`.
+- SQL is collapsed to one line and cut at 500 characters: enough to recognize the statement, never the payload.
+- Off by default, and **not for production**: statements carry your data (a token, an email), and one line per
+  query is real volume on a hot path. Turn it on to diagnose, then turn it off.
+
 ### Members
 
 | Member        | What it is                                                                        |
 | ------------- | --------------------------------------------------------------------------------- |
-| `start()`     | Opens the instance and serves. Keeps the Bun process alive. Idempotent.            |
+| `start()`     | Opens the instance and serves. Keeps the Bun process alive. Idempotent, **including under concurrency**. |
 | `stop()`      | `quack_stop`, closes the instance, releases the keep-alive. Idempotent.             |
-| `db`          | The local `DuckdbQuackInstance` being served — the tables the clients see.         |
+| `health()`    | Asks the engine (`quack_server_list()`) whether the listener is still there — `isRunning` is only the wrapper's flag. |
+| `db`          | The local `DuckdbQuackInstance` being served — the tables the clients see. Recreated by the next `start()` after a `stop()`. |
 | `listenUri`   | The URI `quack_serve` actually bound, e.g. `quack:127.0.0.1:9494`.                  |
 | `listenUrl`   | The HTTP(S) URL behind it, once started — `undefined` before `start()` / after `stop()`. |
 | `url`         | Alias of `listenUri`: exactly what a client hands to `DuckdbQuackInstance`.        |
 | `token`       | The secret clients must present.                                                   |
 | `host` / `port` | What it binds (defaults `'127.0.0.1'` / `9494`).                                 |
-| `isRunning`   | Whether it is accepting connections.                                               |
+| `isRunning`   | Whether the wrapper believes it is serving — use `health()` from a supervisor.     |
 
 > ⚠️ An empty token is refused at construction, and `host` defaults to **localhost**: exposing a Quack server to a network is a deliberate act (`host: '0.0.0.0'`), and the token is then the only thing in the way.
+
+### Lifecycle and liveness
+
+- **One port, one server.** Quack binds with `SO_REUSEPORT`: a second server on the same port does **not**
+  fail, it takes half the traffic — and the first server's clients start failing with
+  `Authentication failed` while it still reports `isRunning: true`. `start()` probes the port first and
+  refuses with `DUCKDB_QUACK_PORT_IN_USE`, so a duplicate deploy is loud instead of silent.
+- **A failed `start()` is retryable.** It releases the instance it opened and forgets it; the next call
+  builds a fresh one. Nothing is left open, nothing holds a `dbPath` lock.
+- **A server restarts, in place.** `stop()` closes the instance and drops it; the next `start()` recreates
+  it on the same `dbPath` (in-memory data is lost, a file survives). `server.db` is therefore a **new**
+  instance after a restart — do not keep a reference across one.
+- **`health()` is what a supervisor should call.** A native listener can disappear while the process and its
+  keep-alive timer are fine; `isRunning` would still say `true`. `await server.health()` asks the engine and
+  returns `false` when the URI is no longer served (or the database was invalidated).
+
+```ts
+setInterval(async () => {
+  if (!(await server.health())) {
+    await server.stop();
+    await server.start(); // same port, same file
+  }
+}, 30_000).unref();
+```
+
+### Operating limits
+
+Quack's own defaults are fine for one application, and are plain DuckDB settings — set them in `settings`:
+
+| Setting | Default | Why it matters |
+| --- | --- | --- |
+| `quack_server_max_connections` | `1024` | Beyond it, **new clients are refused** — the server looks dead. A leaked client (process killed) holds a session until its heartbeat expires. |
+| `quack_server_keep_alive_timeout` | `300` | Seconds an idle HTTP connection stays open. |
+| `quack_server_stream_buffer_bytes` | `256 MiB` (≤ ¼ `memory_limit`) | Per-stream budget; several large results at once can exhaust memory and fail every query. |
+| `quack_default_heartbeat_timeout` | `60` | Lease requested by clients; a dead client is reaped after it. |
+| `quack_enable_reconnects` | `false` | Cached results survive a dropped HTTP connection — not a restarted server. |
+
+A client that closes cleanly frees its session (verified: `quack_active_connections()` drops back to 0);
+one that is **killed** holds it until the heartbeat timeout. Watch `quack_active_connections()` if clients
+come and go.
 
 ## Notes
 
 - **Attaching makes the remote the default catalog.** The client attaches it as `quack` and runs `USE quack`, so `db.exec('SELECT * FROM orders')` reads the **server's** table — and runs there. The client's own in-memory catalog stays reachable through `db.raw()` (`SELECT * FROM memory.orders`). A local-only instance (no `url`) keeps its own database as the default.
 - **`readOnly` is refused.** Quack 2.0 accepts `READ_ONLY` on `ATTACH` and ignores it — writes still land — so the option throws `DUCKDB_QUACK_READ_ONLY_UNSUPPORTED` instead of pretending to protect. Enforce it on the server (`quack_authorization_function`, e.g. a `read_only` macro), which sees every query.
 - **The client's own database is in memory** (`dbPath` opens a file instead). Build a report, aggregate, discard — what has to be shared between processes, or survive a restart, belongs on the server, whose tables live as long as the serving process (give it a reason to stay up, and rebuild at boot if it matters).
-- **`ingest` is a background write**, and on an attached instance it targets the remote. `await db.ingest(...)` returns as soon as the rows are queued; `await db.flush()` waits for the write. A failure goes to `onError`, not to a rejected promise — the caller is gone by then.
+- **`ingest` is a background write**, and on an attached instance it targets the remote. `await db.ingest(...)` returns as soon as the rows are queued; `await db.flush()` waits, then **throws the first failure once** (`onError` sees it immediately). When a batch is refused, it is replayed **row by row** so the error names the row and its id (`DUCKDB_ROW_FAILED`). A batch that dies on a dead attachment or an internal error is not replayed — every row would fail on the first one.
 - **One instance per object.** Use `raw()` for what this class does not wrap (the `Appender`, prepared statements, Arrow, extensions, UDFs) rather than opening a second instance.
 - Local names are **quoted**, and values are **bound** on a local instance; on a remote they are **inlined as escaped literals** (Quack 2.0 cannot take parameters on an attached catalog) — a name, a token or a value never reaches the SQL unescaped.
 

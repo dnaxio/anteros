@@ -65,12 +65,13 @@ const OPTIONS: OptionSpec[] = [
     { key: "vss", type: "list", help: "Vector index: table:column[:metric] (repeatable; metric l2sq, cosine or ip)" },
     { key: "vssConfig", type: "string", help: "JSON file: array of vector indexes { table, column, metric, ... }" },
     { key: "vssMetric", type: "string", help: "Default VSS metric: l2sq (default), cosine or ip" },
-    { key: "vssPersist", type: "boolean", help: "Enable experimental HNSW persistence (required for a file database)" },
+    { key: "vssPersist", type: "boolean", help: "Experimental HNSW persistence — on by default; --vssPersist=false opts out" },
     { key: "name", type: "string", help: "Node name advertised by whoami()" },
     { key: "region", type: "string", help: "Node region advertised by whoami()" },
     { key: "provider", type: "string", help: "Node provider advertised by whoami()" },
     { key: "hostname", type: "string", help: "Node hostname advertised by whoami()" },
     { key: "printToken", type: "boolean", help: "Show the token in the banner (masked by default)" },
+    { key: "debug", type: "boolean", help: "Log every operation and failure to the console" },
     { key: "help", type: "boolean", help: "Show this help" },
     { key: "version", type: "boolean", help: "Show the package version" },
 ];
@@ -149,8 +150,8 @@ Examples:
   antd start --dbPath ./data/docs.duckdb --fts documents:document_identifier:text_content,author --fts docs:id:body --token super-secret
   antd start --dbPath ./data/docs.duckdb --ftsConfig ./fts.json --token super-secret
   antd start --dbPath ./data/docs.duckdb --fts documents:document_identifier:text_content,author --ftsStemmer french --token super-secret
-  antd start --dbPath ./data/vecs.duckdb --vss embeddings:vec:cosine --vssPersist --token super-secret
-  antd start --dbPath ./data/vecs.duckdb --vssConfig ./vss.json --vssPersist --token super-secret
+  antd start --dbPath ./data/vecs.duckdb --vss embeddings:vec:cosine --token super-secret
+  antd start --dbPath ./data/vecs.duckdb --vssConfig ./vss.json --token super-secret
 `;
 
 // ─── Version ──────────────────────────────────────────────────────────────
@@ -421,15 +422,11 @@ async function start(flags: Record<string, any>): Promise<void> {
 
     const fts = await collectFts(flags);
     const vss = await collectVss(flags);
-    if (vss.length && flags.dbPath !== undefined && flags.vssPersist !== true) {
-        throw new CliError("HNSW indexes in a file database need --vssPersist (experimental persistence)");
-    }
-
     // `--vssMetric` fills what an index did not specify; a per-entry metric wins.
     const vssDefault = flags.vssMetric !== undefined ? vssMetric(flags.vssMetric, "--vssMetric") : undefined;
     const vssIndexes = vss.map((index) => toVssIndex(
         { ...index, metric: index.metric ?? vssDefault },
-        flags.vssPersist === true,
+        true,
     ));
 
     const identity = { name: flags.name, region: flags.region, provider: flags.provider, hostname: flags.hostname };
@@ -446,10 +443,13 @@ async function start(flags: Record<string, any>): Promise<void> {
         sslKeyFile: flags.sslKeyFile,
         targetBatchBytes: flags.targetBatchBytes,
         ...(hasIdentity ? { identity } : {}),
-        options: flags.threads !== undefined ? { threads: flags.threads } : undefined,
+        settings: {
+            ...(flags.threads !== undefined ? { threads: flags.threads } : {}),
+            ...(flags.vssPersist === false ? { hnsw_enable_experimental_persistence: false } : {}),
+        },
         ftsIndexes: fts.length ? fts.map(toFtsIndex) : undefined,
         vssIndexes: vssIndexes.length ? vssIndexes : undefined,
-        vssPersist: flags.vssPersist === true,
+        debug: flags.debug === true,
     });
 
     try {

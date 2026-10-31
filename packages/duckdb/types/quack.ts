@@ -184,8 +184,9 @@ export type DuckdbVssIndexOptions = {
     /** Drop and recreate an existing index (default `true`). */
     overwrite?: boolean;
     /**
-     * Enable `hnsw_enable_experimental_persistence` before creating the index —
-     * required for a **file** database. In-memory databases do not need it.
+     * Run `SET GLOBAL hnsw_enable_experimental_persistence = true` before creating
+     * the index. The instance already enables it by default — only needed when it
+     * was explicitly disabled.
      */
     persist?: boolean;
 };
@@ -297,6 +298,16 @@ export type DuckdbOptions = {
      * just the Quack remote.
      */
     httpfs_connection_caching?: boolean | string;
+    /**
+     * Allow HNSW indexes to be persisted in a **file** database — the `vss`
+     * setting `hnsw_enable_experimental_persistence`.
+     *
+     * It is **enabled by default** by the wrapper: a file that already contains an
+     * HNSW index cannot be modified without it, and it must be set before the
+     * database is opened (loading `vss` later hangs). Set `false` only to opt out
+     * deliberately.
+     */
+    hnsw_enable_experimental_persistence?: boolean | string;
 
     // ── Quack settings (DuckDB session/global options) ────────────────────
     // Everything the extension registers; set here or at run time with
@@ -401,6 +412,17 @@ export type QuackInstanceOptions = {
     /** Heartbeat lease timeout in seconds (`HEARTBEAT_TIMEOUT`, default 60). */
     heartbeatTimeout?: number;
     /**
+     * What `exec` does when the server's database is invalidated (restart, crash):
+     *
+     * - `'reads'` (default) — re-attach and retry **read-only** statements;
+     * - `true` / `'always'` — retry any statement (a write may have committed before
+     *   the invalidation: make it idempotent first);
+     * - `false` — throw `DUCKDB_QUACK_DATABASE_INVALIDATED` and leave it to you.
+     *
+     * `reattach()` is always available for an explicit retry.
+     */
+    autoReattach?: boolean | "reads" | "always";
+    /**
      * Refused: Quack 2.0 accepts `READ_ONLY` on ATTACH and ignores it, so the flag
      * cannot protect anything. Enforce read-only on the server with
      * `QuackServerOptions.authorizationFunction` instead.
@@ -415,7 +437,7 @@ export type QuackInstanceOptions = {
      */
     dbPath?: string;
     /**
-     * DuckDB configuration options applied to the local instance —
+     * DuckDB **settings** applied to the local instance —
      * `{ threads: 4, memory_limit: '1GB' }`. Typed as `DuckdbOptions`: the common
      * settings autocomplete, anything else is forwarded as-is.
      *
@@ -424,7 +446,7 @@ export type QuackInstanceOptions = {
      *
      * @see https://duckdb.org/docs/current/configuration/overview
      */
-    options?: DuckdbOptions;
+    settings?: DuckdbOptions;
     /**
      * Columns of a table created without a schema — the shape `createTable(name)`
      * and `ingest()` use. Default: `id` (string), `ts` (timestamp), `data` (json).
@@ -436,6 +458,14 @@ export type QuackInstanceOptions = {
      * Default: `console.error`.
      */
     onError?: (error: Error) => void;
+    /**
+     * Log every operation and every error as it happens — SQL (truncated), engine,
+     * duration, row count, insert batches, attach/reattach, table changes, purge.
+     *
+     * `console.debug` for operations, `console.error` for failures. Off by default:
+     * the output includes SQL, so only enable it while diagnosing.
+     */
+    debug?: boolean;
     /**
      * Tables the instance must have, with their fields. Reconciled **in the
      * background** when it opens — see `syncSchema()`: create, add columns, retype;
@@ -531,8 +561,8 @@ export type QuackServerOptions = {
         /** Free-form JSON string. */
         meta?: string;
     };
-    /** DuckDB configuration of the server instance (`{ threads: 4 }`…) — same `DuckdbOptions` as a client. */
-    options?: DuckdbOptions;
+    /** DuckDB settings of the server instance (`{ threads: 4 }`…) — same `DuckdbOptions` as a client. */
+    settings?: DuckdbOptions;
     /** Columns of a table created without a schema. Default: `id` / `ts` / `data`. */
     columns?: DuckdbColumn[];
     /** Tables the server owns, with their fields — reconciled like `QuackInstanceOptions.tables`. */
@@ -546,17 +576,14 @@ export type QuackServerOptions = {
     ftsIndexes?: DuckdbFtsIndex[];
     /**
      * HNSW vector indexes built **before** the server starts listening. The `vss`
-     * extension is installed/loaded on first use.
+     * extension is installed/loaded on first use, and experimental persistence is
+     * enabled by default (`hnsw_enable_experimental_persistence`).
      */
     vssIndexes?: DuckdbVssIndex[];
-    /**
-     * Enable `hnsw_enable_experimental_persistence` on the server instance —
-     * required to create an HNSW index in a **file** database. DuckDB marks this
-     * persistence as experimental (WAL recovery is not implemented for it).
-     */
-    vssPersist?: boolean;
     /** Where a failed background `ingest` reports itself (default `console.error`). */
     onError?: (error: Error) => void;
+    /** Log the server's operations and errors (`start`, `stop`, serving URI, queries). */
+    debug?: boolean;
 };
 
 /** What `exec()` returns. */
@@ -630,6 +657,12 @@ export type DuckdbIngestOptions = {
     rows: Array<Record<string, unknown>>;
     /** Columns used if the table has to be created (the instance's default otherwise). */
     columns?: DuckdbColumn[];
+    /**
+     * Rows per `INSERT` for **this call** (default 500). Lower it — `1` for a
+     * `FLOAT[N]` column, where one value per statement sidesteps the engine's
+     * constant-vector path.
+     */
+    insertBatchSize?: number;
 };
 
 /** What `ingest()` reports — it does **not** wait for the write (`flush()` does). */
@@ -739,6 +772,8 @@ export type DuckdbTableOptions = {
      * maps `data.createdAt` to the timestamp column. Omitted → the ingestion time.
      */
     ts?: string;
+    /** Rows per `INSERT` for this call (default 500) — `1` for a `FLOAT[N]` column. */
+    insertBatchSize?: number;
 };
 
 /** What a table's `ingest()` reports — queued, not written (`flush()` waits). */

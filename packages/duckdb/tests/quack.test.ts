@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll, spyOn } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -197,7 +197,7 @@ describe("@anteros/duckdb — local instance", () => {
         await db.close();
     });
 
-    it("routes a failed background write to `onError` instead of throwing", async () => {
+    it("surfaces a failed background write through `flush()`, and still calls `onError`", async () => {
         const failures: Error[] = [];
         const db = new DuckdbQuackInstance({ onError: (error) => failures.push(error) });
 
@@ -205,14 +205,91 @@ describe("@anteros/duckdb — local instance", () => {
         // INSERT is refused. (`id` and `ts` would have been filled for us.)
         await db.createTable("strict", [{ name: "must", type: "string", required: true }]);
         await expect(db.ingest({ table: "strict", rows: [{ other: 1 }] })).resolves.toEqual({ table: "strict", queued: 1 });
-        await db.flush();
 
-        // ...and the caller never hears a word about it.
+        // The hook sees it immediately…
+        await expect(db.flush()).rejects.toThrow(/strict/);
         expect(failures).toHaveLength(1);
         expect(failures[0]!.message).toContain("strict");
+
+        // …and the error is reported once: a second flush is clean.
+        await expect(db.flush()).resolves.toBeUndefined();
         const { rows } = await db.exec(`SELECT count(*) AS n FROM "strict"`);
         expect(Number(rows[0]!.n)).toBe(0);
 
+        await db.close();
+    });
+
+    it("names the failing row when a batch is refused", async () => {
+        const db = new DuckdbQuackInstance();
+        await db.exec("CREATE TABLE items (id VARCHAR, v INTEGER)");
+        await db.ingest({
+            table: "items",
+            rows: [
+                { id: "ok", v: 1 },
+                { id: "bad", v: "not-an-integer" },
+            ],
+        });
+
+        await expect(db.flush()).rejects.toMatchObject({ code: "DUCKDB_ROW_FAILED" });
+        await expect(db.flush()).resolves.toBeUndefined();
+        // The good row landed; the bad one did not.
+        expect((await db.exec("SELECT id FROM items")).rows).toEqual([{ id: "ok" }]);
+
+        await db.close();
+    });
+
+    it("takes insertBatchSize per call", async () => {
+        const db = new DuckdbQuackInstance();
+        await db.exec("CREATE TABLE items (id VARCHAR, v INTEGER)");
+        await db.ingest({
+            table: "items",
+            rows: [
+                { id: "ok", v: 1 },
+                { id: "bad", v: "nope" },
+            ],
+            insertBatchSize: 1,
+        });
+
+        // One row per statement: the good row lands, the bad one fails on its own —
+        // no batch replay, so no `DUCKDB_ROW_FAILED` wrapper.
+        await expect(db.flush()).rejects.toThrow(/items/);
+        await expect(db.flush()).resolves.toBeUndefined();
+        expect((await db.exec("SELECT id FROM items")).rows).toEqual([{ id: "ok" }]);
+
+        await db.close();
+    });
+
+    it("keeps a persisted HNSW index writable by default", async () => {
+        const dir = await mkdtemp(join(tmpdir(), "quack-hnsw-"));
+        const file = join(dir, "hnsw.duckdb");
+
+        const first = new DuckdbQuackInstance({ dbPath: file });
+        await first.exec("CREATE TABLE incidents (id VARCHAR, vec FLOAT[3])");
+        await first.exec(`INSERT INTO incidents VALUES ('a', [1, 0, 0])`);
+        await first.createVssIndex("incidents", { column: "vec", persist: true });
+        await first.close();
+
+        // Persistence is enabled by default, so a fresh process can write to the
+        // table without any option: the extension binds the stored index.
+        const second = new DuckdbQuackInstance({ dbPath: file });
+        try {
+            await second.ingest({ table: "incidents", rows: [{ id: "b", vec: [0, 1, 0] }] });
+            await second.flush();
+            expect((await second.exec("SELECT count(*) AS n FROM incidents")).rows).toEqual([{ n: "2" }]);
+        } finally {
+            await second.close();
+            await rm(dir, { recursive: true, force: true });
+        }
+    }, 60_000);
+
+    it("accepts a typed array as a FLOAT[N] value", async () => {
+        const db = new DuckdbQuackInstance();
+        await db.exec("CREATE TABLE vecs (id VARCHAR, vec FLOAT[3])");
+        await db.ingest({ table: "vecs", rows: [{ id: "v1", vec: new Float32Array([1, 0.5, 0]) }] });
+        await db.flush();
+
+        expect((await db.exec("SELECT vec[1] AS x, vec[2] AS y FROM vecs")).rows)
+            .toEqual([{ x: 1, y: 0.5 }]);
         await db.close();
     });
 
@@ -426,7 +503,7 @@ describe("@anteros/duckdb — local instance", () => {
     }, 60_000);
 
     it("takes httpfs settings from options", async () => {
-        const db = new DuckdbQuackInstance({ options: { httpfs_connection_caching: false } });
+        const db = new DuckdbQuackInstance({ settings: { httpfs_connection_caching: false } });
         try {
             await db.connect();
             const { rows } = await db.exec(
@@ -533,17 +610,12 @@ describe("@anteros/duckdb — local instance", () => {
         });
         await first.flush();
 
-        // A file database refuses the index until the experimental flag is set.
-        await expect(first.createVssIndex("vecs", { column: "vec" }))
-            .rejects.toThrow(/hnsw_enable_experimental_persistence/);
-        expect((await first.createVssIndex("vecs", { column: "vec", metric: "cosine", persist: true })).index)
-            .toBe("vss_vecs_vec");
+        // Experimental persistence is on by default: a file accepts the index
+        // without asking for it.
+        expect((await first.createVssIndex("vecs", { column: "vec" })).index).toBe("vss_vecs_vec");
         await first.close();
 
-        const again = new DuckdbQuackInstance({
-            dbPath: file,
-            options: { hnsw_enable_experimental_persistence: "true" },
-        });
+        const again = new DuckdbQuackInstance({ dbPath: file });
         const { rows } = await again.searchVss("vecs", [1, 0, 0], { column: "vec", metric: "cosine", limit: 1 });
         expect(rows.map((row) => row.id)).toEqual(["v1"]);
         await again.close();
@@ -762,6 +834,141 @@ describe("@anteros/duckdb — Quack remote", () => {
             await expect(db.connect()).rejects.toThrow(/client id/i);
         } finally {
             await db.close().catch(() => {});
+        }
+    }, 60_000);
+
+    it("re-attaches explicitly when automatic retry is off", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "quack-reattach-"));
+        const file = join(directory, "reattach.duckdb");
+        const port = freePort();
+        const token = "reattach-token";
+
+        const first = new DuckdbQuackServer({ port, token, dbPath: file });
+        await first.start();
+        const db = new DuckdbQuackInstance({ url: first.url, token, autoReattach: false });
+
+        try {
+            await db.exec("CREATE TABLE t AS SELECT 7 AS n");
+            await first.stop();
+
+            // The attachment died with the first server's database instance.
+            const second = new DuckdbQuackServer({ port, token, dbPath: file });
+            await second.start();
+            try {
+                await expect(db.exec("SELECT n FROM t")).rejects.toMatchObject({
+                    code: "DUCKDB_QUACK_DATABASE_INVALIDATED",
+                });
+
+                await db.reattach();
+                expect((await db.exec("SELECT n FROM t")).rows).toEqual([{ n: 7 }]);
+            } finally {
+                await second.stop();
+            }
+        } finally {
+            await db.close().catch(() => {});
+            await rm(directory, { recursive: true, force: true });
+        }
+    }, 120_000);
+
+    it("re-attaches transparently for a read after the server restarts", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "quack-auto-reattach-"));
+        const file = join(directory, "auto.duckdb");
+        const port = freePort();
+        const token = "auto-token";
+
+        const first = new DuckdbQuackServer({ port, token, dbPath: file });
+        await first.start();
+        const db = new DuckdbQuackInstance({ url: first.url, token });
+
+        try {
+            await db.exec("CREATE TABLE t AS SELECT 11 AS n");
+            await first.stop();
+
+            const second = new DuckdbQuackServer({ port, token, dbPath: file });
+            await second.start();
+            try {
+                // No try/catch, no manual reattach: `autoReattach: 'reads'` is the default.
+                expect((await db.exec("SELECT n FROM t")).rows).toEqual([{ n: 11 }]);
+            } finally {
+                await second.stop();
+            }
+        } finally {
+            await db.close().catch(() => {});
+            await rm(directory, { recursive: true, force: true });
+        }
+    }, 120_000);
+
+    it("does not retry a write after invalidation", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "quack-write-invalid-"));
+        const file = join(directory, "write.duckdb");
+        const port = freePort();
+        const token = "write-token";
+
+        const first = new DuckdbQuackServer({ port, token, dbPath: file });
+        await first.start();
+        const db = new DuckdbQuackInstance({ url: first.url, token });
+
+        try {
+            await db.exec("SELECT 1"); // attach before the restart
+            await first.stop();
+            const second = new DuckdbQuackServer({ port, token, dbPath: file });
+            await second.start();
+            try {
+                // A write is never retried by default: it may have committed first.
+                await expect(db.exec("CREATE TABLE x AS SELECT 1 AS n")).rejects.toMatchObject({
+                    code: "DUCKDB_QUACK_DATABASE_INVALIDATED",
+                });
+
+                await db.reattach();
+                await db.exec("CREATE TABLE x AS SELECT 1 AS n");
+                expect((await db.exec("SELECT n FROM x")).rows).toEqual([{ n: 1 }]);
+            } finally {
+                await second.stop();
+            }
+        } finally {
+            await db.close().catch(() => {});
+            await rm(directory, { recursive: true, force: true });
+        }
+    }, 120_000);
+
+    it("retries a write when autoReattach is true", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "quack-write-retry-"));
+        const file = join(directory, "retry.duckdb");
+        const port = freePort();
+        const token = "retry-token";
+
+        const first = new DuckdbQuackServer({ port, token, dbPath: file });
+        await first.start();
+        const db = new DuckdbQuackInstance({ url: first.url, token, autoReattach: true });
+
+        try {
+            await db.exec("SELECT 1"); // attach before the restart
+            await first.stop();
+
+            const second = new DuckdbQuackServer({ port, token, dbPath: file });
+            await second.start();
+            try {
+                // `true` retries any statement: the write is replayed once.
+                await db.exec("CREATE TABLE x AS SELECT 2 AS n");
+                expect((await db.exec("SELECT n FROM x")).rows).toEqual([{ n: 2 }]);
+            } finally {
+                await second.stop();
+            }
+        } finally {
+            await db.close().catch(() => {});
+            await rm(directory, { recursive: true, force: true });
+        }
+    }, 120_000);
+
+    it("accepts a typed array on the remote", async () => {
+        const db = defaultDb;
+        await db.exec("CREATE TABLE vecs_typed (id VARCHAR, vec FLOAT[3])");
+        try {
+            await db.ingest({ table: "vecs_typed", rows: [{ id: "v1", vec: new Float32Array([0, 1, 0]) }] });
+            await db.flush();
+            expect((await serverDb.exec("SELECT vec[2] AS y FROM vecs_typed")).rows).toEqual([{ y: 1 }]);
+        } finally {
+            await db.deleteTable("vecs_typed").catch(() => {});
         }
     }, 60_000);
 
@@ -1705,7 +1912,7 @@ describe("@anteros/duckdb — Quack server: options", () => {
         const own = new DuckdbQuackServer({
             port: freePort(),
             token: "own-token",
-            options: {
+            settings: {
                 threads: 2,
                 default_null_order: "NULLS_LAST",
                 quack_server_max_connections: 512,
@@ -1802,7 +2009,6 @@ describe("@anteros/duckdb — Quack server: options", () => {
             port: freePort(),
             token: "own-token",
             dbPath: file,
-            vssPersist: true,
             vssIndexes: [{ table: "vecs", column: "vec", metric: "cosine" }],
         });
         await own.start();
@@ -1836,5 +2042,161 @@ describe("@anteros/duckdb — Quack server: options", () => {
 
         await client.close();
         await own.stop();
+    }, 60_000);
+});
+
+// ─── Debug logging ────────────────────────────────────────────────────────
+
+describe("debug logging", () => {
+    it("logs operations and failures when debug is on", async () => {
+        const debug = spyOn(console, "debug").mockImplementation(() => { });
+        const error = spyOn(console, "error").mockImplementation(() => { });
+        const db = new DuckdbQuackInstance({ debug: true });
+        try {
+            await db.exec("SELECT 1 AS ok");
+            await expect(db.exec("SELECT * FROM does_not_exist")).rejects.toThrow();
+
+            const lines = debug.mock.calls.map((call) => call.map(render).join(" "));
+            expect(lines.some((line) => line.includes("[duckdb] open"))).toBe(true);
+            expect(lines.some((line) => line.includes("[duckdb] client") && line.includes("SELECT 1 AS ok"))).toBe(true);
+            expect(error.mock.calls.map((call) => JSON.stringify(call)).join(" ")).toContain("client failed");
+        } finally {
+            debug.mockRestore();
+            error.mockRestore();
+            await db.close();
+        }
+    }, 60_000);
+
+    it("stays silent without debug", async () => {
+        const debug = spyOn(console, "debug").mockImplementation(() => { });
+        const error = spyOn(console, "error").mockImplementation(() => { });
+        const db = new DuckdbQuackInstance();
+        try {
+            await db.exec("SELECT 1 AS ok");
+            expect(debug).not.toHaveBeenCalled();
+            expect(error).not.toHaveBeenCalled();
+        } finally {
+            debug.mockRestore();
+            error.mockRestore();
+            await db.close();
+        }
+    }, 60_000);
+
+    it("logs the server lifecycle when debug is on", async () => {
+        const debug = spyOn(console, "debug").mockImplementation(() => { });
+        const own = new DuckdbQuackServer({ port: freePort(), token: "own-token", debug: true });
+        try {
+            await own.start();
+            await own.stop();
+            const lines = debug.mock.calls.map((call) => call.map(render).join(" "));
+            expect(lines.some((line) => line.includes("[quack] starting"))).toBe(true);
+            expect(lines.some((line) => line.includes("[quack] serving"))).toBe(true);
+            expect(lines.some((line) => line.includes("[quack] stopped"))).toBe(true);
+        } finally {
+            await own.stop();
+            debug.mockRestore();
+        }
+    }, 120_000);
+});
+
+/** `console.debug` arguments as one searchable line. */
+function render(part: unknown): string {
+    return typeof part === "string" ? part : JSON.stringify(part);
+}
+
+// ─── Server lifecycle ─────────────────────────────────────────────────────
+//
+// What a server must survive: a second `start()`, a restart after `stop()`, and a
+// port already served by someone else. Quack binds with SO_REUSEPORT, so none of
+// these fail on their own — the wrapper has to make them fail loudly.
+
+describe("server lifecycle", () => {
+    it("refuses a port another server already owns", async () => {
+        const port = freePort();
+        const owner = new DuckdbQuackServer({ port, token: "owner-token" });
+        await owner.start();
+        try {
+            const thief = new DuckdbQuackServer({ port, token: "thief-token" });
+            await expect(thief.start()).rejects.toMatchObject({ code: "DUCKDB_QUACK_PORT_IN_USE" });
+            await thief.stop();
+        } finally {
+            await owner.stop();
+        }
+    }, 120_000);
+
+    it("treats a concurrent start as one attempt, and keeps serving", async () => {
+        const server = new DuckdbQuackServer({ port: freePort(), token: "own-token" });
+        try {
+            const results = await Promise.allSettled([server.start(), server.start()]);
+            expect(results.map((result) => result.status)).toEqual(["fulfilled", "fulfilled"]);
+
+            // The database of the running server must still be usable — a second
+            // `quack_serve` used to close it, leaving a bound port and a dead engine.
+            expect((await server.db.exec("SELECT 1 AS ok")).rows).toEqual([{ ok: 1 }]);
+            expect(await server.health()).toBe(true);
+        } finally {
+            await server.stop();
+        }
+    }, 120_000);
+
+    it("starts again after stop, on the same file", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "quack-restart-"));
+        const file = join(directory, "restart.duckdb");
+        const port = freePort();
+
+        const first = new DuckdbQuackServer({ port, token: "own-token", dbPath: file });
+        await first.start();
+        await first.db.createTable("orders", [{ name: "id", type: "string", primaryKey: true }]);
+        await first.db.ingest({ table: "orders", rows: [{ id: "a-1" }] });
+        await first.db.flush();
+        await first.stop();
+
+        const second = new DuckdbQuackServer({ port, token: "own-token", dbPath: file });
+        try {
+            await second.start();
+            const { rows } = await second.db.exec("SELECT count(*) AS n FROM orders");
+            expect(Number(rows[0]!.n)).toBe(1);
+            expect(await second.health()).toBe(true);
+        } finally {
+            await second.stop();
+            await rm(directory, { recursive: true, force: true });
+        }
+    }, 180_000);
+
+    it("reports itself unhealthy once stopped", async () => {
+        const server = new DuckdbQuackServer({ port: freePort(), token: "own-token" });
+        await server.start();
+        expect(await server.health()).toBe(true);
+        await server.stop();
+        expect(await server.health()).toBe(false);
+    }, 120_000);
+});
+
+describe("client reattach", () => {
+    it("serializes concurrent re-attaches", async () => {
+        const server = new DuckdbQuackServer({ port: freePort(), token: "own-token" });
+        await server.start();
+        const client = new DuckdbQuackInstance({ url: server.url, token: "own-token" });
+        try {
+            await client.exec("SELECT 1");
+            // A server restart makes every in-flight read call `reattach()` at once;
+            // two DETACH/ATTACH on one connection used to fail.
+            const results = await Promise.allSettled([client.reattach(), client.reattach(), client.reattach()]);
+            expect(results.map((result) => result.status)).toEqual(["fulfilled", "fulfilled", "fulfilled"]);
+            expect((await client.exec("SELECT 2 AS ok")).rows).toEqual([{ ok: 2 }]);
+        } finally {
+            await client.close();
+            await server.stop();
+        }
+    }, 120_000);
+
+    it("releases the native instance when the attach fails", async () => {
+        const db = new DuckdbQuackInstance({ url: "quack:127.0.0.1:1", token: "own-token" });
+        await expect(db.connect()).rejects.toMatchObject({ code: "DUCKDB_QUACK_ATTACH_FAILED" });
+        // A leaked handle would keep the instance open (and, with a dbPath, the file
+        // locked) and make the next attempt build a second one on top of it.
+        expect(db.isConnected).toBe(false);
+        await expect(db.connect()).rejects.toMatchObject({ code: "DUCKDB_QUACK_ATTACH_FAILED" });
+        expect(db.isConnected).toBe(false);
     }, 60_000);
 });

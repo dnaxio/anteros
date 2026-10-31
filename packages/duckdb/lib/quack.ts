@@ -1,5 +1,6 @@
 import { DuckDBInstance, type DuckDBConnection } from "@duckdb/node-api";
 import { mkdir } from "node:fs/promises";
+import { createConnection } from "node:net";
 import { dirname, resolve } from "node:path";
 import type {
     DuckdbColumn,
@@ -45,7 +46,7 @@ type TableBackend = {
     /** The table name, qualified with the attached catalog when there is one. */
     target: string;
     ensure: () => Promise<void>;
-    insert: (rows: Array<Record<string, unknown>>, ts?: string) => Promise<void>;
+    insert: (rows: Array<Record<string, unknown>>, ts?: string, batchSize?: number) => Promise<void>;
     enqueue: (work: () => Promise<void>) => void;
     flush: () => Promise<void>;
     /** Run a statement where it belongs (the Quack server when attached). */
@@ -102,7 +103,7 @@ class DuckdbTable {
         if (!rows.length) return { table: this.name, queued: 0 };
 
         await this.#ready;
-        this.#backend.enqueue(() => this.#backend.insert(rows, options.ts ?? this.#options.ts));
+        this.#backend.enqueue(() => this.#backend.insert(rows, options.ts ?? this.#options.ts, options.insertBatchSize));
         return { table: this.name, queued: rows.length };
     }
 
@@ -207,9 +208,13 @@ class DuckdbQuackInstance {
     #connection: DuckDBConnection | null = null;
     #attached = false;
     #closed = false;
+    /** The client's own catalog — what `USE` returns to before a re-attach. */
+    #localDb: string | null = null;
 
     /** Writes queued by `ingest`, drained in order (see `flush`). */
     #pending: Promise<void> = Promise.resolve();
+    /** The first queued write that failed — `flush()` surfaces it once. */
+    #writeError: DuckdbQuackError | null = null;
     /** Tables known to exist — skips the existence check on ingest. */
     #tables = new Set<string>();
     /** Columns of a table, as DuckDB reports them. */
@@ -220,6 +225,8 @@ class DuckdbQuackInstance {
     #vssLoaded = false;
     /** Whether `transaction()` is running — nested transactions are refused. */
     #inTransaction = false;
+    /** The re-attach in flight — concurrent callers share it (see `reattach`). */
+    #reattaching: Promise<void> | null = null;
     /** The background reconciliation of `options.tables` (see `syncSchema`). */
     #schemaSync: Promise<DuckdbSchemaReport> | null = null;
 
@@ -240,6 +247,22 @@ class DuckdbQuackInstance {
             );
         }
         this.#options = options;
+    }
+
+    /** One debug line per operation — `debug: true` only, SQL truncated. */
+    #debug(message: string, details?: Record<string, unknown>): void {
+        if (!this.#options.debug) return;
+        console.debug(`[duckdb] ${message}`, details ?? "");
+    }
+
+    /** One debug line per failure — the error is still thrown by the caller. */
+    #debugError(message: string, err: any, details?: Record<string, unknown>): void {
+        if (!this.#options.debug) return;
+        console.error(`[duckdb] ${message}`, {
+            ...details,
+            code: err?.code,
+            error: firstLine(err?.message ?? err),
+        });
     }
 
     // ─── State ────────────────────────────────────────────────────────────
@@ -292,14 +315,108 @@ class DuckdbQuackInstance {
         return this;
     }
 
+    /**
+     * Re-attach the remote after the server restarted — or invalidated its database.
+     *
+     * Quack ties an attached catalog to the server's **database instance**: when
+     * that instance goes away (restart, `stop()`, a fatal error), every query fails
+     * with `DUCKDB_QUACK_DATABASE_INVALIDATED` until the catalog is detached and
+     * attached again. `reattach()` does exactly that, then drops the schema caches
+     * (a restart may also have changed the tables).
+     *
+     * ```ts
+     * try {
+     *     await db.exec("SELECT …");
+     * } catch (err: any) {
+     *     if (err.code !== "DUCKDB_QUACK_DATABASE_INVALIDATED") throw err;
+     *     await db.reattach();
+     *     // retry — a write that failed may or may not have landed, so retry reads
+     *     // first; make writes idempotent before retrying them.
+     * }
+     * ```
+     */
+    async reattach(): Promise<this> {
+        if (this.#closed) throw new DuckdbQuackError("This DuckDB instance is closed", "DUCKDB_CLOSED");
+        if (!this.#options.url) {
+            throw new DuckdbQuackError("`reattach` needs an attached instance — pass `url`", "DUCKDB_QUACK_URL_REQUIRED");
+        }
+
+        // Single-flight: a burst of failed reads (a server restart) all call
+        // `reattach()` at once, and two DETACH/ATTACH on the same connection is a
+        // race — the second one fails, or leaves the catalog detached. The first
+        // caller does the work, the others wait for it and retry afterwards.
+        if (!this.#reattaching) {
+            const run = this.#doReattach();
+            this.#reattaching = run;
+            try {
+                await run;
+            } finally {
+                if (this.#reattaching === run) this.#reattaching = null;
+            }
+            return this;
+        }
+
+        await this.#reattaching;
+        return this;
+    }
+
+    async #doReattach(): Promise<void> {
+        await this.connect();
+        await this.flush();
+        this.#debug("reattach", { url: this.#options.url, as: this.alias });
+        const { connection } = await this.raw();
+        // DuckDB refuses to detach the catalog currently in use: step back to the
+        // client's own database first.
+        if (this.#localDb) {
+            try {
+                await connection.run(`USE ${quoteIdent(this.#localDb)}`);
+            } catch {
+                // The local catalog is gone — the detach below will tell.
+            }
+        }
+        try {
+            await connection.run(`DETACH ${quoteIdent(this.alias)}`);
+        } catch {
+            // Already gone — the attach below is what matters.
+        }
+        this.#attached = false;
+        this.#tables.clear();
+        this.#columns.clear();
+        this.#ftsFields.clear();
+        await this.#attach();
+    }
+
     async #open(): Promise<void> {
-        // A file when one is asked for (that is what the server does), memory
-        // otherwise — a client is a workspace. The folder is created first: a
-        // `dbPath` under a missing directory is configuration, not an error.
-        if (this.#options.dbPath) await ensureDbDirectory(this.#options.dbPath);
-        this.#instance = await DuckDBInstance.create(this.#options.dbPath, optionsOf(this.#options));
-        this.#connection = await this.#instance.connect();
-        if (this.#options.url) await this.#attach();
+        try {
+            // A file when one is asked for (that is what the server does), memory
+            // otherwise — a client is a workspace. The folder is created first: a
+            // `dbPath` under a missing directory is configuration, not an error.
+            if (this.#options.dbPath) await ensureDbDirectory(this.#options.dbPath);
+            this.#instance = await DuckDBInstance.create(this.#options.dbPath, settingsOf(this.#options));
+            this.#connection = await this.#instance.connect();
+            // Remember the client's own catalog: `reattach()` must leave the remote
+            // before it can detach it (`USE` is per session, and DuckDB refuses to
+            // detach the database in use).
+            const local = await this.#connection.runAndReadAll("SELECT current_database() AS db");
+            this.#localDb = String((local.getRowObjectsJson()[0] as any)?.db ?? "memory");
+            this.#debug("open", { database: this.#localDb, dbPath: this.#options.dbPath ?? "memory" });
+            if (this.#options.url) await this.#attach();
+        } catch (err) {
+            // A failed attach must not leave an open instance behind: the next
+            // `connect()` would overwrite the handles, leaking the native instance
+            // (and, with a `dbPath`, its file lock) on every retry.
+            try {
+                this.#connection?.closeSync();
+            } catch { /* already gone */ }
+            try {
+                this.#instance?.closeSync();
+            } catch { /* already gone */ }
+            this.#connection = null;
+            this.#instance = null;
+            this.#attached = false;
+            this.#localDb = null;
+            throw err;
+        }
         // The declared tables are reconciled in the background: a first query must
         // not wait for a migration. `syncSchema()` is how you wait for it.
         if (this.#options.tables?.length) this.#startSchemaSync();
@@ -358,6 +475,7 @@ class DuckdbQuackInstance {
             // memory catalog stays reachable, qualified (`memory.…`).
             await this.#connection!.run(`USE ${quoteIdent(this.alias)}`);
             this.#attached = true;
+            this.#debug("attached", { url: quack.url, as: this.alias });
 
             // Select a database inside the server when it exposes several. The
             // statement runs on the server (the attachment's session), not on the
@@ -379,6 +497,7 @@ class DuckdbQuackInstance {
                 }
             }
         } catch (err: any) {
+            this.#debugError("attach failed", err, { url: quack.url });
             if (err instanceof DuckdbQuackError && err.code === "DUCKDB_QUACK_DATABASE_FAILED") throw err;
             throw new DuckdbQuackError(
                 `Cannot attach the Quack remote '${quack.url}' — ${firstLine(err?.message)}`,
@@ -390,7 +509,14 @@ class DuckdbQuackInstance {
 
     /** Close the instance. Every later call is refused. */
     async close(): Promise<void> {
-        await this.flush();
+        // A queued write that failed must not keep the instance open: surface it
+        // after the connection is released.
+        let failure: unknown;
+        try {
+            await this.flush();
+        } catch (err) {
+            failure = err;
+        }
         // A migration in flight must finish before the connection goes away.
         if (this.#schemaSync) await this.#schemaSync.catch(() => {});
         this.#closed = true;
@@ -410,6 +536,7 @@ class DuckdbQuackInstance {
             this.#inTransaction = false;
             this.#schemaSync = null;
         }
+        if (failure) throw failure;
     }
 
     // ─── Declared schema ──────────────────────────────────────────────────
@@ -636,7 +763,7 @@ class DuckdbQuackInstance {
             // update/replace run on the server, where the table has no catalog prefix.
             target: quoteIdent(tableName),
             ensure: () => this.#ensureDataTable(tableName),
-            insert: (rows, ts) => this.#insertDocuments(tableName, rows, ts),
+            insert: (rows, ts, batchSize) => this.#insertDocuments(tableName, rows, ts, batchSize),
             enqueue: (work) => this.#enqueueWrite(work),
             flush: () => this.flush(),
             query: (sql) => this.exec(sql),
@@ -852,6 +979,7 @@ class DuckdbQuackInstance {
             deleted += rows;
             if (rows < batch) break;
         }
+        this.#debug("purge", { table, ttl: String(options.ttl), deleted });
         return { table, deleted };
     }
 
@@ -957,16 +1085,19 @@ class DuckdbQuackInstance {
     }
 
     /** Write documents into a data table — one `data` value and one `ts` per row. */
-    async #insertDocuments(table: string, rows: Array<Record<string, unknown>>, tsField?: string): Promise<void> {
+    async #insertDocuments(
+        table: string,
+        rows: Array<Record<string, unknown>>,
+        tsField?: string,
+        batchSize?: number,
+    ): Promise<void> {
         const target = this.#targeted(table);
         // Against an attached catalog, Quack 2.0 cannot take bind parameters: the
         // document and the timestamp travel as literals.
         const remote = this.#options.url !== undefined;
 
-        for (let offset = 0; offset < rows.length; offset += INSERT_BATCH) {
-            const batch = rows.slice(offset, offset + INSERT_BATCH);
+        await this.#insertIsolated(table, rows, batchSizeOf(batchSize), async (batch) => {
             const params: any[] = [];
-
             const tuples = batch.map((row) => {
                 const ts = tsField !== undefined && row[tsField] !== undefined
                     ? toWallClock(row[tsField])
@@ -981,20 +1112,25 @@ class DuckdbQuackInstance {
                 `INSERT INTO ${target} ("data", "ts") VALUES ${tuples.join(", ")}`,
                 remote ? undefined : params,
             );
-        }
+        });
     }
 
-    /** Queue a write behind the ones already queued, reporting a failure through `onError`. */
+    /** Record a background write failure: `flush()` throws it once, `onError` sees it now. */
+    #recordWriteError(err: any): void {
+        const error = err instanceof DuckdbQuackError ? err : wrapEngineError("DuckDB:", err);
+        if (!this.#writeError) this.#writeError = error;
+        if (this.#options.debug) this.#debugError("background write failed", error);
+        if (this.#options.onError) this.#options.onError(error);
+        else if (!this.#options.debug) console.error(error.message);
+    }
+
+    /** Queue a write behind the ones already queued, recording a failure for `flush()`. */
     #enqueueWrite(work: () => Promise<void>): void {
         const next = this.#pending.then(work, work);
+        // Attach the recorder first: `flush()` awaits `#pending`, and this callback
+        // must have run by then.
+        next.catch((err: any) => this.#recordWriteError(err));
         this.#pending = next.catch(() => {});
-        next.catch((err: any) => {
-            const error = err instanceof DuckdbQuackError
-                ? err
-                : new DuckdbQuackError(`DuckDB: ${firstLine(err?.message ?? err)}`, "DUCKDB_ERROR", err);
-            if (this.#options.onError) this.#options.onError(error);
-            else console.error(error.message);
-        });
     }
 
     /** Run a statement with bound values — the SQL this class builds itself. */
@@ -1028,6 +1164,20 @@ class DuckdbQuackInstance {
         }
 
         const { values } = splitExecArguments(valuesOrOptions);
+        try {
+            return await this.#execute(sql, values);
+        } catch (err: any) {
+            // A restarted server invalidates the attachment. `autoReattach` decides
+            // whether this call re-attaches and runs again: reads by default, any
+            // statement with `'always'`, never with `false`.
+            if (!this.#shouldReattachAfter(err, sql)) throw err;
+            await this.reattach();
+            return this.#execute(sql, values);
+        }
+    }
+
+    /** One execution on the right engine — `exec` retries it once after a re-attach. */
+    async #execute(sql: string, values?: any[] | Record<string, any>): Promise<DuckdbExecResult> {
         // Without values the statement is shipped to the server as text. Values
         // force the client engine (the server cannot take parameters), where they
         // are inlined first — see `#execOnClient`.
@@ -1036,6 +1186,15 @@ class DuckdbQuackInstance {
         }
 
         return this.#execOnClient(sql, values);
+    }
+
+    /** Whether `exec` may re-attach and retry this statement — see `autoReattach`. */
+    #shouldReattachAfter(err: any, sql: string): boolean {
+        if (err?.code !== "DUCKDB_QUACK_DATABASE_INVALIDATED") return false;
+        if (this.#options.url === undefined || this.#inTransaction) return false;
+        const mode = this.#options.autoReattach ?? "reads";
+        if (mode === false) return false;
+        return mode === true || mode === "always" || looksReadOnly(sql);
     }
 
     /**
@@ -1059,9 +1218,12 @@ class DuckdbQuackInstance {
                 types: reader.columnTypes().map((type) => String(type)),
                 rows: reader.getRowObjectsJson() as Record<string, unknown>[],
             };
-            return { ...result, duration_ms: performance.now() - started };
+            const duration = performance.now() - started;
+            this.#debug("client", { sql: preview(sql), ms: Math.round(duration), rows: result.rows.length });
+            return { ...result, duration_ms: duration };
         } catch (err: any) {
-            throw new DuckdbQuackError(`DuckDB: ${firstLine(err?.message)}`, "DUCKDB_ERROR", err);
+            this.#debugError("client failed", err, { sql: preview(sql) });
+            throw wrapEngineError("DuckDB:", err);
         }
     }
 
@@ -1083,9 +1245,12 @@ class DuckdbQuackInstance {
                 types: reader.columnTypes().map((type) => String(type)),
                 rows: reader.getRowObjectsJson() as Record<string, unknown>[],
             };
-            return { ...result, duration_ms: performance.now() - started };
+            const duration = performance.now() - started;
+            this.#debug("server", { sql: preview(sql), ms: Math.round(duration), rows: result.rows.length });
+            return { ...result, duration_ms: duration };
         } catch (err: any) {
-            throw new DuckdbQuackError(`DuckDB (server): ${firstLine(err?.message)}`, "DUCKDB_ERROR", err);
+            this.#debugError("server failed", err, { sql: preview(sql) });
+            throw wrapEngineError("DuckDB (server):", err);
         }
     }
 
@@ -1175,8 +1340,10 @@ class DuckdbQuackInstance {
             );
             this.#tables.add(name);
             this.#columns.delete(name);
+            this.#debug("create table", { table: name, columns: cols.map((column) => column.name), created: !existed });
             return { table: name, columns: cols.map((column) => column.name), created: !existed };
         } catch (err: any) {
+            this.#debugError("create table failed", err, { table: name });
             throw new DuckdbQuackError(`DuckDB: ${firstLine(err?.message)}`, "DUCKDB_ERROR", err);
         }
     }
@@ -1191,8 +1358,10 @@ class DuckdbQuackInstance {
             await connection.run(`DROP TABLE IF EXISTS ${this.#targeted(name)}`);
             this.#tables.delete(name);
             this.#columns.delete(name);
+            this.#debug("delete table", { table: name, dropped: existed });
             return { table: name, columns: [], created: false, dropped: existed };
         } catch (err: any) {
+            this.#debugError("delete table failed", err, { table: name });
             throw new DuckdbQuackError(`DuckDB: ${firstLine(err?.message)}`, "DUCKDB_ERROR", err);
         }
     }
@@ -1446,8 +1615,9 @@ class DuckdbQuackInstance {
      *
      * `vss` is **not autoloaded** like `fts`: the first call runs `LOAD vss`
      * (installing it if needed) on the instance — on the Quack server when
-     * attached. A **file** database needs `persist: true` (or the server option
-     * `vssPersist`); DuckDB marks that persistence as experimental.
+     * attached. Experimental persistence is enabled by default
+     * (`hnsw_enable_experimental_persistence`); `persist` is only needed if it was
+     * explicitly disabled.
      *
      * ```ts
      * await db.createVssIndex("embeddings", { column: "vec", metric: "cosine" });
@@ -1649,16 +1819,41 @@ class DuckdbQuackInstance {
         }));
     }
 
+    /**
+     * Run a read-only catalog probe, re-attaching once when the server invalidated
+     * the attachment. Probes bypass `exec`, so `autoReattach` is applied here too.
+     */
+    async #probeRead<T>(work: () => Promise<T>): Promise<T> {
+        try {
+            return await work();
+        } catch (err: any) {
+            const wrapped = wrapEngineError("DuckDB:", err);
+            if (wrapped.code !== "DUCKDB_QUACK_DATABASE_INVALIDATED") throw wrapped;
+            if (this.#options.url === undefined || this.#inTransaction) throw wrapped;
+            if ((this.#options.autoReattach ?? "reads") === false) throw wrapped;
+            await this.reattach();
+            try {
+                return await work();
+            } catch (err2: any) {
+                throw wrapEngineError("DuckDB:", err2);
+            }
+        }
+    }
+
     async #exists(connection: DuckDBConnection, table: string): Promise<boolean> {
         if (this.#options.url) {
             // `information_schema` only describes the *local* catalog, so the remote
-            // is probed with a zero-row select instead.
-            try {
-                await connection.runAndReadAll(`SELECT * FROM ${this.#targeted(table)} LIMIT 0`);
-                return true;
-            } catch {
-                return false;
-            }
+            // is probed with a zero-row select instead. A missing table is `false`;
+            // an invalidated attachment is retried by `#probeRead`.
+            return this.#probeRead(async () => {
+                try {
+                    await connection.runAndReadAll(`SELECT * FROM ${this.#targeted(table)} LIMIT 0`);
+                    return true;
+                } catch (err: any) {
+                    if (isInvalidated(err)) throw err;
+                    return false;
+                }
+            });
         }
 
         const reader = await connection.runAndReadAll(
@@ -1676,15 +1871,18 @@ class DuckdbQuackInstance {
 
         if (this.#options.url) {
             // The remote's own `information_schema` is not attached — a zero-row
-            // select is what reports the columns it actually has.
+            // select is what reports the columns it actually has. The probe is a
+            // read, so a restarted server is retried (`autoReattach: 'reads'`).
             try {
-                const reader = await connection.runAndReadAll(`SELECT * FROM ${this.#targeted(table)} LIMIT 0`);
+                const reader = await this.#probeRead(async () =>
+                    connection.runAndReadAll(`SELECT * FROM ${this.#targeted(table)} LIMIT 0`));
                 const types = reader.columnTypes().map((type) => String(type));
                 const columns = reader.columnNames().map((name, index) => ({ name, sql: types[index] ?? "VARCHAR" }));
                 if (!columns.length) throw new Error("no columns");
                 this.#columns.set(table, columns);
                 return columns;
             } catch (err: any) {
+                if (err instanceof DuckdbQuackError && err.code === "DUCKDB_QUACK_DATABASE_INVALIDATED") throw err;
                 throw new DuckdbQuackError(
                     `Table '${table}' does not exist on the remote '${this.#options.url}'`,
                     "DUCKDB_TABLE_NOT_FOUND",
@@ -1730,8 +1928,8 @@ class DuckdbQuackInstance {
      * The call returns as soon as the rows are queued: the table is created if it
      * is missing, then the batch is written by the drain loop. Await `flush()` when
      * the write has to be over before you move on (a script that exits, a test, the
-     * shutdown path). A write that fails is logged, not thrown — a standalone
-     * library logs through `onError`, and the caller is long gone by then.
+     * shutdown path). A failure is reported through `onError` **and** thrown by the
+     * next `flush()` — the rows did not land, and the caller must know.
      */
     async ingest(options: DuckdbIngestOptions): Promise<DuckdbIngestResult> {
         const table = normaliseName(options?.table);
@@ -1746,6 +1944,7 @@ class DuckdbQuackInstance {
         const { connection } = await this.raw();
         const inTransaction = this.#inTransaction;
         const remote = this.#options.url !== undefined;
+        const batchSize = batchSizeOf(options.insertBatchSize);
 
         // Inside a server transaction, resolve the columns server-side: client-side
         // catalog probes do not see the open transaction and can end it.
@@ -1760,7 +1959,7 @@ class DuckdbQuackInstance {
                     err,
                 );
             }
-            await this.#insertRemote(table, columns, rows as Array<Record<string, unknown>>);
+            await this.#insertRemote(table, columns, rows as Array<Record<string, unknown>>, batchSize);
             return { table, queued: rows.length };
         }
 
@@ -1776,27 +1975,65 @@ class DuckdbQuackInstance {
 
         if (inTransaction) {
             // Local instance: same connection, so the write is transactional.
-            await this.#insert(connection, table, columns, rows as Array<Record<string, unknown>>);
+            await this.#insert(connection, table, columns, rows as Array<Record<string, unknown>>, batchSize);
             return { table, queued: rows.length };
         }
 
-        const work = async () => {
+        this.#enqueueWrite(async () => {
             try {
-                await this.#insert(connection, table, columns, rows as Array<Record<string, unknown>>);
+                await this.#insert(connection, table, columns, rows as Array<Record<string, unknown>>, batchSize);
             } catch (err: any) {
-                const error = new DuckdbQuackError(`DuckDB ingest into '${table}' failed: ${firstLine(err?.message)}`, "DUCKDB_ERROR", err);
-                if (this.#options.onError) this.#options.onError(error);
-                else console.error(error.message);
+                if (err instanceof DuckdbQuackError) {
+                    throw new DuckdbQuackError(`DuckDB ingest into '${table}' failed: ${firstLine(err.message)}`, err.code, err);
+                }
+                throw wrapEngineError(`DuckDB ingest into '${table}' failed:`, err);
             }
-        };
-
-        // Serialised: batches land in the order they were queued, and a failure
-        // never breaks the chain for the writes behind it.
-        const next = this.#pending.then(work, work);
-        this.#pending = next.catch(() => {});
-        next.catch(() => {});
+        });
 
         return { table, queued: rows.length };
+    }
+
+    /**
+     * Write rows in batches; when a batch fails, replay it **row by row** so the
+     * error names the offending row. Skipped for a dead attachment or an internal
+     * error: the whole database is gone, every replay would blame the first row.
+     */
+    async #insertIsolated(
+        table: string,
+        rows: Array<Record<string, unknown>>,
+        batchSize: number,
+        write: (batch: Array<Record<string, unknown>>) => Promise<void>,
+    ): Promise<void> {
+        for (let offset = 0; offset < rows.length; offset += batchSize) {
+            const batch = rows.slice(offset, offset + batchSize);
+            this.#debug("insert", { table, rows: batch.length, offset, batchSize });
+            try {
+                await write(batch);
+            } catch (err: any) {
+                this.#debugError("insert failed", err, { table, rows: batch.length, offset });
+                if (batch.length <= 1 || isInvalidated(err) || INTERNAL_ERROR.test(String(err?.message ?? err))) {
+                    throw err;
+                }
+                for (let index = 0; index < batch.length; index += 1) {
+                    try {
+                        await write([batch[index]!]);
+                    } catch (rowErr: any) {
+                        this.#debugError("row failed", rowErr, {
+                            table,
+                            row: offset + index,
+                            id: rowId(batch[index]!),
+                        });
+                        throw new DuckdbQuackError(
+                            `ingest into '${table}' failed on row ${offset + index} (id=${rowId(batch[index]!)}): ${firstLine(rowErr?.message ?? rowErr)}`,
+                            "DUCKDB_ROW_FAILED",
+                            rowErr,
+                        );
+                    }
+                }
+                // Every row passed on its own: the batch-level failure was transient
+                // and the rows are written — the write succeeds.
+            }
+        }
     }
 
     async #insert(
@@ -1804,23 +2041,22 @@ class DuckdbQuackInstance {
         table: string,
         columns: Array<{ name: string; sql: string }>,
         rows: Array<Record<string, unknown>>,
+        batchSize?: number,
     ): Promise<void> {
         const names = columns.map((column) => quoteIdent(column.name)).join(", ");
         // Against an attached catalog, Quack 2.0 cannot take bind parameters: the
         // values travel as literals, cast to the column's type.
         const remote = this.#options.url !== undefined;
 
-        for (let offset = 0; offset < rows.length; offset += INSERT_BATCH) {
-            const batch = rows.slice(offset, offset + INSERT_BATCH);
+        await this.#insertIsolated(table, rows, batchSizeOf(batchSize), async (batch) => {
             const params: any[] = [];
-
             const tuples = batch.map((row) => `(${columns.map((column) => {
                 let value = row[column.name];
                 // The event-log defaults: a row may omit the time and the id.
                 if (value === undefined && column.name === "ts") value = formatTimestamp();
                 if (value === undefined && column.name === "id") value = crypto.randomUUID();
                 if (remote) return `CAST(${sqlLiteral(value)} AS ${column.sql})`;
-                params.push(bindable(value));
+                params.push(bindable(value, column.sql));
                 return `CAST($${params.length} AS ${column.sql})`;
             }).join(", ")})`);
 
@@ -1828,12 +2064,21 @@ class DuckdbQuackInstance {
                 `INSERT INTO ${this.#targeted(table)} (${names}) VALUES ${tuples.join(", ")}`,
                 remote ? undefined : params,
             );
-        }
+        });
     }
 
-    /** Wait for every write queued so far. */
+    /**
+     * Wait for every queued write, then **throw the first failure** (once). The
+     * `onError` hook still sees it immediately; `flush()` is what lets a caller know
+     * that the rows it queued did not land.
+     */
     async flush(): Promise<void> {
         await this.#pending.catch(() => {});
+        const error = this.#writeError;
+        if (error) {
+            this.#writeError = null;
+            throw error;
+        }
     }
 
     /**
@@ -1844,12 +2089,12 @@ class DuckdbQuackInstance {
         table: string,
         columns: Array<{ name: string; sql: string }>,
         rows: Array<Record<string, unknown>>,
+        batchSize?: number,
     ): Promise<void> {
         const names = columns.map((column) => quoteIdent(column.name)).join(", ");
         const target = quotePath(this.#serverTable(table));
 
-        for (let offset = 0; offset < rows.length; offset += INSERT_BATCH) {
-            const batch = rows.slice(offset, offset + INSERT_BATCH);
+        await this.#insertIsolated(table, rows, batchSizeOf(batchSize), async (batch) => {
             const tuples = batch.map((row) => `(${columns.map((column) => {
                 let value = row[column.name];
                 if (value === undefined && column.name === "ts") value = formatTimestamp();
@@ -1860,7 +2105,7 @@ class DuckdbQuackInstance {
             await this.#execOnRemote(
                 `INSERT INTO ${target} (${names}) VALUES ${tuples.join(", ")}`,
             );
-        }
+        });
     }
 }
 
@@ -1894,11 +2139,11 @@ class DuckdbQuackInstance {
  * auto-loaded by DuckDB on first use. ⚠️ Quack is **experimental** in DuckDB 1.x.
  */
 class DuckdbQuackServer {
-    /** The local instance being served — the tables the clients see live here. */
-    readonly db: DuckdbQuackInstance;
-
     #options: QuackServerOptions;
+    #db: DuckdbQuackInstance | null = null;
     #running = false;
+    /** The `start()` in flight — concurrent callers share it (see `start`). */
+    #starting: Promise<this> | null = null;
     #listenUri: string | null = null;
     #listenUrl: string | null = null;
     /**
@@ -1938,16 +2183,43 @@ class DuckdbQuackServer {
         }
 
         this.#options = options;
-        // The server is a client that attaches nothing: same engine, same SQL.
-        this.db = new DuckdbQuackInstance({
-            // A Quack server owns its database — the one place a file is right.
-            dbPath: options.dbPath,
-            options: options.vssPersist
-                ? { ...options.options, hnsw_enable_experimental_persistence: "true" }
-                : options.options,
-            columns: options.columns,
-            tables: options.tables,
-            onError: options.onError,
+    }
+
+    /**
+     * The local instance being served — the tables the clients see live here.
+     *
+     * Released by `stop()`, and recreated by the next `start()`: a reference taken
+     * before a restart points at a **closed** instance.
+     */
+    get db(): DuckdbQuackInstance {
+        if (!this.#db) {
+            // The server is a client that attaches nothing: same engine, same SQL.
+            this.#db = new DuckdbQuackInstance({
+                // A Quack server owns its database — the one place a file is right.
+                dbPath: this.#options.dbPath,
+                settings: this.#options.settings,
+                columns: this.#options.columns,
+                tables: this.#options.tables,
+                onError: this.#options.onError,
+                debug: this.#options.debug,
+            });
+        }
+        return this.#db;
+    }
+
+    /** One debug line per server operation — `debug: true` only. */
+    #debug(message: string, details?: Record<string, unknown>): void {
+        if (!this.#options.debug) return;
+        console.debug(`[quack] ${message}`, details ?? "");
+    }
+
+    /** One debug line per failure — the error is still thrown. */
+    #debugError(message: string, err: any, details?: Record<string, unknown>): void {
+        if (!this.#options.debug) return;
+        console.error(`[quack] ${message}`, {
+            ...details,
+            code: err?.code,
+            error: firstLine(err?.message ?? err),
         });
     }
 
@@ -1994,21 +2266,58 @@ class DuckdbQuackServer {
         return this.#options.dbPath;
     }
 
-    /** Open the instance, apply the settings, and start serving. Idempotent. */
+    /**
+     * Open the instance, apply the settings, and start serving.
+     *
+     * Idempotent, **including under concurrency**: two `start()` calls share one
+     * attempt, because a second `quack_serve` on the same instance fails and used
+     * to close the database of the server that was already running. A failed
+     * `start()` releases what it opened, so the next call is a real retry (and a
+     * server can be stopped and started again).
+     */
     async start(): Promise<this> {
         if (this.#running) return this;
+        if (!this.#starting) this.#starting = this.#start();
+        try {
+            return await this.#starting;
+        } finally {
+            this.#starting = null;
+        }
+    }
 
-        await this.db.connect();
+    async #start(): Promise<this> {
+        this.#debug("starting", {
+            port: this.port,
+            host: this.host,
+            dbPath: this.dbPath ?? "memory",
+        });
+
+        // Quack binds with SO_REUSEPORT: a second server on the same port does not
+        // fail, it steals the traffic — and the first server's clients then fail
+        // with "Authentication failed" while it still reports `isRunning: true`.
+        // Refuse before opening anything.
+        if (await portAnswers(probeHost(this.host), this.port)) {
+            throw new DuckdbQuackError(
+                `Something already answers on ${this.url} — another Quack server owns that port. ` +
+                `Quack binds with SO_REUSEPORT, so a second server would silently steal its clients ` +
+                `(they fail with "Authentication failed") instead of failing to bind. ` +
+                `Stop the other server, or choose another port.`,
+                "DUCKDB_QUACK_PORT_IN_USE",
+            );
+        }
+
+        const db = this.db;
+        await db.connect();
         try {
             await this.#applySettings();
 
             // Full-text indexes are built before the port opens: a client that
             // attaches can search immediately.
             for (const index of this.#options.ftsIndexes ?? []) {
-                await this.db.createFtsIndex(index.table, index);
+                await db.createFtsIndex(index.table, index);
             }
             for (const index of this.#options.vssIndexes ?? []) {
-                await this.db.createVssIndex(index.table, index);
+                await db.createVssIndex(index.table, index);
             }
 
             // Named arguments: `quack_serve(uri, token := …)`. The transport is only
@@ -2030,12 +2339,18 @@ class DuckdbQuackServer {
 
             // The return value is what the server really bound: keep it rather than
             // recomputing the URL from the options.
-            const { rows } = await this.db.exec(`CALL quack_serve(${args.join(", ")})`);
+            const { rows } = await db.exec(`CALL quack_serve(${args.join(", ")})`);
             const served = rows[0] as { listen_uri?: unknown; listen_url?: unknown } | undefined;
             if (served?.listen_uri !== undefined) this.#listenUri = String(served.listen_uri);
             if (served?.listen_url !== undefined) this.#listenUrl = String(served.listen_url);
         } catch (err: any) {
-            await this.db.close();
+            this.#debugError("start failed", err, { url: this.url });
+            // Release what this attempt opened, and drop the handle: the next
+            // `start()` must build a fresh instance, not reuse a closed one.
+            await db.close().catch(() => { });
+            if (this.#db === db) this.#db = null;
+            this.#listenUri = null;
+            this.#listenUrl = null;
             throw new DuckdbQuackError(
                 `Cannot start the Quack server on ${this.url} — ${firstLine(err?.message)}`,
                 "DUCKDB_QUACK_SERVE_FAILED",
@@ -2047,7 +2362,26 @@ class DuckdbQuackServer {
         // A native listener does not keep Bun's event loop alive: a ref'd timer does,
         // until `stop()` clears it. This is what makes `bun start` stay up.
         this.#keepAlive = setInterval(() => { }, 60_000);
+        this.#debug("serving", { listenUri: this.listenUri, listenUrl: this.listenUrl });
         return this;
+    }
+
+    /**
+     * Whether the listener is **really** still there.
+     *
+     * `isRunning` is the wrapper's own flag; this asks the engine
+     * (`quack_server_list()`) which servers it is still serving. Use it from a
+     * supervisor: a native listener can be gone while the process — and the
+     * keep-alive timer — are perfectly alive.
+     */
+    async health(): Promise<boolean> {
+        if (!this.#running || !this.#db) return false;
+        try {
+            const { rows } = await this.#db.exec("SELECT listen_uri FROM quack_server_list()");
+            return rows.some((row) => String(row.listen_uri) === this.listenUri);
+        } catch {
+            return false;
+        }
     }
 
     /** The Quack settings, applied before the server starts listening. */
@@ -2081,15 +2415,16 @@ class DuckdbQuackServer {
      */
     async stop(): Promise<void> {
         const wasRunning = this.#running;
+        const db = this.#db;
         this.#running = false;
         if (this.#keepAlive) {
             clearInterval(this.#keepAlive);
             this.#keepAlive = null;
         }
 
-        if (wasRunning) {
+        if (wasRunning && db) {
             try {
-                await this.db.exec(`CALL quack_stop(${quoteLiteral(this.listenUri)})`);
+                await db.exec(`CALL quack_stop(${quoteLiteral(this.listenUri)})`);
             } catch {
                 // Already gone — closing the instance releases the rest.
             }
@@ -2097,7 +2432,11 @@ class DuckdbQuackServer {
 
         this.#listenUri = null;
         this.#listenUrl = null;
-        await this.db.close();
+        this.#debug("stopped", { wasRunning });
+        // The next `start()` builds a fresh instance: a closed one cannot be reopened,
+        // and keeping it would make `stop(); start()` throw `DUCKDB_CLOSED`.
+        if (db) await db.close();
+        if (this.#db === db) this.#db = null;
     }
 }
 
@@ -2144,12 +2483,125 @@ class DuckdbQuackError extends Error {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
-function optionsOf(options: QuackInstanceOptions): Record<string, string> {
-    return Object.fromEntries(Object.entries(options.options ?? {}).map(([key, value]) => [key, String(value)]));
+function settingsOf(options: QuackInstanceOptions): Record<string, string> {
+    // Persistent HNSW indexes need the flag **before** the database is opened:
+    // without it, the session cannot bind the index and `LOAD vss` hangs. Enabling
+    // it by default costs nothing (it only permits an experimental feature) and is
+    // what makes a `dbPath` with vector indexes work after a restart.
+    const merged = {
+        hnsw_enable_experimental_persistence: "true",
+        ...(options.settings ?? {}),
+    };
+    return Object.fromEntries(Object.entries(merged).map(([key, value]) => [key, String(value)]));
 }
 
 function firstLine(message: unknown): string {
     return String(message ?? "unknown error").split("\n")[0]!;
+}
+
+/** One-line, length-capped SQL for debug logs — never the whole payload. */
+function preview(sql: string, max = 500): string {
+    const oneLine = String(sql ?? "").replace(/\s+/g, " ").trim();
+    return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
+}
+
+/** The address to probe for a bind on `host` — a wildcard bind is reachable on loopback. */
+function probeHost(host: string): string {
+    if (host === "0.0.0.0") return "127.0.0.1";
+    if (host === "::" || host === "[::]" || host === "::0") return "::1";
+    return host;
+}
+
+/**
+ * Whether something is already listening on `host:port`.
+ *
+ * Quack does **not** fail on a busy port: it binds with `SO_REUSEPORT`, so a second
+ * server silently takes half the traffic and the first one's clients start failing
+ * authentication. A TCP probe before `quack_serve` is what turns that into an error.
+ */
+function portAnswers(host: string, port: number, timeoutMs = 500): Promise<boolean> {
+    return new Promise((resolve) => {
+        let settled = false;
+        const finish = (answer: boolean) => {
+            if (settled) return;
+            settled = true;
+            socket.destroy();
+            resolve(answer);
+        };
+        const socket = createConnection({ host, port });
+        socket.setTimeout(timeoutMs);
+        socket.once("connect", () => finish(true));
+        socket.once("timeout", () => finish(false));
+        socket.once("error", () => finish(false));
+    });
+}
+
+/** The server's database instance went away — the attachment must be redone. */
+const DATABASE_INVALIDATED = /invalidated its database|database has been invalidated|database is invalidated|invalid connection id|connection id is invalid/i;
+
+/** DuckDB's own fatal class — the database is invalidated by design. */
+const INTERNAL_ERROR = /INTERNAL Error/i;
+
+/** A persisted HNSW index and no `vss` in the session — see `wrapEngineError`. */
+const HNSW_NOT_LOADED = /unknown index type 'HNSW'/i;
+
+/** Whether the error says the server's database instance is gone. */
+function isInvalidated(err: any): boolean {
+    return DATABASE_INVALIDATED.test(String(err?.message ?? err));
+}
+
+/**
+ * Wrap an engine error, giving the "server restarted" case its own stable code:
+ * a caller can then `reattach()` and retry instead of matching on English text.
+ */
+function wrapEngineError(prefix: string, err: any): DuckdbQuackError {
+    const message = firstLine(err?.message);
+    if (isInvalidated(err)) {
+        return new DuckdbQuackError(
+            `${prefix} ${message} — the Quack server restarted or invalidated its database. ` +
+            `Reads are retried automatically (autoReattach: 'reads'); a write is not: ` +
+            `call \`reattach()\` or set \`autoReattach: 'always'\` (idempotent writes only).`,
+            "DUCKDB_QUACK_DATABASE_INVALIDATED",
+            err,
+        );
+    }
+    if (INTERNAL_ERROR.test(message)) {
+        // DuckDB treats an internal error as fatal: it invalidates the database to
+        // avoid serving a possibly-corrupt state. The server must be restarted, and
+        // the statement is a bug report (engine/extension), not a data problem.
+        return new DuckdbQuackError(
+            `${prefix} ${message} — DuckDB hit an internal error and invalidated the database; ` +
+            `restart the server and report the failing statement (engine or extension bug).`,
+            "DUCKDB_INTERNAL_ERROR",
+            err,
+        );
+    }
+    if (HNSW_NOT_LOADED.test(message)) {
+        // A persistent HNSW index lives in the file; the session that writes must be
+        // opened with the persistence flag so `vss` can bind it. Setting the flag at
+        // run time is impossible (it belongs to `vss`, which cannot load without it),
+        // and `LOAD vss` on such a file hangs in DuckDB 2.0.0-r.1.
+        return new DuckdbQuackError(
+            `${prefix} ${message} — the table has a persisted HNSW index but \`vss\` is not loaded. ` +
+            `Reopen the instance with \`options: { hnsw_enable_experimental_persistence: "true" }\` ` +
+            `Experimental persistence is enabled by default; if you disabled it, re-enable it at ` +
+            `creation and restart — loading vss at run time on such a file hangs.`,
+            "DUCKDB_VSS_INDEX_NOT_LOADED",
+            err,
+        );
+    }
+    return new DuckdbQuackError(`${prefix} ${message}`, "DUCKDB_ERROR", err);
+}
+
+/**
+ * Whether a statement only reads — the default `autoReattach: 'reads'` retries
+ * these after a re-attach. Heuristic: the first keyword, comments skipped. A
+ * `WITH … INSERT` is classified as a read; use `autoReattach: false` when that
+ * distinction matters.
+ */
+function looksReadOnly(sql: string): boolean {
+    const stripped = String(sql).replace(/^(?:(?:--[^\n]*\n)|\/\*[\s\S]*?\*\/|\s)+/, "");
+    return /^(select|from|with|show|describe|desc|summarize|explain|pivot|unpivot|table|values)\b/i.test(stripped);
 }
 
 function normaliseName(name: unknown): string {
@@ -2369,9 +2821,17 @@ function affectedRows(result: DuckdbExecResult): number {
 }
 
 /** What a value has to become to travel as a bound parameter. */
-function bindable(value: unknown): any {
+function bindable(value: unknown, sqlType?: string): any {
     if (value === undefined) return null;
     if (value instanceof Date) return formatTimestamp(value);
+    // A typed array is a list, not an object: `Float32Array` would otherwise be
+    // stringified as `{"0":…}` by `JSON.stringify`. Bind it as the JSON form
+    // (`[1,0.5,0]`), which `CAST($1 AS FLOAT[N])` parses — except for a BLOB,
+    // where the bytes are what the caller means.
+    if (ArrayBuffer.isView(value)) {
+        if (sqlType && /BLOB|BYTEA/i.test(sqlType)) return value;
+        return JSON.stringify(Array.from(value as unknown as ArrayLike<number>));
+    }
     if (value !== null && typeof value === "object") return JSON.stringify(value);
     return value as any;
 }
@@ -2393,8 +2853,24 @@ function sqlLiteral(value: unknown): string {
     if (typeof value === "bigint") return value.toString();
     if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
     if (typeof value === "string") return quoteLiteral(value);
+    if (ArrayBuffer.isView(value)) {
+        return quoteLiteral(JSON.stringify(Array.from(value as unknown as ArrayLike<number>)));
+    }
     if (typeof value === "object") return quoteLiteral(JSON.stringify(value));
     return quoteLiteral(String(value));
+}
+
+/** The identifying field of a failed row — top level, or inside `data`. */
+function rowId(row: Record<string, unknown>): string {
+    const data = row?.data as Record<string, unknown> | undefined;
+    const value = row?.id ?? data?.id ?? row?.ref ?? data?.ref;
+    return value === undefined || value === null ? "?" : String(value);
+}
+
+/** `insertBatchSize` for one call — a positive integer, or the shared default. */
+function batchSizeOf(value: unknown): number {
+    const parsed = Math.trunc(Number(value ?? INSERT_BATCH));
+    return Number.isFinite(parsed) && parsed >= 1 ? parsed : INSERT_BATCH;
 }
 
 /** A JS value as a `SET VARIABLE` literal — a `Date` becomes a `TIMESTAMP`. */

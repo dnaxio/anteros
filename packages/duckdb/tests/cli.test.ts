@@ -188,12 +188,26 @@ describe("antd — the CLI serving", () => {
         const out = await banner(proc);
         expect(out).toContain("mode     quack");
         expect(out).toContain(`quack:127.0.0.1:${port}`);
+        // Nothing but the banner: debug logging is opt-in.
+        expect(out).not.toContain("[quack]");
         // The token is masked unless `--printToken` asks for it.
         expect(out).not.toContain(TOKEN);
         expect(out).toContain(`${TOKEN.length} characters`);
 
         const client = await attach(port);
         await client.close();
+
+        proc.kill("SIGINT");
+        expect(await proc.exited).toBe(0);
+    }, 120_000);
+
+    it("logs its lifecycle with --debug", async () => {
+        const port = freePort();
+        const proc = cli(["start", "--quack", "--port", String(port), "--token", TOKEN, "--debug"]);
+
+        const out = await banner(proc);
+        expect(out).toContain("[quack] starting");
+        expect(out).toContain("[quack] serving");
 
         proc.kill("SIGINT");
         expect(await proc.exited).toBe(0);
@@ -388,7 +402,7 @@ describe("antd — the CLI serving", () => {
         const port = freePort();
         const proc = cli([
             "start", "--port", String(port), "--token", TOKEN, "--dbPath", file,
-            "--vss", "vecs:vec:cosine", "--vssPersist",
+            "--vss", "vecs:vec:cosine",
         ]);
 
         const client = await attach(port);
@@ -428,7 +442,7 @@ describe("antd — the CLI serving", () => {
         const port = freePort();
         const proc = cli([
             "start", "--port", String(port), "--token", TOKEN, "--dbPath", file,
-            "--vssConfig", config, "--vssPersist",
+            "--vssConfig", config,
         ]);
 
         const client = await attach(port);
@@ -448,19 +462,6 @@ describe("antd — the CLI serving", () => {
         expect(await proc.exited).toBe(0);
         await rm(directory, { recursive: true, force: true });
     }, 180_000);
-
-    it("refuses a file database without --vssPersist", async () => {
-        const directory = await mkdtemp(join(tmpdir(), "antd-vss-nopersist-"));
-        const file = join(directory, "vecs.duckdb");
-
-        const { code, err } = await capture([
-            "start", "--token", TOKEN, "--dbPath", file, "--vss", "vecs:vec",
-        ]);
-        expect(code).toBe(1);
-        expect(err).toContain("need --vssPersist");
-
-        await rm(directory, { recursive: true, force: true });
-    });
 
     it("refuses a missing --vssConfig file", async () => {
         const { code, err } = await capture(["start", "--token", TOKEN, "--vssConfig", "/nope/vss.json"]);
