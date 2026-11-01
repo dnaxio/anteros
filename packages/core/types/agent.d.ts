@@ -56,6 +56,62 @@ export type AgentProvider = {
     headers?: Record<string, string>;
     /** Sampling and transport — `{ temperature, maxTokens, topP, timeout, retries }`. */
     options?: AgentOptions;
+    /**
+     * Tried **in order** when the primary fails for a reason another endpoint may not
+     * have: `429`, `5xx`, a network error or a timeout. `options` are merged over the
+     * primary's, so a fallback only states what differs.
+     */
+    fallbacks?: AgentFallback[];
+    /**
+     * USD per **million** tokens — turns `usage` into `usage.cost`. A fallback may
+     * price differently: the model that answered is the one billed.
+     */
+    pricing?: AgentPricing;
+};
+
+/** One step of `provider.fallbacks` — what may differ from the primary. */
+export type AgentFallback = {
+    model: string;
+    apiKey?: string;
+    protocol?: AgentProtocol;
+    baseUrl?: string;
+    headers?: Record<string, string>;
+    options?: AgentOptions;
+    pricing?: AgentPricing;
+};
+
+/** Cost of a model, per million tokens (USD). */
+export type AgentPricing = {
+    /** USD per million **input** tokens. */
+    input: number;
+    /** USD per million **output** tokens. */
+    output: number;
+};
+
+/**
+ * A guardrail — a check that can **stop** a run. `check` throws to block; the
+ * thrown message is what the caller reads.
+ */
+export type AgentGuardrail = {
+    /** Named in the error, so a failing check is identifiable. */
+    name: string;
+    check: (value: string, ctx: AgentGuardrailContext) => void | Promise<void>;
+};
+
+/** Where a guardrail runs. The lists are additive: declaration first, then the call. */
+export type AgentGuardrails = {
+    /** Before the first model call — the caller's prompt (the last user turn). */
+    input?: AgentGuardrail[];
+    /** Before the answer is returned or stored — what the model produced. */
+    output?: AgentGuardrail[];
+};
+
+export type AgentGuardrailContext = {
+    agent: Agent;
+    tenant?: string;
+    thread?: string;
+    resource?: string;
+    signal: AbortSignal;
 };
 
 /**
@@ -316,6 +372,8 @@ export type AgentUsage = {
     totalTokens: number;
     /** How many model calls the run needed (1 + one per tool round). */
     requests: number;
+    /** USD, when the provider declares `pricing` (delegated runs included). */
+    cost?: number;
 };
 
 /** One model call of a run, with the tools it asked for. */
@@ -892,6 +950,16 @@ export type AgentCallOptions = {
      * A model that emits 50 calls in a turn must not open 50 outbound requests.
      */
     maxParallelToolCalls?: number;
+    /** Stop cleanly (`finishReason: 'budget'`) once the run used that many tokens. */
+    maxTokens?: number;
+    /** Stop cleanly once the run has lasted that long, in milliseconds. */
+    maxDurationMs?: number;
+    /** Stop cleanly once the run cost that much (USD) — needs `provider.pricing`. */
+    maxCost?: number;
+    /** Prompt budget in **tokens** — the oldest turns are dropped beyond it. */
+    contextTokens?: number;
+    /** Input/output guardrails for this run — added to the declared ones. */
+    guardrails?: AgentGuardrails;
     /**
      * Store what the run produced even when it **fails** (default `false`).
      *
@@ -936,6 +1004,10 @@ export type AgentGenerateResult<T = any> = {
     finishReason: string;
     /** The complete conversation, ready to be persisted. */
     messages: AgentMessage[];
+    /** The model that answered (a fallback may have been used). */
+    model?: string;
+    /** Present when the run stopped on a budget rather than on an answer. */
+    budget?: { limit: "tokens" | "cost" | "duration"; value: number };
     /**
      * Calls waiting for a decision — present (and `finishReason`
      * `'approval_required'`) when a tool declaring `approval: true` was called.
@@ -972,6 +1044,10 @@ export type AgentStreamResult<T = any> = {
     toolResults: Promise<AgentToolResultEntry[]>;
     /** Aggregate of every tool call of the run — same as `generate()`. */
     toolStats: Promise<AgentToolStats>;
+    /** The model that answered (a fallback may have been used). */
+    model: Promise<string | undefined>;
+    /** Present when the run stopped on a budget. */
+    budget: Promise<{ limit: "tokens" | "cost" | "duration"; value: number } | undefined>;
     steps: Promise<AgentStep[]>;
     usage: Promise<AgentUsage>;
     finishReason: Promise<string>;
@@ -1157,6 +1233,16 @@ export type AgentConfig = {
     parallelTools?: boolean;
     /** Cap the tool calls in flight per step — see `AgentCallOptions`. */
     maxParallelToolCalls?: number;
+    /** Default run budget in tokens — see `AgentCallOptions.maxTokens`. */
+    maxTokens?: number;
+    /** Default wall-clock budget of a run, in milliseconds. */
+    maxDurationMs?: number;
+    /** Default cost budget (USD) — needs `provider.pricing`. */
+    maxCost?: number;
+    /** Default prompt budget in tokens — see `AgentCallOptions.contextTokens`. */
+    contextTokens?: number;
+    /** Guardrails of every run — input before the first call, output before the answer. */
+    guardrails?: AgentGuardrails;
     /** Store a failed run's conversation by default — see `AgentCallOptions`. */
     savePartial?: boolean;
     /**

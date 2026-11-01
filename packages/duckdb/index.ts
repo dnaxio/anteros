@@ -5,6 +5,10 @@ export { DuckdbQuackInstance, DuckdbQuackServer, DuckdbQuackPool, DuckdbTable, D
 export type { DuckdbQuackPoolOptions } from "./lib/pool";
 
 export type {
+    DuckdbBackupFormat,
+    DuckdbBackupOptions,
+    DuckdbBackupResult,
+    DuckdbBackupSchedule,
     DuckdbBatch,
     DuckdbColumn,
     DuckdbColumnType,
@@ -50,4 +54,5 @@ export type {
     DuckdbVariable,
     QuackInstanceOptions,
     QuackServerOptions,
+    RebuildIndexKind,
 } from "./types/quack";

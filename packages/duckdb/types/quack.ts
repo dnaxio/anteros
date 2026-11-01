@@ -11,6 +11,8 @@
  * stable status expected in 2.0. Pin your `@duckdb/node-api` version.
  */
 
+import type { DuckdbQuackInstance, DuckdbQuackServer } from "../lib/quack";
+
 /**
  * A column, as `createTable` takes it.
  *
@@ -491,6 +493,15 @@ export type QuackInstanceOptions = {
 };
 
 /**
+ * A kind of stored index the server can replay when it starts — the values
+ * `rebuildIndexesOnStart` accepts.
+ *
+ * An array of kinds rather than one flag, so a kind added later does not break a
+ * caller that does not know it.
+ */
+export type RebuildIndexKind = "hnsw";
+
+/**
  * What `new DuckdbQuackServer()` takes.
  *
  * ```ts
@@ -506,7 +517,10 @@ export type QuackServerOptions = {
      * is not is worse than one that refuses to start.
      */
     token: string;
-    /** The port to listen on (default `9494`, Quack's own default). */
+    /**
+     * The port to listen on (default `9494`, Quack's own default) — an integer
+     * between 1 and 65535, refused otherwise (`DUCKDB_QUACK_PORT_INVALID`).
+     */
     port?: number;
     /**
      * The interface to bind (default `'127.0.0.1'` — localhost only).
@@ -596,6 +610,79 @@ export type QuackServerOptions = {
      * enabled by default (`hnsw_enable_experimental_persistence`).
      */
     vssIndexes?: DuckdbVssIndex[];
+    /**
+     * Run **after** the settings are applied and the stored indexes rebuilt, and
+     * **before** any listener opens — migrations, a purge, index work. No client
+     * answers on the port yet, so whatever this hook leaves behind is all a client
+     * ever sees.
+     *
+     * ```ts
+     * beforeStart: async (db) => {
+     *     await db.exec("DELETE FROM events WHERE ts < now() - INTERVAL '90 days'");
+     * },
+     * ```
+     *
+     * A throw fails the start with `DUCKDB_QUACK_BEFORE_START_FAILED`; past
+     * `beforeStartTimeoutMs` it fails with `DUCKDB_QUACK_BEFORE_START_TIMEOUT`.
+     */
+    beforeStart?: (db: DuckdbQuackInstance) => void | Promise<void>;
+    /**
+     * How long `beforeStart` may run (default `30_000` ms). A hook that never
+     * settles would hold the process in a start that lasts forever, so the wait is
+     * bounded like every other boot step. Must be positive — refused otherwise with
+     * `DUCKDB_QUACK_OPTION_INVALID`.
+     */
+    beforeStartTimeoutMs?: number;
+    /**
+     * Rebuild the **stored** indexes of these kinds when the server opens a
+     * `dbPath` — the restart path for what the engine's own persistence left
+     * behind.
+     *
+     * `'hnsw'`: every secondary index whose SQL uses HNSW (`duckdb_indexes()`) is
+     * replayed — dropped, then created again from the current rows. Runs before
+     * `beforeStart`, and a failure fails the start with
+     * `DUCKDB_QUACK_REBUILD_FAILED`. A kind this version does not know is refused
+     * at construction (`DUCKDB_QUACK_REBUILD_INVALID`).
+     *
+     * ```ts
+     * rebuildIndexesOnStart: ["hnsw"],
+     * ```
+     */
+    rebuildIndexesOnStart?: RebuildIndexKind[];
+    /**
+     * Awaited once the listener — and the `healthPort` endpoint, when there is one —
+     * is up, still inside `start()`. The place to announce readiness, register an
+     * address, or prepare one last thing a client can rely on.
+     *
+     * A throw fails `start()` with `DUCKDB_QUACK_READY_FAILED`, and what was opened
+     * (listener, health endpoint, instance) is released: no half-started server.
+     */
+    onReady?: (server: DuckdbQuackServer) => void | Promise<void>;
+    /**
+     * Run once `start()` has resolved — post-ready work that must not delay the
+     * caller: warming a cache, publishing stats. Invoked in a scheduled tick, not
+     * awaited; a failure is reported through `onError`.
+     */
+    afterStart?: (server: DuckdbQuackServer) => void | Promise<void>;
+    /**
+     * Snapshot the server's database on a timer — the backup a single-file
+     * deployment otherwise has to arrange itself.
+     *
+     * `format: 'file'` clones the database file, so it needs a `dbPath`;
+     * `format: 'export'` writes Parquet + `schema.sql` + `load.sql` and works for
+     * an in-memory server too. The directory is created when missing, and `keep`
+     * (default `7`, `0` = everything) rotates the snapshots after each one.
+     *
+     * `onStart` takes one snapshot right after the server is ready; after that one
+     * runs every `every` (default `'1h'`). A tick is skipped while a snapshot is
+     * still in flight, and a failure goes to `onError` — the schedule never stops
+     * itself. `stop()` clears the timer and waits for a snapshot in flight.
+     *
+     * ```ts
+     * backup: { directory: "./backups", every: "24h", keep: 7, onStart: true },
+     * ```
+     */
+    backup?: DuckdbBackupSchedule;
     /** Where a failed background `ingest` reports itself (default `console.error`). */
     onError?: (error: Error) => void;
     /** Log the server's operations and errors (`start`, `stop`, serving URI, queries). */
@@ -615,7 +702,9 @@ export type QuackServerOptions = {
      * an invalidated database or a stuck engine turns it to `503`.
      *
      * Bun only (it uses `Bun.serve`); refused elsewhere with
-     * `DUCKDB_QUACK_HEALTH_UNAVAILABLE`.
+     * `DUCKDB_QUACK_HEALTH_UNAVAILABLE`. An integer between 1 and 65535, and
+     * different from `port` — refused otherwise with
+     * `DUCKDB_QUACK_HEALTH_PORT_INVALID`.
      */
     healthPort?: number;
 };
@@ -862,6 +951,43 @@ export type DuckdbRetentionHandle = {
     stop(): void;
     /** `false` once stopped. */
     readonly running: boolean;
+};
+
+/**
+ * How a snapshot is written.
+ *
+ * - `'file'` — a hot clone of the database file: a fresh `.duckdb` file filled
+ *   with `COPY FROM DATABASE … TO …`. Needs a `dbPath`.
+ * - `'export'` — `EXPORT DATABASE … (FORMAT PARQUET)`: a directory holding
+ *   `schema.sql`, `load.sql` and one `.parquet` per table. Works in memory too.
+ */
+export type DuckdbBackupFormat = "file" | "export";
+
+/** What `db.backup()` takes — where the snapshots go, and how many stay. */
+export type DuckdbBackupOptions = {
+    /** Directory receiving the snapshots (created when missing). */
+    directory: string;
+    /** `"file"` = hot clone of the .duckdb file (default), `"export"` = EXPORT DATABASE (Parquet + schema.sql + load.sql). */
+    format?: DuckdbBackupFormat;
+    /** Snapshots kept; older ones are deleted. Default 7, 0 = keep everything. */
+    keep?: number;
+};
+
+/** What a snapshot reports — where it landed, in which shape, and when. */
+export type DuckdbBackupResult = {
+    /** The `.duckdb` file or the `.export` directory that was written. */
+    path: string;
+    format: DuckdbBackupFormat;
+    /** The instant the snapshot was taken (also the name's stamp). */
+    at: Date;
+};
+
+/** `new DuckdbQuackServer({ backup })` — the same snapshot, taken on a schedule. */
+export type DuckdbBackupSchedule = DuckdbBackupOptions & {
+    /** Interval — duration string ('15m', '1h', '24h') or ms. Default '1h'. */
+    every?: string | number;
+    /** Take one snapshot right after the server starts. Default false. */
+    onStart?: boolean;
 };
 
 /** `db.table()` options. */

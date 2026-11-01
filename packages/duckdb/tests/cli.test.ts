@@ -1,8 +1,9 @@
 import { describe, it, expect } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DuckDBInstance, type DuckDBConnection } from "@duckdb/node-api";
+import { DuckdbQuackInstance } from "../index";
 import { freePort, sleep } from "./helpers";
 
 /**
@@ -54,6 +55,17 @@ async function banner(proc: Bun.Subprocess, timeoutMs = 15_000): Promise<string>
 /** A string literal for the SQL the test sends. */
 function literal(value: string): string {
     return `'${value.replace(/'/g, "''")}'`;
+}
+
+/** Rows of a table in a database file, read through a short-lived instance. */
+async function countRows(dbPath: string, table: string): Promise<number> {
+    const db = new DuckdbQuackInstance({ dbPath });
+    try {
+        const { rows } = await db.exec(`SELECT count(*) AS n FROM ${table}`);
+        return Number(rows[0]!.n);
+    } finally {
+        await db.close();
+    }
 }
 
 /** A client attached to the CLI's server, through Quack's own ATTACH. */
@@ -127,7 +139,9 @@ describe("antd — the CLI", () => {
         const { code, out } = await capture(["--help"]);
         expect(code).toBe(0);
         expect(out).toContain("start [options]");
+        expect(out).toContain("restore --backup");
         expect(out).toContain("--dbPath");
+        expect(out).toContain("--force");
         expect(out).toContain("--targetBatchBytes");
         expect(out).toContain("--sslCertFile");
         expect(out).toContain("--ftsConfig");
@@ -169,6 +183,9 @@ describe("antd — the CLI", () => {
         const { code, err } = await capture(["serve"]);
         expect(code).toBe(1);
         expect(err).toContain("Unknown command 'serve'");
+        // Both commands are named, so the message says what can be typed.
+        expect(err).toContain("'start'");
+        expect(err).toContain("'restore'");
     });
 
     it("accepts the spelling of an option, dashed or cased", async () => {
@@ -474,4 +491,143 @@ describe("antd — the CLI serving", () => {
         expect(code).toBe(1);
         expect(err).toContain("--fts expects table:id:field1,field2");
     });
+
+    it("accepts --rebuildIndexes hnsw, and refuses an unknown kind", async () => {
+        const refused = await capture(["start", "--token", TOKEN, "--rebuildIndexes", "nope"]);
+        expect(refused.code).toBe(1);
+        expect(refused.err).toContain("--rebuildIndexes accepts hnsw, all");
+
+        const directory = await mkdtemp(join(tmpdir(), "antd-rebuild-"));
+        const file = join(directory, "vecs.duckdb");
+        const port = freePort();
+
+        // `all` expands to `hnsw`; repeating either is de-duplicated, not refused.
+        const proc = cli([
+            "start", "--port", String(port), "--token", TOKEN, "--dbPath", file,
+            "--rebuildIndexes", "hnsw", "--rebuildIndexes", "all",
+        ]);
+        try {
+            const out = await banner(proc);
+            expect(out).toContain(`quack:127.0.0.1:${port}`);
+
+            const client = await attach(port);
+            await client.close();
+        } finally {
+            proc.kill("SIGINT");
+            expect(await proc.exited).toBe(0);
+            await rm(directory, { recursive: true, force: true });
+        }
+    }, 120_000);
+});
+
+describe("antd — restore", () => {
+    it("refuses a missing --backup or --dbPath", async () => {
+        const noBackup = await capture(["restore", "--dbPath", "/nope/never.duckdb"]);
+        expect(noBackup.code).toBe(1);
+        expect(noBackup.err).toContain("--backup is required");
+
+        const noTarget = await capture(["restore", "--backup", "/nope/never.duckdb"]);
+        expect(noTarget.code).toBe(1);
+        expect(noTarget.err).toContain("--dbPath is required");
+    });
+
+    it("refuses a missing backup path, and a file that is not a clone", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "antd-restore-missing-"));
+        const target = join(directory, "app.duckdb");
+        const plain = join(directory, "notes.txt");
+        try {
+            await Bun.write(plain, "not a database");
+
+            const missing = await capture(["restore", "--backup", join(directory, "never.duckdb"), "--dbPath", target]);
+            expect(missing.code).toBe(1);
+            expect(missing.err).toContain("does not exist");
+            // Nothing was created on the way to the refusal.
+            expect(await Bun.file(target).exists()).toBe(false);
+
+            const other = await capture(["restore", "--backup", plain, "--dbPath", target]);
+            expect(other.code).toBe(1);
+            expect(other.err).toContain("is not a .duckdb clone");
+            expect(await Bun.file(target).exists()).toBe(false);
+        } finally {
+            await rm(directory, { recursive: true, force: true });
+        }
+    });
+
+    it("restores a file clone, moving the database it replaces aside", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "antd-restore-file-"));
+        const target = join(directory, "data", "app.duckdb");
+        const backups = join(directory, "backups");
+
+        // Seed the database that will be overwritten: the clone holds three rows,
+        // the live file gains a fourth one after the snapshot.
+        const db = new DuckdbQuackInstance({ dbPath: target });
+        let clone: string;
+        try {
+            await db.exec("CREATE TABLE orders (id INTEGER, total INTEGER)");
+            await db.exec("INSERT INTO orders VALUES (1, 10), (2, 20), (3, 30)");
+            clone = (await db.backup({ directory: backups, format: "file" })).path;
+            await db.exec("INSERT INTO orders VALUES (4, 40)");
+        } finally {
+            await db.close();
+        }
+
+        try {
+            // An existing database is never replaced silently.
+            const refused = await capture(["restore", "--backup", clone, "--dbPath", target]);
+            expect(refused.code).toBe(1);
+            expect(refused.err).toContain(`Refusing to overwrite '${target}'`);
+            expect(refused.err).toContain("--force");
+            expect(await countRows(target, "orders")).toBe(4);
+
+            const forced = await capture(["restore", "--backup", clone, "--dbPath", target, "--force"]);
+            expect(forced.code).toBe(0);
+            expect(forced.err).toBe("");
+            expect(forced.out.trim()).toBe(`restored ${target} from ${clone} — 1 table`);
+
+            // The replaced file was moved, not deleted — its extra row is still there.
+            const names = await readdir(dirname(target));
+            const aside = names.filter((name) => name.startsWith("app.duckdb.bak-"));
+            expect(aside).toHaveLength(1);
+            expect(aside[0]).toMatch(/^app\.duckdb\.bak-\d{8}T\d{6}$/);
+            expect(names).not.toContain(".app.duckdb.restore");
+            expect(await countRows(join(dirname(target), aside[0]!), "orders")).toBe(4);
+            expect(await countRows(target, "orders")).toBe(3);
+
+            // A deleted target needs no --force: there is nothing to replace.
+            await rm(target);
+            const fresh = await capture(["restore", "--backup", clone, "--dbPath", target]);
+            expect(fresh.code).toBe(0);
+            expect(fresh.out.trim()).toBe(`restored ${target} from ${clone} — 1 table`);
+            expect(await countRows(target, "orders")).toBe(3);
+        } finally {
+            await rm(directory, { recursive: true, force: true });
+        }
+    }, 60_000);
+
+    it("restores from an EXPORT DATABASE directory into a new folder", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "antd-restore-export-"));
+        const source = join(directory, "app.duckdb");
+        const target = join(directory, "restored", "app.duckdb");
+
+        const db = new DuckdbQuackInstance({ dbPath: source });
+        let snapshot: string;
+        try {
+            await db.exec("CREATE TABLE orders (id INTEGER, total INTEGER)");
+            await db.exec("INSERT INTO orders VALUES (1, 10), (2, 20)");
+            snapshot = (await db.backup({ directory: join(directory, "backups"), format: "export" })).path;
+        } finally {
+            await db.close();
+        }
+
+        try {
+            // The target folder does not exist yet: `mkdir -p` is part of the contract.
+            const { code, out, err } = await capture(["restore", "--backup", snapshot, "--dbPath", target]);
+            expect(err).toBe("");
+            expect(code).toBe(0);
+            expect(out.trim()).toBe(`restored ${target} from ${snapshot} — 1 table`);
+            expect(await countRows(target, "orders")).toBe(2);
+        } finally {
+            await rm(directory, { recursive: true, force: true });
+        }
+    }, 60_000);
 });

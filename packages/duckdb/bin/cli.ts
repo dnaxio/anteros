@@ -3,12 +3,14 @@
 //
 //   antd start --dbPath ./data/analytics.duckdb --port 9494 --token super-secret
 //
-// One command, because the package does one thing: run a Quack server. The CLI is
-// a thin layer over `DuckdbQuackServer` — flag parsing, the banner and the signal
-// handling; serving, index creation, keep-alive and shutdown live in the library.
+// Two commands: `start` runs a Quack server, `restore` puts a snapshot written by
+// `db.backup()` / `server.backup()` back in place. The CLI is a thin layer — flag
+// parsing, the banner, the signal handling and the file swaps; serving, index
+// creation, keep-alive and shutdown live in the library.
 
-import { join } from "node:path";
-import { DuckdbQuackServer, type DuckdbFtsIndex, type DuckdbVssIndex, type DuckdbVssMetric } from "../index";
+import { copyFile, mkdir, rename, rm, stat } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
+import { DuckdbQuackInstance, DuckdbQuackServer, type DuckdbFtsIndex, type DuckdbVssIndex, type DuckdbVssMetric, type RebuildIndexKind } from "../index";
 
 // ─── Options ──────────────────────────────────────────────────────────────
 
@@ -49,6 +51,8 @@ type VssSpec = {
 const OPTIONS: OptionSpec[] = [
     { key: "quack", type: "boolean", help: "Serve over the Quack protocol (the mode — today the only one)" },
     { key: "dbPath", type: "string", help: "DuckDB file to serve (default: in memory — nothing is persisted)" },
+    { key: "backup", type: "string", help: "Snapshot to restore: a .duckdb clone or an EXPORT DATABASE directory (restore only)" },
+    { key: "force", type: "boolean", help: "Move an existing database aside instead of refusing (restore only)" },
     { key: "port", type: "number", help: "Port to listen on (default 9494)" },
     { key: "host", type: "string", help: "Interface to bind (default 127.0.0.1)" },
     { key: "token", type: "string", help: "Secret clients present (or QUACK_TOKEN / DUCKDB_QUACK_TOKEN)" },
@@ -66,6 +70,7 @@ const OPTIONS: OptionSpec[] = [
     { key: "vssConfig", type: "string", help: "JSON file: array of vector indexes { table, column, metric, ... }" },
     { key: "vssMetric", type: "string", help: "Default VSS metric: l2sq (default), cosine or ip" },
     { key: "vssPersist", type: "boolean", help: "Experimental HNSW persistence — on by default; --vssPersist=false opts out" },
+    { key: "rebuildIndexes", type: "list", help: "Rebuild stored indexes of these kinds at start: hnsw or all (repeatable)" },
     { key: "name", type: "string", help: "Node name advertised by whoami()" },
     { key: "region", type: "string", help: "Node region advertised by whoami()" },
     { key: "provider", type: "string", help: "Node provider advertised by whoami()" },
@@ -140,6 +145,7 @@ const USAGE = `antd — a DuckDB instance served over the Quack protocol
 
 Usage:
   antd start [options]
+  antd restore --backup <file|directory> --dbPath <file> [--force]
 
 Options:
 ${OPTIONS.map((option) => `  --${option.key}${option.type === "boolean" ? "" : " <value>"}`.padEnd(30) + option.help).join("\n")}
@@ -153,6 +159,8 @@ Examples:
   antd start --dbPath ./data/docs.duckdb --fts documents:document_identifier:text_content,author --ftsStemmer french --token super-secret
   antd start --dbPath ./data/vecs.duckdb --vss embeddings:vec:cosine --token super-secret
   antd start --dbPath ./data/vecs.duckdb --vssConfig ./vss.json --token super-secret
+  antd restore --backup ./backups/app-20261101T134500Z.duckdb --dbPath ./data/app.duckdb --force
+  antd restore --backup ./backups/app-20261101T134500Z.export --dbPath ./data/app.duckdb --force
 `;
 
 // ─── Version ──────────────────────────────────────────────────────────────
@@ -343,6 +351,34 @@ async function collectVss(flags: Record<string, any>): Promise<VssSpec[]> {
     return specs;
 }
 
+/** The index kinds `--rebuildIndexes` understands — `all` stands for every one of them. */
+const REBUILD_KINDS: RebuildIndexKind[] = ["hnsw"];
+
+/** Collect index kinds from a repeatable `--rebuildIndexes`, `all` expanded and duplicates dropped. */
+function collectRebuild(flags: Record<string, any>): RebuildIndexKind[] {
+    const kinds: RebuildIndexKind[] = [];
+
+    const add = (kind: RebuildIndexKind) => {
+        if (!kinds.includes(kind)) kinds.push(kind);
+    };
+
+    for (const raw of flags.rebuildIndexes ?? []) {
+        const value = String(raw).trim().toLowerCase();
+        if (value === "all") {
+            REBUILD_KINDS.forEach(add);
+            continue;
+        }
+
+        const kind = REBUILD_KINDS.find((known) => known === value);
+        if (kind === undefined) {
+            throw new CliError(`--rebuildIndexes accepts ${[...REBUILD_KINDS, "all"].join(", ")} — got '${raw}'`);
+        }
+        add(kind);
+    }
+
+    return kinds;
+}
+
 /** The CLI's specs are the library's, with `'*'` expressed the way it expects. */
 function toFtsIndex(spec: FtsSpec): DuckdbFtsIndex {
     return {
@@ -429,6 +465,7 @@ async function start(flags: Record<string, any>): Promise<void> {
         { ...index, metric: index.metric ?? vssDefault },
         true,
     ));
+    const rebuild = collectRebuild(flags);
 
     const identity = { name: flags.name, region: flags.region, provider: flags.provider, hostname: flags.hostname };
     const hasIdentity = Object.values(identity).some((value) => value !== undefined);
@@ -450,6 +487,7 @@ async function start(flags: Record<string, any>): Promise<void> {
         },
         ftsIndexes: fts.length ? fts.map(toFtsIndex) : undefined,
         vssIndexes: vssIndexes.length ? vssIndexes : undefined,
+        rebuildIndexesOnStart: rebuild.length ? rebuild : undefined,
         debug: flags.debug === true,
         healthPort: flags.healthPort,
     });
@@ -472,6 +510,114 @@ async function start(flags: Record<string, any>): Promise<void> {
     process.once("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
+// ─── restore ──────────────────────────────────────────────────────────────
+
+/** `YYYYMMDDTHHmmss`, for the name a replaced database is moved to. */
+function stamp(date = new Date()): string {
+    const pad = (value: number) => String(value).padStart(2, "0");
+    return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}T${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+}
+
+async function exists(path: string): Promise<boolean> {
+    return await stat(path).then(() => true, () => false);
+}
+
+/** Move `<dbPath>` to `<dbPath>.bak-<stamp>` (suffixed if taken) — a replaced database is never deleted. */
+async function moveAside(dbPath: string): Promise<void> {
+    const base = `${dbPath}.bak-${stamp()}`;
+    let moved = base;
+    let suffix = 1;
+    while (await exists(moved)) {
+        moved = `${base}-${suffix}`;
+        suffix += 1;
+    }
+    await rename(dbPath, moved);
+}
+
+/** A `'…'` SQL literal, quotes doubled. */
+function sqlLiteral(value: string): string {
+    return `'${value.replace(/'/g, "''")}'`;
+}
+
+/** The tables (and views) of the restored database's own catalog. */
+async function countTables(dbPath: string): Promise<number> {
+    const db = new DuckdbQuackInstance({ dbPath });
+    try {
+        const { rows } = await db.exec(
+            "SELECT count(*) AS n FROM information_schema.tables WHERE table_catalog = current_database()",
+        );
+        return Number(rows[0]?.n ?? 0);
+    } finally {
+        await db.close();
+    }
+}
+
+/**
+ * Put a snapshot written by `db.backup()` / `server.backup()` back in place.
+ *
+ * A file is a hot clone: it is copied next to the target and renamed over it, so
+ * a reader never sees a half-written database. A directory is an
+ * `EXPORT DATABASE` folder, replayed with `IMPORT DATABASE` into a fresh file.
+ */
+async function restore(flags: Record<string, any>): Promise<void> {
+    if (flags.backup === undefined || String(flags.backup).trim() === "") {
+        throw new CliError("--backup is required — pass a .duckdb clone or an EXPORT DATABASE directory");
+    }
+    if (flags.dbPath === undefined || String(flags.dbPath).trim() === "") {
+        throw new CliError("--dbPath is required — pass the database file to restore into");
+    }
+
+    const backupArg = String(flags.backup);
+    const dbArg = String(flags.dbPath);
+    const backup = resolve(backupArg);
+    const target = resolve(dbArg);
+
+    const found = await stat(backup).catch(() => null);
+    if (found === null) {
+        throw new CliError(`Backup '${backupArg}' does not exist — pass a .duckdb clone or an EXPORT DATABASE directory`);
+    }
+    if (!found.isDirectory() && !found.isFile()) {
+        throw new CliError(`Backup '${backupArg}' is neither a file nor a directory — pass a .duckdb clone or an EXPORT DATABASE directory`);
+    }
+    const fromExport = found.isDirectory();
+    if (!fromExport && !backup.toLowerCase().endsWith(".duckdb")) {
+        throw new CliError(`Backup '${backupArg}' is not a .duckdb clone — pass a .duckdb file or an EXPORT DATABASE directory`);
+    }
+
+    const directory = dirname(target);
+    await mkdir(directory, { recursive: true });
+
+    if (await exists(target)) {
+        if (flags.force !== true) {
+            throw new CliError(`Refusing to overwrite '${dbArg}' — pass --force to replace it (the current database is moved aside)`);
+        }
+        await moveAside(target);
+    }
+    // A WAL left from the previous database must never replay onto the restored file.
+    await rm(`${target}.wal`, { force: true });
+
+    try {
+        if (fromExport) {
+            const db = new DuckdbQuackInstance({ dbPath: target });
+            try {
+                await db.exec(`IMPORT DATABASE ${sqlLiteral(backup)}`);
+            } finally {
+                await db.close();
+            }
+        } else {
+            const staging = join(directory, `.${basename(target)}.restore`);
+            await rm(staging, { force: true });
+            await copyFile(backup, staging);
+            await rename(staging, target);
+        }
+
+        const tables = await countTables(target);
+        console.log(`restored ${dbArg} from ${backupArg} — ${tables} table${tables === 1 ? "" : "s"}`);
+    } catch (err: any) {
+        throw new CliError(firstLine(err?.message ?? err));
+    }
+}
+
 // ─── Entry point ──────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -490,8 +636,12 @@ async function main(): Promise<void> {
         process.exit(1);
     }
 
-    if (command !== "start") {
-        throw new CliError(`Unknown command '${command}'. The only one is 'start'.`);
+    if (command !== "start" && command !== "restore") {
+        throw new CliError(`Unknown command '${command}'. Use 'start' to serve, or 'restore' to put a backup back in place.`);
+    }
+    if (command === "restore") {
+        await restore(flags);
+        return;
     }
 
     await start(flags);

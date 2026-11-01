@@ -1,8 +1,12 @@
 import { DuckDBInstance, type DuckDBConnection, type DuckDBAppender, timestampValue, type TimestampParts } from "@duckdb/node-api";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readdir, rm } from "node:fs/promises";
 import { createConnection } from "node:net";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type {
+    DuckdbBackupFormat,
+    DuckdbBackupOptions,
+    DuckdbBackupResult,
+    DuckdbBackupSchedule,
     DuckdbBatch,
     DuckdbColumn,
     DuckdbDocument,
@@ -43,6 +47,7 @@ import type {
     DuckdbVariable,
     QuackInstanceOptions,
     QuackServerOptions,
+    RebuildIndexKind,
 } from "../types/quack";
 
 /** The surface a `DuckdbTable` needs from its instance (wired by `table()`). */
@@ -240,6 +245,8 @@ class DuckdbQuackInstance {
     #reattaching: Promise<void> | null = null;
     /** The background reconciliation of `options.tables` (see `syncSchema`). */
     #schemaSync: Promise<DuckdbSchemaReport> | null = null;
+    /** The last `backup()` — the next one waits for it (see `backup`). */
+    #backupChain: Promise<unknown> = Promise.resolve();
 
     constructor(options: QuackInstanceOptions = {}) {
         // Quack 2.0 accepts `READ_ONLY` on ATTACH and ignores it: writes still land.
@@ -1118,6 +1125,122 @@ class DuckdbQuackInstance {
                 return !stopped;
             },
         };
+    }
+
+    // ─── Backup (snapshots) ───────────────────────────────────────────────
+
+    /**
+     * Snapshot the database — the copy a single-file DuckDB does not get from
+     * `cp` while it is open.
+     *
+     * ```ts
+     * const snapshot = await db.backup({ directory: "./backups", keep: 7 });
+     * // → { path: "./backups/app-20261101T131500Z.duckdb", format: "file", at: … }
+     * ```
+     *
+     * `format: 'file'` (default) attaches a fresh file and copies every catalog
+     * into it (`COPY FROM DATABASE … TO …`), so the clone reflects a consistent
+     * state of the writing process — it needs a `dbPath`. `format: 'export'` runs
+     * `EXPORT DATABASE … (FORMAT PARQUET)` and works in memory too.
+     *
+     * The snapshot is named `<dbStem>-<UTC stamp>`, and `keep` (default `7`,
+     * `0` = everything) deletes the older ones after each successful run. Calls
+     * are serialized: two backups never interleave their ATTACH/DETACH pairs.
+     *
+     * An attached instance has no file of its own — back up the server instead
+     * (`DUCKDB_BACKUP_REMOTE`), or use `format: 'export'` on a local instance.
+     */
+    async backup(options: DuckdbBackupOptions): Promise<DuckdbBackupResult> {
+        // One connection, one catalog at a time: two ATTACH/DETACH pairs would
+        // race. Chain the calls, and keep the chain alive after a failure.
+        const run = this.#backupChain.then(
+            () => this.#doBackup(options),
+            () => this.#doBackup(options),
+        );
+        this.#backupChain = run.catch(() => { });
+        return run;
+    }
+
+    async #doBackup(options: DuckdbBackupOptions): Promise<DuckdbBackupResult> {
+        if (this.#options.url !== undefined) {
+            throw new DuckdbQuackError(
+                "A backup snapshots the instance's own file — an attached instance has none; back up the server that owns it",
+                "DUCKDB_BACKUP_REMOTE",
+            );
+        }
+        const { directory, format, keep } = backupSettings(options, this.#options.dbPath);
+        const at = new Date();
+        const stem = this.#options.dbPath ? backupStem(this.#options.dbPath) : "memory";
+        await mkdir(resolve(directory), { recursive: true });
+        const target = join(directory, `${stem}-${backupStamp(at)}${backupSuffix(format)}`);
+
+        // A snapshot landing in the same second reuses the name: replace it rather
+        // than copying into a catalog (or a directory) that already holds data.
+        await rm(target, { recursive: true, force: true });
+
+        const fail = (err: unknown): never => {
+            throw new DuckdbQuackError(
+                `Cannot back up ${this.#options.dbPath ?? "the database"} to '${target}' — ${firstLine((err as any)?.message ?? err)}`,
+                "DUCKDB_BACKUP_FAILED",
+                err,
+            );
+        };
+
+        if (format === "file") {
+            const alias = quoteIdent(`__anteros_backup_${Math.random().toString(36).slice(2, 10)}`);
+            const { rows } = await this.exec("SELECT current_database() AS db");
+            const source = quoteIdent(String(rows[0]?.db ?? "memory"));
+            try {
+                await this.exec(`ATTACH ${quoteLiteral(target)} AS ${alias}`);
+                await this.exec(`COPY FROM DATABASE ${source} TO ${alias}`);
+                await this.exec(`DETACH ${alias}`);
+            } catch (err) {
+                // Leave neither a catalog attached nor half a file behind.
+                await this.exec(`DETACH ${alias}`).catch(() => { });
+                await rm(target, { force: true }).catch(() => { });
+                fail(err);
+            }
+        } else {
+            try {
+                await this.exec(`EXPORT DATABASE ${quoteLiteral(target)} (FORMAT PARQUET)`);
+            } catch (err) {
+                await rm(target, { recursive: true, force: true }).catch(() => { });
+                fail(err);
+            }
+        }
+
+        try {
+            await this.#rotateBackups(directory, stem, format, keep);
+        } catch (err: any) {
+            // The snapshot is already on disk: a failed rotation must not fail it.
+            this.#debugError("backup rotation failed", err, { directory });
+        }
+
+        this.#debug("backup", { path: target, format, keep });
+        return { path: target, format, at };
+    }
+
+    /** Delete the snapshots beyond `keep`, newest first (the stamp sorts). */
+    async #rotateBackups(
+        directory: string,
+        stem: string,
+        format: DuckdbBackupFormat,
+        keep: number,
+    ): Promise<void> {
+        if (keep <= 0) return;
+        const suffix = backupSuffix(format);
+        const prefix = `${stem}-`;
+        const names = (await readdir(directory, { withFileTypes: true }))
+            .filter((entry) => entry.name.startsWith(prefix) && entry.name.endsWith(suffix))
+            .filter((entry) => (format === "file" ? entry.isFile() : entry.isDirectory()))
+            .map((entry) => entry.name)
+            .sort()
+            .reverse();
+        const stale = names.slice(keep);
+        for (const name of stale) {
+            await rm(join(directory, name), { recursive: true, force: true }).catch(() => { });
+        }
+        if (stale.length) this.#debug("backup rotated", { removed: stale.length, keep });
     }
 
     /**
@@ -2398,6 +2521,16 @@ class DuckdbQuackServer {
      * as soon as `start()` resolves. Cleared by `stop()`.
      */
     #keepAlive: ReturnType<typeof setInterval> | null = null;
+    /** The pending `afterStart` tick, so `stop()` can drop it instead of running it. */
+    #afterStartTimer: ReturnType<typeof setTimeout> | null = null;
+    /** The scheduled backup timer (`options.backup`), while armed. */
+    #backupTimer: ReturnType<typeof setInterval> | null = null;
+    /** The scheduled snapshot in flight — `stop()` waits for it. */
+    #backupRun: Promise<void> | null = null;
+    /** Whether a snapshot is running — a tick is skipped meanwhile. */
+    #backupInFlight = false;
+    /** The signal listeners `handleSignals` installed, by signal. */
+    #signalHandlers = new Map<NodeJS.Signals, () => void>();
 
     constructor(options: QuackServerOptions) {
         const token = String(options?.token ?? "");
@@ -2426,6 +2559,55 @@ class DuckdbQuackServer {
                 "A plain-HTTP server cannot serve a certificate — drop `disableSsl`, or drop the TLS files",
                 "DUCKDB_QUACK_SSL_CONFLICT",
             );
+        }
+        if (options.port !== undefined && !isPort(options.port)) {
+            throw new DuckdbQuackError(
+                `\`port\` must be an integer between 1 and 65535 — got ${String(options.port)}`,
+                "DUCKDB_QUACK_PORT_INVALID",
+            );
+        }
+        if (options.healthPort !== undefined) {
+            if (!isPort(options.healthPort)) {
+                throw new DuckdbQuackError(
+                    `\`healthPort\` must be an integer between 1 and 65535 — got ${String(options.healthPort)}`,
+                    "DUCKDB_QUACK_HEALTH_PORT_INVALID",
+                );
+            }
+            // One port, one listener: a readiness endpoint on the Quack port would
+            // be shadowed by the protocol's own banner.
+            const quackPort = options.port ?? DEFAULT_PORT;
+            if (options.healthPort === quackPort) {
+                throw new DuckdbQuackError(
+                    `\`healthPort\` cannot be the Quack port (${quackPort}) — the readiness endpoint needs its own`,
+                    "DUCKDB_QUACK_HEALTH_PORT_INVALID",
+                );
+            }
+        }
+        const timeout = options.beforeStartTimeoutMs;
+        if (timeout !== undefined && !(Number.isFinite(timeout) && timeout > 0)) {
+            throw new DuckdbQuackError(
+                `\`beforeStartTimeoutMs\` must be a positive number of milliseconds — got ${String(timeout)}`,
+                "DUCKDB_QUACK_OPTION_INVALID",
+            );
+        }
+        const rebuild = options.rebuildIndexesOnStart;
+        if (rebuild !== undefined) {
+            const unknown = Array.isArray(rebuild)
+                ? rebuild.filter((kind) => !REBUILD_KINDS.has(kind))
+                : [rebuild];
+            if (!Array.isArray(rebuild) || unknown.length > 0) {
+                throw new DuckdbQuackError(
+                    `\`rebuildIndexesOnStart\` takes an array of rebuildable index kinds ` +
+                    `(${[...REBUILD_KINDS].join(", ")}) — got ${JSON.stringify(rebuild)}`,
+                    "DUCKDB_QUACK_REBUILD_INVALID",
+                );
+            }
+        }
+        if (options.backup !== undefined) {
+            // Validate at declaration, not on the first tick at 3 a.m. — and a
+            // `file` backup without a `dbPath` is refused here rather than then.
+            backupSettings(options.backup, options.dbPath, "DUCKDB_BACKUP_INVALID");
+            if (options.backup.every !== undefined) backupIntervalMs(options.backup.every);
         }
 
         this.#options = options;
@@ -2532,10 +2714,30 @@ class DuckdbQuackServer {
         if (this.#running) return this;
         if (!this.#starting) this.#starting = this.#start();
         try {
-            return await this.#starting;
+            const started = await this.#starting;
+            // Only once the promise really resolved: the hook belongs after the
+            // caller's `await`, and its failure is nobody's rejection to catch.
+            this.#scheduleAfterStart();
+            return started;
         } finally {
             this.#starting = null;
         }
+    }
+
+    /** Hand `afterStart` to the next tick, once per successful start. */
+    #scheduleAfterStart(): void {
+        const afterStart = this.#options.afterStart;
+        if (!afterStart || this.#afterStartTimer) return;
+
+        this.#afterStartTimer = setTimeout(() => {
+            this.#afterStartTimer = null;
+            void Promise.resolve()
+                .then(() => afterStart(this))
+                .catch((err: unknown) => {
+                    const error = err instanceof Error ? err : new Error(String(err));
+                    (this.#options.onError ?? console.error)(error);
+                });
+        }, 0);
     }
 
     async #start(): Promise<this> {
@@ -2570,6 +2772,8 @@ class DuckdbQuackServer {
         await db.connect();
         try {
             await this.#applySettings();
+            await this.#rebuildHnswIndexes(db);
+            await this.#runBeforeStart(db);
 
             // Full-text indexes are built before the port opens: a client that
             // attaches can search immediately.
@@ -2607,16 +2811,48 @@ class DuckdbQuackServer {
             // The readiness endpoint answers 503 until `#running` flips below, which
             // is exactly right: serving has not finished yet.
             if (this.#options.healthPort !== undefined) this.#startHealthServer(this.#options.healthPort);
+
+            this.#running = true;
+            this.#startedAt = Date.now();
+            // A native listener does not keep Bun's event loop alive: a ref'd timer
+            // does, until `stop()` clears it. This is what makes `bun start` stay up.
+            this.#keepAlive = setInterval(() => { }, 60_000);
+
+            if (this.#options.onReady) {
+                try {
+                    await this.#options.onReady(this);
+                } catch (err: any) {
+                    throw new DuckdbQuackError(
+                        `The server is listening on ${this.listenUri} but \`onReady\` failed — ${firstLine(err?.message)}`,
+                        "DUCKDB_QUACK_READY_FAILED",
+                        err,
+                    );
+                }
+            }
+            // Armed only once ready: a scheduled snapshot starts from a server
+            // whose hooks have all run.
+            this.#startBackupSchedule();
         } catch (err: any) {
             this.#debugError("start failed", err, { url: this.url });
-            // Release what this attempt opened, and drop the handle: the next
-            // `start()` must build a fresh instance, not reuse a closed one.
+            // Release what this attempt opened — the running state `onReady` may
+            // have seen included — and drop the handle: the next `start()` must
+            // build a fresh instance, not reuse a closed one.
+            this.#running = false;
+            this.#startedAt = null;
+            if (this.#keepAlive) {
+                clearInterval(this.#keepAlive);
+                this.#keepAlive = null;
+            }
+            this.#stopBackupSchedule();
             this.#healthServer?.stop(true);
             this.#healthServer = null;
             await db.close().catch(() => { });
             if (this.#db === db) this.#db = null;
             this.#listenUri = null;
             this.#listenUrl = null;
+            // A start hook already named its failure; wrapping it again would hide
+            // the code the caller is meant to branch on.
+            if (err instanceof DuckdbQuackError && START_FAILURE_CODES.has(err.code)) throw err;
             throw new DuckdbQuackError(
                 `Cannot start the Quack server on ${this.url} — ${firstLine(err?.message)}`,
                 "DUCKDB_QUACK_SERVE_FAILED",
@@ -2624,11 +2860,6 @@ class DuckdbQuackServer {
             );
         }
 
-        this.#running = true;
-        this.#startedAt = Date.now();
-        // A native listener does not keep Bun's event loop alive: a ref'd timer does,
-        // until `stop()` clears it. This is what makes `bun start` stay up.
-        this.#keepAlive = setInterval(() => { }, 60_000);
         this.#debug("serving", { listenUri: this.listenUri, listenUrl: this.listenUrl });
         return this;
     }
@@ -2675,6 +2906,88 @@ class DuckdbQuackServer {
             healthy = false;
         }
         return { ...base, healthy, connections, db: this.#db.stats };
+    }
+
+    /**
+     * The Quack sessions attached right now — one row per session, straight from
+     * `quack_active_connections()`.
+     *
+     * Each row carries `server_id`, `connection_id`, `query`, `state`,
+     * `client_id_hash`, `cached_rows` and `query_started_at`. Empty when the server
+     * is not running, and after `stop()` (closing the instance ends every session).
+     *
+     * ```ts
+     * const sessions = await server.connections();
+     * const busy = sessions.filter((session) => session.state === "running");
+     * ```
+     */
+    async connections(): Promise<Array<Record<string, unknown>>> {
+        if (!this.#running || !this.#db) return [];
+        const { rows } = await this.#db.exec("SELECT * FROM quack_active_connections()");
+        return rows;
+    }
+
+    /**
+     * Snapshot the served database now — through `server.db`, so the same
+     * `file`/`export` logic as `db.backup()`.
+     *
+     * ```ts
+     * await server.backup({ directory: "./backups", keep: 7 });
+     * ```
+     *
+     * The configured `options.backup` is the base and `overrides` wins key by key.
+     * `directory` has no default, so it must come from one of the two
+     * (`DUCKDB_BACKUP_INVALID`).
+     */
+    async backup(overrides: Partial<DuckdbBackupSchedule> = {}): Promise<DuckdbBackupResult> {
+        const merged: Partial<DuckdbBackupSchedule> = { ...this.#options.backup, ...overrides };
+        const { directory, format, keep } = backupSettings(merged, this.dbPath);
+        return this.db.backup({ directory, format, keep });
+    }
+
+    /** Take one scheduled snapshot, skipping a tick that overlaps a running one. */
+    async #runScheduledBackup(): Promise<void> {
+        if (!this.#running || this.#backupInFlight) return;
+        this.#backupInFlight = true;
+        try {
+            const snapshot = await this.backup();
+            this.#debug("backup", { path: snapshot.path, format: snapshot.format });
+        } catch (err: any) {
+            // A failed snapshot must never stop the schedule.
+            const error = err instanceof Error ? err : new Error(String(err));
+            (this.#options.onError ?? console.error)(error);
+        } finally {
+            this.#backupInFlight = false;
+        }
+    }
+
+    /**
+     * Arm `options.backup`: one snapshot right away when `onStart`, then one every
+     * `every`. The timer is unref'd — a backup never keeps the process alive.
+     */
+    #startBackupSchedule(): void {
+        const schedule = this.#options.backup;
+        if (!schedule || this.#backupTimer) return;
+        const everyMs = backupIntervalMs(schedule.every ?? DEFAULT_BACKUP_EVERY);
+
+        const tick = (): void => {
+            const run = this.#runScheduledBackup();
+            this.#backupRun = run;
+            void run.finally(() => {
+                if (this.#backupRun === run) this.#backupRun = null;
+            });
+        };
+
+        this.#backupTimer = setInterval(tick, everyMs);
+        this.#backupTimer.unref?.();
+        if (schedule.onStart) tick();
+    }
+
+    /** Disarm the scheduled backup — `stop()` then waits for the one in flight. */
+    #stopBackupSchedule(): void {
+        if (!this.#backupTimer) return;
+        clearInterval(this.#backupTimer);
+        this.#backupTimer = null;
     }
 
     /** The readiness listener — `GET /` (and `/health`) answers 200 or 503. */
@@ -2724,11 +3037,81 @@ class DuckdbQuackServer {
     }
 
     /**
+     * Replay every stored HNSW index so it is rebuilt from the rows the file holds
+     * — a dropped index would silently turn `searchVss` into a full scan.
+     */
+    async #rebuildHnswIndexes(db: DuckdbQuackInstance): Promise<void> {
+        if (!this.#options.rebuildIndexesOnStart?.includes("hnsw")) return;
+
+        try {
+            const { rows } = await db.exec("SELECT index_name, sql FROM duckdb_indexes()");
+            const indexes = rows
+                .map((row) => ({
+                    name: String(row.index_name ?? ""),
+                    sql: String(row.sql ?? "").replace(/;+\s*$/, ""),
+                }))
+                .filter((index) => index.name !== "" && HNSW_INDEX_SQL.test(index.sql));
+            if (!indexes.length) return;
+
+            // The statement that recreates the index needs the extension that
+            // understands `USING HNSW`; a stored index implies it is installed.
+            await db.exec("LOAD vss").catch(() => { });
+            for (const index of indexes) {
+                await db.exec(`DROP INDEX IF EXISTS ${quoteIdent(index.name)}; ${index.sql}`);
+            }
+            this.#debug("rebuilt indexes", { indexes: indexes.map((index) => index.name) });
+        } catch (err: any) {
+            throw new DuckdbQuackError(
+                `Cannot rebuild the HNSW indexes on ${this.dbPath ?? "memory"} — ${firstLine(err?.message)}`,
+                "DUCKDB_QUACK_REBUILD_FAILED",
+                err,
+            );
+        }
+    }
+
+    /** Run the maintenance hook under its budget — the port is not open yet. */
+    async #runBeforeStart(db: DuckdbQuackInstance): Promise<void> {
+        const hook = this.#options.beforeStart;
+        if (!hook) return;
+
+        const timeoutMs = this.#options.beforeStartTimeoutMs ?? BEFORE_START_TIMEOUT;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+            await Promise.race([
+                Promise.resolve().then(() => hook(db)),
+                new Promise<never>((_, reject) => {
+                    timer = setTimeout(() => {
+                        reject(new DuckdbQuackError(
+                            `\`beforeStart\` did not finish within ${timeoutMs} ms — raise \`beforeStartTimeoutMs\`, or split the maintenance`,
+                            "DUCKDB_QUACK_BEFORE_START_TIMEOUT",
+                        ));
+                    }, timeoutMs);
+                }),
+            ]);
+        } catch (err: any) {
+            if (err instanceof DuckdbQuackError && err.code === "DUCKDB_QUACK_BEFORE_START_TIMEOUT") throw err;
+            throw new DuckdbQuackError(
+                `\`beforeStart\` failed — ${firstLine(err?.message)}`,
+                "DUCKDB_QUACK_BEFORE_START_FAILED",
+                err,
+            );
+        } finally {
+            if (timer !== undefined) clearTimeout(timer);
+        }
+    }
+
+    /**
      * Stop serving and close the instance. Uses the protocol's own `quack_stop`,
      * then releases the database (a file is only unlocked when the instance closes).
      * Idempotent.
+     *
+     * `drain: true` first waits for the attached sessions to leave —
+     * `quack_active_connections()` is polled every 50 ms, up to `timeoutMs`
+     * (default `10_000`). A deployment that replaces a server wants that: a client
+     * whose query is still running gets its answer instead of a broken attachment.
+     * The drain is **bounded** — past the deadline the server stops anyway.
      */
-    async stop(): Promise<void> {
+    async stop(options: { drain?: boolean; timeoutMs?: number } = {}): Promise<void> {
         const wasRunning = this.#running;
         const db = this.#db;
         this.#running = false;
@@ -2736,8 +3119,24 @@ class DuckdbQuackServer {
             clearInterval(this.#keepAlive);
             this.#keepAlive = null;
         }
+        if (this.#afterStartTimer) {
+            clearTimeout(this.#afterStartTimer);
+            this.#afterStartTimer = null;
+        }
+        this.#stopBackupSchedule();
+        // A snapshot already writing must finish before the instance closes.
+        if (this.#backupRun) {
+            try {
+                await this.#backupRun;
+            } catch {
+                // The scheduled run reported its own failure (`onError`).
+            }
+        }
 
         if (wasRunning && db) {
+            if (options.drain === true) {
+                await this.#drain(db, options.timeoutMs ?? DRAIN_TIMEOUT);
+            }
             try {
                 await db.exec(`CALL quack_stop(${quoteLiteral(this.listenUri)})`);
             } catch {
@@ -2758,6 +3157,29 @@ class DuckdbQuackServer {
     }
 
     /**
+     * Wait for the attached sessions to leave, polling every
+     * `DRAIN_POLL_INTERVAL` and giving up at `timeoutMs` — a client that never
+     * detaches must not hold a deployment.
+     */
+    async #drain(db: DuckdbQuackInstance, timeoutMs: number): Promise<void> {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            let opened: number;
+            try {
+                const { rows } = await db.exec("SELECT count(*) AS n FROM quack_active_connections()");
+                opened = Number(rows[0]?.n ?? 0);
+            } catch (err: any) {
+                // The listener is going away anyway: stop instead of failing the stop.
+                this.#debugError("drain probe failed", err);
+                return;
+            }
+            if (opened === 0) return;
+            await new Promise<void>((resolve) => { setTimeout(resolve, DRAIN_POLL_INTERVAL); });
+        }
+        this.#debug("drain timed out", { timeoutMs });
+    }
+
+    /**
      * `stop()` then `start()` — the recovery path for a server whose database was
      * invalidated by the engine (an `INTERNAL Error` on one query kills the whole
      * attached database instance, and the protocol requires a new one).
@@ -2769,6 +3191,52 @@ class DuckdbQuackServer {
     async restart(): Promise<this> {
         await this.stop();
         return this.start();
+    }
+
+    /**
+     * Stop the server on a process signal — the shutdown a container or a `bun`
+     * script expects without wiring one.
+     *
+     * On `"SIGINT"` (Ctrl-C) or `"SIGTERM"` the wrapper logs the signal, awaits
+     * `stop()`, then exits the process with code `0`. Registration is per signal and
+     * idempotent: a second call adds no listener, and still returns a disposer — the
+     * way to take the lifecycle back when the host owns it.
+     *
+     * ```ts
+     * const dispose = server.handleSignals();
+     * // …when the host takes over:
+     * dispose();
+     * ```
+     */
+    handleSignals(signals: NodeJS.Signals[] = DEFAULT_SIGNALS): () => void {
+        for (const signal of new Set(signals)) {
+            if (this.#signalHandlers.has(signal)) continue;
+            const handler = () => { void this.#onSignal(signal); };
+            this.#signalHandlers.set(signal, handler);
+            process.on(signal, handler);
+        }
+        return () => this.#disposeSignals();
+    }
+
+    /** Remove every signal listener `handleSignals` installed. */
+    #disposeSignals(): void {
+        for (const [signal, handler] of this.#signalHandlers) process.off(signal, handler);
+        this.#signalHandlers.clear();
+    }
+
+    /**
+     * The shutdown a signal starts. The listeners go first, so a second Ctrl-C is
+     * the runtime's own — a `stop()` that hangs must not become unstoppable.
+     */
+    async #onSignal(signal: NodeJS.Signals): Promise<void> {
+        console.log(`[quack] ${signal} received — stopping the server on ${this.url}`);
+        this.#disposeSignals();
+        try {
+            await this.stop();
+        } catch (err: any) {
+            this.#debugError("stop on signal failed", err);
+        }
+        process.exit(0);
     }
 }
 
@@ -2801,6 +3269,32 @@ const FTS_DEFAULT_LIMIT = 100;
 
 /** Neighbours returned by `searchVss` when no `limit` is given. */
 const VSS_DEFAULT_LIMIT = 10;
+
+/** What `beforeStart` gets when `beforeStartTimeoutMs` is omitted. */
+const BEFORE_START_TIMEOUT = 30_000;
+
+/** How long `stop({ drain: true })` waits for the sessions to leave. */
+const DRAIN_TIMEOUT = 10_000;
+
+/** How often the drain asks `quack_active_connections()`. */
+const DRAIN_POLL_INTERVAL = 50;
+
+/** The signals `handleSignals` listens to by default. */
+const DEFAULT_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
+
+/** The index kinds `rebuildIndexesOnStart` understands. */
+const REBUILD_KINDS: ReadonlySet<RebuildIndexKind> = new Set<RebuildIndexKind>(["hnsw"]);
+
+/** The stored SQL of a vector index — the one thing that separates it from any other index. */
+const HNSW_INDEX_SQL = /USING\s+HNSW/i;
+
+/** Start failures that keep their own code instead of `DUCKDB_QUACK_SERVE_FAILED`. */
+const START_FAILURE_CODES = new Set([
+    "DUCKDB_QUACK_REBUILD_FAILED",
+    "DUCKDB_QUACK_BEFORE_START_TIMEOUT",
+    "DUCKDB_QUACK_BEFORE_START_FAILED",
+    "DUCKDB_QUACK_READY_FAILED",
+]);
 
 // ─── Errors ───────────────────────────────────────────────────────────────
 
@@ -2927,6 +3421,11 @@ function timestampOf(value: unknown): any {
             micros,
         },
     } satisfies TimestampParts);
+}
+
+/** A TCP port a listener can bind — an integer in the 1–65535 range. */
+function isPort(value: unknown): value is number {
+    return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 65535;
 }
 
 /** The address to probe for a bind on `host` — a wildcard bind is reachable on loopback. */
@@ -3508,6 +4007,89 @@ function retentionPredicate(column: string, ttl: string | Date, where?: string):
         : `CAST(now() - ${retentionInterval(ttl)} AS TIMESTAMP)`;
     const predicate = `CAST(${quoteIdent(column)} AS TIMESTAMP) < ${cutoff}`;
     return where ? `(${predicate}) AND (${where})` : predicate;
+}
+
+// ─── Backup helpers ─────────────────────────────────────────────────────
+
+/** Snapshots kept when `keep` is omitted. */
+const DEFAULT_BACKUP_KEEP = 7;
+
+/** Interval a scheduled backup uses when `every` is omitted. */
+const DEFAULT_BACKUP_EVERY = "1h";
+
+const BACKUP_FORMATS: ReadonlySet<string> = new Set<DuckdbBackupFormat>(["file", "export"]);
+
+function backupInvalid(message: string): DuckdbQuackError {
+    return new DuckdbQuackError(message, "DUCKDB_BACKUP_INVALID");
+}
+
+/**
+ * Validate a snapshot request and fill its defaults.
+ *
+ * `dbPathCode` is what a `file` snapshot without a `dbPath` is refused with:
+ * `DUCKDB_BACKUP_INVALID` at the server's construction, the more specific
+ * `DUCKDB_BACKUP_REQUIRES_DBPATH` when the call itself is at fault.
+ */
+function backupSettings(
+    options: Partial<DuckdbBackupOptions> | undefined,
+    dbPath: string | undefined,
+    dbPathCode: "DUCKDB_BACKUP_INVALID" | "DUCKDB_BACKUP_REQUIRES_DBPATH" = "DUCKDB_BACKUP_REQUIRES_DBPATH",
+): { directory: string; format: DuckdbBackupFormat; keep: number } {
+    const directory = typeof options?.directory === "string" ? options.directory.trim() : "";
+    if (!directory) {
+        throw backupInvalid("`backup` needs `directory` — the folder receiving the snapshots");
+    }
+    const format = options?.format ?? "file";
+    if (!BACKUP_FORMATS.has(format)) {
+        throw backupInvalid(`\`backup.format\` is 'file' or 'export' — got ${JSON.stringify(format)}`);
+    }
+    const keep = options?.keep ?? DEFAULT_BACKUP_KEEP;
+    if (!Number.isInteger(keep) || keep < 0) {
+        throw backupInvalid(
+            `\`backup.keep\` must be a non-negative integer (0 keeps everything) — got ${JSON.stringify(options?.keep)}`,
+        );
+    }
+    if (format === "file" && !dbPath) {
+        throw new DuckdbQuackError(
+            "A `file` backup clones the database file — set `dbPath`, or use `format: 'export'`",
+            dbPathCode,
+        );
+    }
+    return { directory, format, keep };
+}
+
+/** `every` → milliseconds; a number is already milliseconds. */
+function backupIntervalMs(value: unknown): number {
+    if (typeof value === "number") {
+        if (Number.isFinite(value) && value > 0) return Math.trunc(value);
+    } else {
+        try {
+            // The same duration grammar as `retention()` — '15m', '1h', '24h'.
+            const ms = retentionMs(value);
+            if (ms > 0) return ms;
+        } catch {
+            // Fall through to the one refusal, with the backup's own code.
+        }
+    }
+    throw backupInvalid(
+        `\`backup.every\` must be a positive duration ('15m', '1h') or a number of milliseconds — got ${JSON.stringify(value)}`,
+    );
+}
+
+/** `20261101T131500Z` — the snapshot's UTC stamp (it sorts as text). */
+function backupStamp(at: Date): string {
+    return at.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+}
+
+/** What a format writes: a `.duckdb` file, or an `.export` directory. */
+function backupSuffix(format: DuckdbBackupFormat): string {
+    return format === "file" ? ".duckdb" : ".export";
+}
+
+/** `./data/app.duckdb` → `app`; the name we can use for the snapshots. */
+function backupStem(dbPath: string): string {
+    const stem = basename(dbPath).replace(/\.duckdb$/i, "");
+    return stem === "" || stem === "." ? "database" : stem;
 }
 
 export {

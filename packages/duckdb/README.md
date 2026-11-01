@@ -6,6 +6,7 @@ A DuckDB instance over the **[Quack](https://duckdb.org/quack/)** protocol — t
 - Attaching a server makes it the **default catalog**: unqualified `events` is the server's table, and the client's own memory catalog stays reachable as `memory.<table>`
 - **Data tables**: `db.table("tickets")` → `data` (JSON) + `ts` (TIMESTAMP), `ts` mapping a document field
 - `exec`, `createTable`, `deleteTable`, `listTables`, `ingest` + `flush`, `raw()`, `close()` — and nothing else to configure
+- **Backups**: `db.backup()` snapshots the database while it serves — a hot clone of the file or an `EXPORT DATABASE` dump, on demand or on a timer — and `antd restore` puts either one back
 
 > ⚠️ **Quack is experimental through DuckDB 1.x.** DuckDB documents the protocol, the function names and the
 > implementation details as subject to change up to the stable 2.0 line. This package is pinned to
@@ -16,7 +17,8 @@ A DuckDB instance over the **[Quack](https://duckdb.org/quack/)** protocol — t
 
 The package ships the **`antd`** binary as well: same server, from the terminal, no code —
 `bunx @anteros/duckdb start --token …`, or `antd start …` once installed. It is a thin layer over
-`DuckdbQuackServer`: flags, banner, signals. The options and examples are under
+`DuckdbQuackServer`: flags, banner, signals. `antd restore` is the other direction: it puts a
+`backup()` snapshot back into a database file. The options and examples are under
 [The `antd` CLI](#the-antd-cli).
 
 ## Install
@@ -177,6 +179,7 @@ whole `httpfs` client of the instance — Quack, S3, GCS — not just the remote
 | `delete({ table, where })`                  | Deletes matching documents — `where` mandatory.                                    |
 | `purge({ table, column, ttl, where?, batch? })` | Deletes rows older than `ttl` on a date column — no native DuckDB TTL.        |
 | `retention({ …, every })`                   | Repeats the purge on a timer; returns `{ run, stop, running }`.                     |
+| `backup({ directory, format?, keep? })`     | Snapshots the database — a hot clone of the file (default) or `EXPORT DATABASE`; returns `{ path, format, at }`. Local only (`DUCKDB_BACKUP_REMOTE`). See [Backups](#backups). |
 | `raw()`                                     | The underlying `{ instance, connection }` — the escape hatch.                    |
 | `close()`                                   | Closes the instance; later calls are refused.                                    |
 | `isConnected` / `isAttached` / `url` / `alias` | State, readable at any time.                                                  |
@@ -322,8 +325,17 @@ clean close — which is why a running database can show two files and a closed 
 files, each with its own optional `.wal`; `duckdb_databases()` lists them.
 
 A clean `stop()` / `close()` checkpoints and releases the file — what a backup should copy. Do not copy only
-the main file while its WAL still holds changes, and never delete a live `.wal`. A Quack client is in memory
-by default (its own `dbPath`, if any, is a separate local file); only the **server's** `dbPath` is durable.
+the main file while its WAL still holds changes, and never delete a live `.wal`. A running database needs no
+stop at all: `db.backup()` takes a consistent clone in the engine (see [Backups](#backups)).
+
+```ts
+const db = new DuckdbQuackInstance({ dbPath: "./data/analytics.duckdb" });
+const snapshot = await db.backup({ directory: "./backups" });
+// { path: "./backups/analytics-20261101T143000Z.duckdb", format: "file", at: … }
+```
+
+A Quack client is in memory by default (its own `dbPath`, if any, is a separate local file); only the
+**server's** `dbPath` is durable.
 
 ### Transactions
 
@@ -504,6 +516,13 @@ await pool.close();
 - The pool does not retry the failed call: the error reaches you, with the client already made usable.
 - **Never close a borrowed client.** `await db.close()` inside `withClient` is a caller mistake — the pool
   notices the dead handle, drops it, and builds a replacement for the next caller (covered by a test).
+- **A pool needs a `url`.** Without one, the constructor throws `DuckdbQuackError` with
+  `DUCKDB_POOL_REMOTE_REQUIRED`: it would otherwise open `size` independent local databases, each with its
+  own memory catalog, instead of `size` clients of one database.
+
+```ts
+new DuckdbQuackPool({ size: 4 }); // throws: DUCKDB_POOL_REMOTE_REQUIRED
+```
 
 CRUD on the matching documents — the **`where` predicate is mandatory**: a non-empty SQL string. Omitted, blank,
 or not a string (`undefined`, an array…) → `DUCKDB_WHERE_REQUIRED`, because an update without one would
@@ -900,24 +919,104 @@ const server = new DuckdbQuackServer({
   maxQueuedBatches: 64,              // backpressure of the server's own writes
   // closeTimeoutMs: 30_000,         // stop() gives up on a stuck write after this
   healthPort: 9495,                  // GET / → 200/503, for a load balancer or k8s
-});
+  // backup: { directory: "./backups", every: "6h", keep: 14, onStart: true }, // scheduled snapshots (see Backups)
 
-await server.start();                            // CALL quack_serve(…), idempotent
+  rebuildIndexesOnStart: ["hnsw"],   // replay every HNSW index before the port opens
+  beforeStart: async (db) => {       // maintenance on the served database, before any client
+    await db.purge({ table: "events", column: "ts", ttl: "30d" });
+  },
+  // beforeStartTimeoutMs: 30_000,  // past it: DUCKDB_QUACK_BEFORE_START_TIMEOUT
+  onReady: async (server) => {       // awaited before start() resolves
+    console.log(`serving on ${server.listenUri}`);
+  },
+  // afterStart: (server) => metrics.announce(server.listenUri), // after start(), not awaited
+});
 
 // `start()` keeps the **Bun process alive** while serving: the Quack listener is
 // a native thread, invisible to the event loop, so a plain script would exit as
 // soon as `start()` resolved. `stop()` releases the timer.
-// Ctrl-C is yours to wire — it is what runs `quack_stop` and unlocks a `dbPath`:
-process.once("SIGINT", () => void server.stop().then(() => process.exit(0)));
+// Ctrl-C and SIGTERM then run `quack_stop` and unlock a `dbPath`:
+const dispose = server.handleSignals();          // ["SIGINT", "SIGTERM"], one pair of listeners
+
+await server.start();                            // CALL quack_serve(…), idempotent
 
 // The server owns the data, and builds it with the very same methods:
 await server.db.createTable("orders");
 await server.db.ingest({ table: "orders", rows: [{ data: { ref: "A-1" } }] });
 await server.db.flush();
+await server.backup();                           // one snapshot now, through the served instance
 
 console.log(server.listenUri);                   // quack:127.0.0.1:9494 — what clients attach
 console.log(server.listenUrl);                   // http://127.0.0.1:9494 — what quack_serve bound
 await server.stop();                             // CALL quack_stop(…), then closes the instance
+dispose();                                       // removes the signal listeners
+```
+
+### Refused at construction
+
+Four options are validated at construction, so a typo fails immediately instead of at `start()` — or binds
+the wrong socket:
+
+| Option | Refused when | Error |
+| --- | --- | --- |
+| `port` | not an integer in `1`–`65535` | `DUCKDB_QUACK_PORT_INVALID` |
+| `healthPort` | not an integer in `1`–`65535`, or equal to the Quack port (9494 by default) | `DUCKDB_QUACK_HEALTH_PORT_INVALID` |
+| `beforeStartTimeoutMs` | not a finite number greater than zero | `DUCKDB_QUACK_OPTION_INVALID` |
+| `backup` | `directory` missing, `every` not a positive duration, `keep` not a non-negative integer, unknown `format`, or `format: "file"` without `dbPath` | `DUCKDB_BACKUP_INVALID` |
+
+`healthPort` must differ from `port`: the readiness endpoint would otherwise compete with the Quack listener
+for the same socket. `backup` follows the same rule — a schedule that cannot run is refused before the
+database is even opened, rather than failing on its first tick; `format: "file"` needs a `dbPath` to clone.
+A refusal is a `DuckdbQuackError` thrown before anything is opened — no file, no port, nothing to clean up.
+
+### Startup hooks and index recovery
+
+Around a start, the order is: `settings` → `rebuildIndexesOnStart` → `beforeStart` → declared
+`ftsIndexes`/`vssIndexes` → the Quack listener and `healthPort` → `onReady` → `start()` resolves →
+`afterStart`. Everything up to `onReady` runs **inside** `start()`, so a caller that awaits it either gets a
+server that is already serving, or an error.
+
+```ts
+const server = new DuckdbQuackServer({
+  token: process.env.QUACK_TOKEN!,
+  dbPath: "./data/analytics.duckdb",
+
+  rebuildIndexesOnStart: ["hnsw"],   // replay every HNSW index found in the catalog
+  beforeStart: async (db) => {       // `db` is `server.db` — the database clients will see
+    await db.purge({ table: "events", column: "ts", ttl: "90d" });
+    await db.exec("CHECKPOINT");
+  },
+  beforeStartTimeoutMs: 60_000,      // default 30_000
+});
+```
+
+- **`beforeStart(db)`** runs once the settings are applied and the index rebuild has run, and before any
+  listener is open — maintenance with no client watching: a migration, a purge, an index build. `db` is the
+  instance being served (`server.db`). A throw fails the start with `DUCKDB_QUACK_BEFORE_START_FAILED`.
+- **`beforeStartTimeoutMs`** (default `30_000`) bounds that hook: past it the start fails with
+  `DUCKDB_QUACK_BEFORE_START_TIMEOUT`. Both are a `DuckdbQuackError`, and a failed start releases what it
+  opened — the next `start()` builds a fresh one (see *Lifecycle and liveness*).
+- **`rebuildIndexesOnStart`** takes an **array** of index kinds — `RebuildIndexKind`, `"hnsw"` for now:
+  `["hnsw"]`. For `"hnsw"` the server reads `SELECT index_name, sql FROM duckdb_indexes()`, keeps the
+  secondary indexes whose stored SQL matches `/USING\s+HNSW/i`, runs `LOAD vss` (best effort) and replays
+  each one as `DROP INDEX IF EXISTS <name>; <sql>`. It runs before `beforeStart`, and a failure fails the
+  start with `DUCKDB_QUACK_REBUILD_FAILED`. A kind the package does not know — or a bare `"hnsw"` / `true`,
+  the former scalar forms — is refused at **construction** with `DUCKDB_QUACK_REBUILD_INVALID`, before
+  anything is opened. The array is what leaves room for the next kind (`"fts"`, say) without changing the
+  option's type — the kind is the exported `RebuildIndexKind` type.
+  It is for the **restart**: HNSW persistence is experimental and DuckDB does not replay a custom index's
+  changes through WAL recovery, so a file that comes back from an unclean stop can answer from a stale
+  graph. Rebuilding from the index's own SQL in the catalog makes it match the rows again, with no index
+  declaration to keep in sync with the code that created it.
+- **`onReady(server)`** runs once the listener and the optional `healthPort` are up, and is **awaited inside
+  `start()`**: warm a cache, register the URI, make the start fail loudly when the node cannot really serve.
+  A throw fails the start with `DUCKDB_QUACK_READY_FAILED`, and what was opened is released.
+- **`afterStart(server)`** is invoked **after `start()` resolved** — scheduled, never awaited: metrics, a log
+  line, a background job that must not delay readiness. Its errors go to `onError`; the server keeps serving.
+
+```ts
+onReady: async (server) => { await warmCaches(server.db); }, // awaited — a failure fails the start
+afterStart: (server) => metrics.announce(server.listenUri),  // not awaited — readiness is already on
 ```
 
 ### Where the data is saved
@@ -927,7 +1026,7 @@ Quack has **no storage option of its own**: the server *is* a DuckDB database, a
 | `dbPath` | Where the data lives | Survives a restart |
 | --- | --- | --- |
 | omitted | in memory | no — the tables serve every attached client for the lifetime of the process, then die with it |
-| set | a DuckDB file | yes — the file *is* the database; copy it to back it up, and `stop()` releases the lock |
+| set | a DuckDB file | yes — the file *is* the database; `backup()` it while serving (see *Backups*), and `stop()` releases the lock |
 
 `dbPath` may point into a folder that does not exist yet: **the directory is created on connect**
 (`mkdir -p` semantics), for the server and for a local `DuckdbQuackInstance` alike.
@@ -935,6 +1034,93 @@ Quack has **no storage option of its own**: the server *is* a DuckDB database, a
 This is the one place a DuckDB **file** is the right answer: a Quack server is a **single** process owning its database, so the cross-process lock that rules a file out for per-worker instances cannot happen — that is exactly the architecture Quack exists to allow (one writer, N readers).
 
 > The token is at least **4 characters** (Quack's rule, checked at construction), and a non-loopback `host` is **not enough** to accept a remote client: Quack checks the `Host` header and refuses anything but localhost unless `allowOtherHostname` is set. A server meant to be reached sets both — and then the token (and TLS) is all that stands between the network and the data.
+
+### Backups
+
+`backup()` takes a **consistent snapshot of the database while it keeps serving** — no `stop()`, no copying a
+file whose WAL is still open:
+
+```ts
+// The served instance: one snapshot, now.
+const snapshot = await server.db.backup({ directory: "./backups", keep: 7 });
+// { path: "./backups/analytics-20261101T143000Z.duckdb", format: "file", at: … }
+
+// A portable dump instead of a file copy.
+const dump = await server.db.backup({ directory: "./backups", format: "export" });
+```
+
+A **client instance** that is attached (`url` set) refuses with `DUCKDB_BACKUP_REMOTE`: the database to back up
+is the server's own file, so the call belongs on the server side (`server.db`).
+
+The result is `{ path, format, at }` — where the snapshot landed, the format used, and when it was taken.
+`directory` is created when missing (`mkdir -p` semantics), as for `dbPath`.
+
+| `format` | What lands in `directory` | When |
+| --- | --- | --- |
+| `'file'` (**default**) | `<stem>-<stamp>.duckdb` — a hot clone: `ATTACH` the target, `COPY FROM DATABASE`, `DETACH` | The database is a `dbPath` file; without one the call is refused (`DUCKDB_BACKUP_REQUIRES_DBPATH`) |
+| `'export'` | `<stem>-<stamp>.export/` — `schema.sql`, `load.sql` and one `.parquet` per table (`EXPORT DATABASE … (FORMAT PARQUET)`) | A dump to read with another DuckDB, another version or any Parquet tool — and the only format an **in-memory** instance can produce |
+
+- **Naming.** `<stem>` is the `dbPath` basename without its `.duckdb` extension, the stamp **UTC**
+  `YYYYMMDDTHHmmssZ` (`analytics-20261101T143000Z.duckdb`); an in-memory instance exports as
+  `memory-<stamp>.export`. The stamp sorts, so the newest snapshot is the last name.
+- **A clone is a database.** Open it with `new DuckdbQuackInstance({ dbPath: snapshot.path })` — there is
+  nothing to convert. To put it back in place instead, `antd restore` does the swap (see
+  [The `antd` CLI](#the-antd-cli)).
+- **Rotation.** `keep` (default **7**, `0` = keep everything) bounds the directory: after a successful
+  snapshot, the entries matching `<stem>-` **and** the format's suffix (`.duckdb`, or a `.export` directory)
+  are deleted beyond the newest `keep`. An `export` does not count the `file` clones, and the other way round.
+  A rotation that fails does not fail the snapshot it followed (`debug` reports it).
+- **Consistency.** The clone is written by the engine (`COPY FROM DATABASE`), so it is a transaction-consistent
+  copy of a live database — no committed change is left behind in a `.wal`, and no `cp` of a running server's
+  file can offer that (see *Storage and files*).
+- **Failure leaves nothing behind.** A failed clone detaches the target (best effort), deletes the partial
+  file (or `.export` directory) and throws `DUCKDB_BACKUP_FAILED`; the server keeps serving, and an existing
+  snapshot is untouched.
+- **No interleaving.** Two `backup()` calls on one instance are serialised — each waits for the previous
+  one, since they share the connection.
+
+Restoring is `antd restore`, one form per format: a clone is swapped over the target file, an `.export`
+directory is replayed into it with `IMPORT DATABASE`. The target's folder is created if missing, and an
+existing target is only replaced with `--force` — moved aside as `<dbPath>.bak-<stamp>`, never deleted:
+
+```bash
+antd restore --backup ./backups/app-20261101T134500Z.duckdb --dbPath ./data/app.duckdb --force
+antd restore --backup ./backups/app-20261101T134500Z.export --dbPath ./data/app.duckdb --force
+```
+
+The types are `DuckdbBackupOptions`, `DuckdbBackupResult`, `DuckdbBackupFormat` and, for the server option,
+`DuckdbBackupSchedule`.
+
+A schedule is one option on the server, and the manual call is the same with overrides:
+
+```ts
+const server = new DuckdbQuackServer({
+  token: process.env.QUACK_TOKEN!,
+  dbPath: "./data/analytics.duckdb",
+  backup: {
+    directory: "./backups", // required — created when missing
+    format: "file",         // default; "export" for a portable dump
+    keep: 14,               // snapshots kept; 0 = keep everything (default 7)
+    every: "6h",            // '15m', '1h', '24h'… or milliseconds (default '1h')
+    onStart: true,          // one snapshot as soon as the server runs (default false)
+  },
+});
+
+await server.backup();                   // now, with the configured options
+await server.backup({ format: "export" }); // overrides merge over the configuration
+```
+
+- `onStart` takes the first snapshot once the server is running — after `onReady`; the timer then fires every
+  `every` (default `'1h'`). A tick is **skipped while a snapshot is in flight**, so a slow clone never stacks
+  up.
+- The timer is **unref'd**: a backup schedule never keeps the process alive by itself.
+- A failed snapshot goes to `onError` (or `console.error`) and the schedule continues; what succeeded is
+  still rotated by `keep`.
+- `stop()` clears the timer and awaits a **scheduled** snapshot already in flight (best effort — its failure
+  is not rethrown), so a shutdown does not cut a clone in half. `start()` after a `stop()` re-arms the
+  schedule.
+- Without a configured `backup`, `server.backup({ directory })` still works: the directory is required, and
+  its absence is `DUCKDB_BACKUP_INVALID`.
 
 ### The `antd` CLI
 
@@ -948,6 +1134,8 @@ antd start --host 0.0.0.0 --allowOtherHostname --token super-secret
 antd start --dbPath ./data/docs.duckdb --fts documents:document_identifier:text_content,author --token super-secret
 antd start --dbPath ./data/docs.duckdb --ftsConfig ./fts.json --token super-secret
 antd start --dbPath ./data/vecs.duckdb --vss embeddings:vec:cosine --token super-secret
+antd restore --backup ./backups/app-20261101T134500Z.duckdb --dbPath ./data/app.duckdb --force
+antd restore --backup ./backups/app-20261101T134500Z.export --dbPath ./data/app.duckdb --force
 ```
 
 The banner names the URI actually bound, the data source and the masked token; the process then serves until
@@ -980,6 +1168,7 @@ The banner names the URI actually bound, the data source and the masked token; t
 | `--vssConfig <path>` | — | JSON array of vector indexes `{ table, column, metric, … }` |
 | `--vssMetric <metric>` | `l2sq` | Default metric for `--vss` / `--vssConfig` |
 | `--vssPersist` | on | Experimental HNSW persistence — on by default; `--vssPersist=false` opts out |
+| `--rebuildIndexes <hnsw\|all>` | — | Replay stored HNSW indexes before startup; repeatable, `all` expands to every known kind |
 | `--sslCertFile` / `--sslKeyFile` | generated | TLS pair; refused with `--disableSsl` |
 | `--name` / `--region` / `--provider` / `--hostname` | — | Identity advertised by `whoami()` |
 | `--printToken` | `false` | Show the token in the banner (masked by default) |
@@ -997,8 +1186,40 @@ configs carry the same per-index options as `ftsIndexes` / `vssIndexes`:
 ```
 
 All indexes are built **before** the port opens, so a client can search as soon as it attaches. `vss` is not
-autoloaded: the CLI loads it (installing on first use) before building. An in-memory database does not need
-`--vssPersist` is only needed to opt out.
+autoloaded: the CLI loads it (installing on first use) before building. `--vssPersist` is only needed to opt out.
+
+#### Restoring a backup
+
+`antd restore` is the counterpart of `db.backup()` / `server.backup()`: it puts a snapshot back into a
+database file, and serves nothing itself. `--backup` and `--dbPath` are both required — omitting one fails
+with an error that names it.
+
+```bash
+antd restore --backup <clone.duckdb | export-dir> --dbPath <target.duckdb> [--force]
+```
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `--backup <path>` | — | Required: the `.duckdb` clone or the `.export` directory to restore |
+| `--dbPath <path>` | — | Required: the database file to restore into (its folder is created if missing) |
+| `--force` | `false` | Replace an existing database — moved aside as `<dbPath>.bak-<stamp>`, never deleted |
+
+- **A directory is an `EXPORT DATABASE` dump** (`schema.sql`, `load.sql`, one `.parquet` per table): it is
+  replayed with `IMPORT DATABASE '<absolute dir>'` into the target. The import creates the target file, so an
+  existing one is moved aside first.
+- **A file is a hot clone**: it is copied to `<dir>/.<name>.restore`, then `rename()`d over the target — an
+  atomic swap, so the target is either the old database or the restored one, never half of each.
+  A missing path, or anything that is neither a file nor a directory, is refused.
+- **An existing target is protected.** Without `--force` the command refuses with *"Refusing to overwrite
+  '<dbPath>' — pass --force to replace it (the current database is moved aside)"*. With `--force` the current
+  database is **moved** to `<dbPath>.bak-<YYYYMMDDTHHmmss>` (`-1`, `-2`… when that name is taken), and
+  `<dbPath>.wal` is removed: a stale WAL must never replay onto the restored file.
+- **It says what it restored.** The target is reopened, its `information_schema.tables` counted for
+  `current_database()`, and one line printed:
+  `restored ./data/app.duckdb from ./backups/app-20261101T134500Z.duckdb — 12 tables` (`1 table` in the
+  singular). An engine failure fails the command with the first line of the message.
+
+The restored file is an ordinary database: `antd start --dbPath ./data/app.duckdb --token …` serves it.
 
 ### The rest of Quack
 
@@ -1011,7 +1232,7 @@ Reachable from `server.db.exec(...)` / `server.db.raw()` — the options `Duckdb
 | `quack_identify(...)` / `whoami()` | What the node advertises (`name`, `provider`, `hostname`, `region`, `meta`) — `identity` in the options |
 | `quack_target_batch_bytes` | Target in-memory size of one wire batch (default 32 MiB) — `targetBatchBytes` in the options |
 | `ssl_cert_file` / `ssl_key_file` | TLS certificate and key for an HTTPS server — `sslCertFile` / `sslKeyFile` in the options |
-| `quack_active_connections()` / `quack_server_list()` | Who is attached, what is being served |
+| `quack_active_connections()` / `quack_server_list()` | Who is attached (`connections()` wraps the first), what is being served |
 | `quack_query(uri, sql, token := …)` | One-shot remote query, without attaching |
 | `quack_query_by_name(catalog, sql)` | A query through an existing attachment — what `exec` uses on the client |
 | `fts` extension / `match_bm25(…)` | Full-text search — wrapped by `createFtsIndex` / `searchFts` / `dropFtsIndex` |
@@ -1044,10 +1265,13 @@ every failure into one console line, as it happens:
 | Member        | What it is                                                                        |
 | ------------- | --------------------------------------------------------------------------------- |
 | `start()`     | Opens the instance and serves. Keeps the Bun process alive. Idempotent, **including under concurrency**. |
-| `stop()`      | `quack_stop`, closes the instance, releases the keep-alive. Idempotent.             |
+| `stop()`      | `quack_stop`, closes the instance, releases the keep-alive. Idempotent. `{ drain, timeoutMs }` waits for the attached clients first (see *Connections and graceful shutdown*). |
+| `handleSignals(signals?)` | `SIGINT` + `SIGTERM` by default → log, `stop()`, `process.exit(0)`. Returns a disposer. |
 | `restart()`   | `stop()` then `start()` — recovery for an invalidated database, or a supervised cycle. |
 | `health()`    | Asks the engine (`quack_server_list()`) whether the listener is still there — `isRunning` is only the wrapper's flag. |
 | `stats()`     | `{ running, healthy, listenUri, uptimeMs, connections, db }` — one call for a dashboard or a supervisor. |
+| `connections()` | The sessions attached right now — the rows of `quack_active_connections()`; `[]` when not running. |
+| `backup(overrides?)` | One snapshot through `db`, now — the configured `backup` options, merged with the overrides (see *Backups*). |
 | `healthPort`  | The readiness port, when one was configured. |
 | `db`          | The local `DuckdbQuackInstance` being served — the tables the clients see. Recreated by the next `start()` after a `stop()`. |
 | `listenUri`   | The URI `quack_serve` actually bound, e.g. `quack:127.0.0.1:9494`.                  |
@@ -1058,6 +1282,55 @@ every failure into one console line, as it happens:
 | `isRunning`   | Whether the wrapper believes it is serving — use `health()` from a supervisor.     |
 
 > ⚠️ An empty token is refused at construction, and `host` defaults to **localhost**: exposing a Quack server to a network is a deliberate act (`host: '0.0.0.0'`), and the token is then the only thing in the way.
+
+### Connections and graceful shutdown
+
+`connections()` reports who is attached right now — the rows of `quack_active_connections()`, and `[]` when
+the server is not running:
+
+```ts
+const rows = await server.connections();
+// [{ server_id, connection_id, query, state, client_id_hash, cached_rows, query_started_at }]
+```
+
+One row is one session: `server_id` and `connection_id` identify it, `query` is the statement it is running,
+`state` is the session state, `client_id_hash` the hashed client id, `cached_rows` the rows of the current
+result the server keeps for a reconnect, and `query_started_at` when that query started. `stats().connections`
+is the same list, counted.
+
+`stop()` is immediate by default: `quack_stop` runs at once and the attached clients lose the connection.
+`drain` makes it wait for them to leave instead:
+
+```ts
+await server.stop();                                   // at once — a rolling restart may cut a query
+await server.stop({ drain: true });                    // wait for the clients (10 s cap)
+await server.stop({ drain: true, timeoutMs: 30_000 }); // …or a longer cap
+```
+
+- `drain: true` polls `quack_active_connections()` every **50 ms** until the count is 0, then runs
+  `quack_stop` as usual. The wait is bounded by `timeoutMs` (default `10_000`): past it the server stops
+  anyway and the clients still attached are cut off — the deadline is a cap, not a veto on stopping.
+- A client that closed cleanly disappears from the count; one that was **killed** holds its session until
+  its heartbeat expires (`quack_default_heartbeat_timeout`, 60 s default), which is what the deadline is for.
+- `timeoutMs` bounds the **drain only**: the close that follows is still bounded by `closeTimeoutMs`
+  (`30_000` by default). Without `drain`, `stop()` is unchanged — and still idempotent.
+
+`handleSignals()` wires the two signals a container or a `Ctrl-C` sends, so `quack_stop` runs and a `dbPath`
+is released on the way out:
+
+```ts
+const dispose = server.handleSignals();   // ["SIGINT", "SIGTERM"] by default
+await server.start();
+
+// later — or in a test's teardown
+dispose();                                // removes the listeners it installed
+```
+
+- On a signal: it logs the signal, runs `stop()`, then `process.exit(0)`. The listeners are removed **before**
+  `stop()` runs, so a shutdown that hangs is still interruptible by a second signal.
+- One registration per call: a second `handleSignals()` does not stack another pair of listeners, and the
+  returned disposer removes the ones it installed — a test or a supervised restart leaves nothing behind.
+- Pass your own list when the runtime sends something else: `server.handleSignals(["SIGQUIT"])`.
 
 ### Lifecycle and liveness
 
@@ -1110,8 +1383,8 @@ Quack's own defaults are fine for one application, and are plain DuckDB settings
 | `quack_enable_reconnects` | `false` | Cached results survive a dropped HTTP connection — not a restarted server. |
 
 A client that closes cleanly frees its session (verified: `quack_active_connections()` drops back to 0);
-one that is **killed** holds it until the heartbeat timeout. Watch `quack_active_connections()` if clients
-come and go.
+one that is **killed** holds it until the heartbeat timeout. Watch `connections()` — the same rows, from the
+wrapper — if clients come and go, and `stop({ drain: true })` to let them leave before a restart.
 
 ## Notes
 

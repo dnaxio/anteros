@@ -32,6 +32,10 @@ export type DuckdbQuackPoolOptions = QuackInstanceOptions & {
  * A client whose attachment was invalidated (the server restarted) is **re-attached**
  * before it goes back to the pool; one that is closed or cannot re-attach is dropped
  * and replaced on the next call.
+ *
+ * A pool is **remote only**: without a `url`, its clients would open N independent
+ * local databases instead of sharing the one behind the server, so the constructor
+ * refuses that configuration.
  */
 export class DuckdbQuackPool {
     /** The maximum number of clients (`size`). */
@@ -50,6 +54,12 @@ export class DuckdbQuackPool {
         const { size = 4, ...rest } = options;
         if (!Number.isInteger(size) || size < 1) {
             throw new DuckdbQuackError("A pool needs a `size` of at least 1", "DUCKDB_POOL_SIZE_INVALID");
+        }
+        if (!String(rest.url ?? "").trim()) {
+            throw new DuckdbQuackError(
+                "A pool needs a `url` — without one, each client would open its own local database",
+                "DUCKDB_POOL_REMOTE_REQUIRED",
+            );
         }
         this.size = size;
         this.#options = rest;

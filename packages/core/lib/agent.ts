@@ -44,6 +44,9 @@ import type {
     AgentToolContext,
     AgentToolMessage,
     AgentToolResultEntry,
+    AgentGuardrail,
+    AgentGuardrailContext,
+    AgentPricing,
     AgentToolStats,
     AgentTools,
     AgentUsage,
@@ -266,11 +269,13 @@ async function applyProcessors(
 function addUsage(base: AgentUsage, next: Partial<AgentUsage>): AgentUsage {
     const inputTokens = base.inputTokens + (next.inputTokens ?? 0);
     const outputTokens = base.outputTokens + (next.outputTokens ?? 0);
+    const cost = (base.cost ?? 0) + (next.cost ?? 0);
     return {
         inputTokens,
         outputTokens,
         totalTokens: inputTokens + outputTokens,
         requests: base.requests + (next.requests ?? 0),
+        ...(cost ? { cost } : {}),
     };
 }
 
@@ -376,6 +381,77 @@ async function mapLimited<T, R>(items: T[], limit: number, work: (item: T, index
     return out;
 }
 
+/** A prompt budget is an order of magnitude: 4 chars ≈ 1 token, no tokenizer dependency. */
+function estimateTokens(message: AgentMessage): number {
+    const content = (message as any).content;
+    const text = typeof content === "string" ? content : JSON.stringify(content ?? "");
+    return Math.ceil((text?.length ?? 0) / 4) + 4;
+}
+
+/** Drop the oldest turns until the prompt fits `budget`; the last turn always stays. */
+function trimToTokens(messages: AgentMessage[], budget: number): AgentMessage[] {
+    let total = messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+    let start = 0;
+    while (total > budget && start < messages.length - 1) {
+        total -= estimateTokens(messages[start]!);
+        start += 1;
+    }
+    return start ? messages.slice(start) : messages;
+}
+
+/** The text a guardrail reads — a message's text parts joined. */
+function messageText(message: AgentMessage | undefined): string {
+    if (!message) return "";
+    const content = (message as any).content;
+    if (typeof content === "string") return content;
+    return (content ?? [])
+        .filter((part: any) => part?.type === "text")
+        .map((part: any) => part.text)
+        .join("\n");
+}
+
+/**
+ * Run one side of the guardrails. A check that throws **blocks the run** with
+ * `AGENT_GUARDRAIL_BLOCKED`, naming the guardrail and carrying its own code.
+ */
+async function runGuardrails(
+    list: AgentGuardrail[] | undefined,
+    value: string,
+    ctx: AgentGuardrailContext,
+    kind: "prompt" | "answer",
+): Promise<void> {
+    for (const guardrail of list ?? []) {
+        try {
+            await guardrail.check(value, ctx);
+        } catch (err: any) {
+            throw new AppError(
+                `Guardrail '${guardrail.name}' blocked the ${kind}: ${err?.message ?? err}`,
+                { status: 400, code: "AGENT_GUARDRAIL_BLOCKED", reason: err?.code ? String(err.code) : undefined },
+            );
+        }
+    }
+}
+
+/** What a model call cost, in USD, from its token usage. */
+function costOf(usage: AgentUsage, pricing: AgentPricing): number {
+    return (usage.inputTokens / 1_000_000) * pricing.input + (usage.outputTokens / 1_000_000) * pricing.output;
+}
+
+/** Whether another endpoint may answer — 429, 5xx, network, timeout; never a 4xx. */
+function worthFallback(err: any): boolean {
+    // The adapter reports the provider's own status under `reason.status`: a 400 from
+    // the upstream endpoint is the request's fault, and another model would fail too.
+    const providerStatus = Number(err?.reason?.status ?? 0);
+    if (providerStatus) return providerStatus === 429 || providerStatus >= 500;
+
+    const status = Number(err?.status ?? 0);
+    if (status === 429 || status === 504 || status >= 500) return true;
+    if (status) return false;
+
+    const text = String(err?.message ?? err);
+    return /network|fetch failed|timed out|timeout|ECONN|socket|ENOTFOUND|EAI_AGAIN/i.test(text);
+}
+
 /** Fold one tool result into the run's aggregate (`result.toolStats`). */
 function recordToolStats(stats: AgentToolStats, entry: AgentToolResultEntry): void {
     stats.calls += 1;
@@ -439,10 +515,18 @@ function toolTurnFor(result: AgentToolResultEntry): AgentMessage {
  * The sub-agent is built per call, bound to the **calling** `rest`: its own tools then
  * run with the right tenant, session and transaction.
  */
+/** What a delegated run must inherit from its parent. */
+type Delegation = {
+    signal?: AbortSignal;
+    maxSteps?: number;
+    onResult?: (result: AgentGenerateResult) => void;
+};
+
 function subAgentTools(
     declared: AgentConfig | AgentConfig[] | undefined,
     rest: InstanceType<typeof useRest> | undefined,
     tenant: string | undefined,
+    delegation?: Delegation,
 ): Array<[string, AgentTool]> {
     const definitions = !declared ? [] : Array.isArray(declared) ? declared : [declared];
     const out: Array<[string, AgentTool]> = [];
@@ -464,9 +548,30 @@ function subAgentTools(
                 required: ["input"],
                 additionalProperties: false,
             },
-            execute: async ({ input, thread, resource }: any) => {
+            execute: async ({ input, thread, resource }: any, ctx) => {
+                if (!definition.description) {
+                    throw ctx.error(`Agent '${id}' has no description — it cannot be delegated to`, {
+                        status: 500, code: "AGENT_DELEGATION_INVALID",
+                    });
+                }
                 const sub = new Agent(definition, { rest, tenant });
-                const answer = await sub.generate(input, { thread, resource });
+                const answer = await sub.generate(input, {
+                    thread,
+                    resource,
+                    // The parent's lifetime is the child's: an aborted run must not
+                    // leave a delegated model call running in the background
+                    ...(delegation?.signal ? { signal: delegation.signal } : {}),
+                    ...(delegation?.maxSteps ? { maxSteps: delegation.maxSteps } : {}),
+                });
+                delegation?.onResult?.(answer);
+                // A step is all-or-nothing: a child that paused for a decision cannot
+                // be resumed through a tool result — say so instead of losing the call
+                if (answer.pendingApprovals?.length) {
+                    throw ctx.error(
+                        `Sub-agent '${id}' paused for approval (${answer.pendingApprovals.map((approval) => approval.name).join(", ")}) — delegation cannot carry a decision; call it directly`,
+                        { status: 409, code: "AGENT_APPROVAL_IN_DELEGATION" },
+                    );
+                }
                 return answer.text;
             },
         }]);
@@ -988,12 +1093,14 @@ class Agent {
         const toolCalls = deferred<AgentToolCall[]>();
         const toolResults = deferred<AgentToolResultEntry[]>();
         const toolStats = deferred<AgentToolStats>();
+        const modelUsed = deferred<string | undefined>();
+        const budgetHit = deferred<{ limit: "tokens" | "cost" | "duration"; value: number } | undefined>();
         const steps = deferred<AgentStep[]>();
         const usage = deferred<AgentUsage>();
         const finishReason = deferred<string>();
         const messages = deferred<AgentMessage[]>();
 
-        const deferreds = [text, reasoning, object, toolCalls, toolResults, toolStats, steps, usage, finishReason, messages];
+        const deferreds = [text, reasoning, object, toolCalls, toolResults, toolStats, modelUsed, budgetHit, steps, usage, finishReason, messages];
 
         // The caller may only consume `textStream` — a rejected promise nobody
         // awaits must not become an unhandled rejection.
@@ -1010,6 +1117,8 @@ class Agent {
                 toolCalls.resolve(result.toolCalls);
                 toolResults.resolve(result.toolResults);
                 toolStats.resolve(result.toolStats);
+                modelUsed.resolve(result.model);
+                budgetHit.resolve(result.budget);
                 steps.resolve(result.steps);
                 usage.resolve(result.usage);
                 finishReason.resolve(result.finishReason);
@@ -1034,6 +1143,8 @@ class Agent {
             toolCalls: toolCalls.promise,
             toolResults: toolResults.promise,
             toolStats: toolStats.promise,
+            model: modelUsed.promise,
+            budget: budgetHit.promise,
             steps: steps.promise,
             usage: usage.promise,
             finishReason: finishReason.promise,
@@ -1055,6 +1166,22 @@ class Agent {
         };
     }
 
+    /** The primary provider, then its fallbacks, each with its options merged in. */
+    #providerChain(override?: Partial<AgentProvider>): AgentProvider[] {
+        const primary = this.#provider(override);
+        const fallbacks = primary.fallbacks ?? [];
+        return [
+            primary,
+            ...fallbacks.map((fallback) => ({
+                ...primary,
+                ...fallback,
+                options: { ...primary.options, ...fallback.options },
+                headers: { ...primary.headers, ...fallback.headers },
+                fallbacks: undefined,
+            })),
+        ];
+    }
+
     /**
      * The tools of one run — `true` (all), `false` (none), an array of **names**
      * (an allow-list) or extra tools to merge in.
@@ -1062,14 +1189,14 @@ class Agent {
      * The declared agents and the **remote MCP servers** are resolved here, before the
      * allow-list is applied, so every rule below treats them like any other tool.
      */
-    async #collectTools(requested?: boolean | string[] | AgentTools): Promise<Map<string, AgentTool>> {
+    async #collectTools(requested?: boolean | string[] | AgentTools, delegation?: Delegation): Promise<Map<string, AgentTool>> {
         // `tools: false` — the run answers directly (and no remote is even contacted)
         if (requested === false) return new Map();
 
         const tools = new Map(this.#tools);
 
         // The other agents this one may delegate to
-        for (const [name, tool] of subAgentTools(this.#config.agents, this.#rest, this._tenant_)) {
+        for (const [name, tool] of subAgentTools(this.#config.agents, this.#rest, this._tenant_, delegation)) {
             if (!tools.has(name)) tools.set(name, tool);
         }
 
@@ -1272,9 +1399,20 @@ class Agent {
         const { input, call, streaming, controller } = run;
         const emit = run.emit;
 
-        const tools = await this.#collectTools(call.tools);
-        const provider = this.#provider(call.provider);
-        const adapter = resolveProvider(provider);
+        // The run's signal comes first: the delegated agents inherit it, and the
+        // tools are collected before the first model call
+        const signal = call.signal ? AbortSignal.any([call.signal, controller.signal]) : controller.signal;
+
+        // What delegated runs consume — folded into the parent's usage at the end
+        let delegatedUsage: AgentUsage = { ...EMPTY_USAGE };
+        const tools = await this.#collectTools(call.tools, {
+            signal,
+            maxSteps: call.maxSteps ?? this.#config.maxSteps,
+            onResult: (answer) => { delegatedUsage = addUsage(delegatedUsage, answer.usage); },
+        });
+        const chain = this.#providerChain(call.provider);
+        const provider = chain[0]!;
+        let model = provider.model;
 
         const structured: AgentStructuredOutput | undefined = call.structuredOutput ?? (call.schema ? { schema: call.schema } : undefined);
         const schema = structured?.schema;
@@ -1290,7 +1428,6 @@ class Agent {
         // `…Id` spellings are still read as aliases.
         const thread = call.memory?.thread ?? call.memory?.threadId ?? call.thread ?? call.threadId;
         const resource = call.memory?.resource ?? call.memory?.resourceId ?? call.resource ?? call.resourceId;
-        const signal = call.signal ? AbortSignal.any([call.signal, controller.signal]) : controller.signal;
 
         // Per-tool deadline and tool parallelism: the call wins over the declaration
         const toolTimeout = call.toolTimeoutMs ?? this.#config.toolTimeoutMs;
@@ -1300,6 +1437,18 @@ class Agent {
             Math.trunc(call.maxParallelToolCalls ?? this.#config.maxParallelToolCalls ?? 8),
         );
         const savePartial = call.savePartial ?? this.#config.savePartial ?? false;
+
+        // Run budget — a run that reaches it stops **cleanly**, it does not throw
+        const maxTokens = call.maxTokens ?? this.#config.maxTokens;
+        const maxDurationMs = call.maxDurationMs ?? this.#config.maxDurationMs;
+        const maxCost = call.maxCost ?? this.#config.maxCost;
+        const contextTokens = call.contextTokens ?? this.#config.contextTokens;
+        const startedAt = Date.now();
+        let budget: { limit: "tokens" | "cost" | "duration"; value: number } | undefined;
+
+        // Guardrails of this run: the declaration's, then the call's
+        const inputGuardrails = [...(this.#config.guardrails?.input ?? []), ...(call.guardrails?.input ?? [])];
+        const outputGuardrails = [...(this.#config.guardrails?.output ?? []), ...(call.guardrails?.output ?? [])];
 
         // Resuming a paused run: the conversation is the caller's — the paused step is
         // resolved from it instead of being asked of the model again
@@ -1338,6 +1487,16 @@ class Agent {
         // Memory processors, `load` side: they see exactly what the model will see
         // (history, injected turns, input and attachments included)
         messages = await applyProcessors(this.#config.processors, "load", messages, memoryCtx);
+
+        // The prompt budget, in tokens: the oldest turns are dropped first. It runs
+        // after the processors (they may have shortened the thread) and before the
+        // guardrails (which read the caller's prompt, not the window).
+        if (contextTokens && contextTokens > 0) messages = trimToTokens(messages, contextTokens);
+
+        // Input guardrails — the caller's prompt, before any model call
+        const guardrailCtx: AgentGuardrailContext = { agent: this, tenant: this._tenant_, thread, resource, signal };
+        const lastUser = [...messages].reverse().find((message) => message.role === "user");
+        await runGuardrails(inputGuardrails, messageText(lastUser), guardrailCtx, "prompt");
 
         let system = call.instructions ?? await this.resolveInstructions({ thread, resource });
 
@@ -1409,11 +1568,46 @@ class Agent {
             }
         }
 
+        // One model call, with the fallbacks: an endpoint that is rate-limited, down or
+        // unreachable hands over to the next one — as long as nothing was streamed yet
+        let streamed = false;
+        const guardedEmit = emit
+            ? (chunk: AgentStreamChunk) => { streamed = true; emit(chunk); }
+            : undefined;
+        const chat = async (request: ModelChatRequest) => {
+            let lastError: any;
+            for (const candidate of chain) {
+                const adapter = resolveProvider(candidate);
+                try {
+                    const turn = streaming && guardedEmit
+                        ? await this.#chatStream(adapter, request, guardedEmit)
+                        : await this.#chat(adapter, request);
+                    model = candidate.model;
+                    if (candidate.pricing) {
+                        turn.usage = { ...turn.usage, cost: costOf(turn.usage, candidate.pricing) };
+                    }
+                    return turn;
+                } catch (err: any) {
+                    lastError = err;
+                    // A stream that already reached the caller cannot be restarted
+                    if (signal.aborted || streamed || !worthFallback(err)) throw err;
+                }
+            }
+            throw lastError;
+        };
+
         try {
             // Nothing to ask the model while a decision is pending
             for (let step = 0; !pending.length && step < maxSteps; step++) {
                 if (signal.aborted) {
                     finishReason = "aborted";
+                    break;
+                }
+                // The wall-clock budget is checked between steps: a model call already
+                // started is bounded by its own `provider.options.timeout`
+                if (maxDurationMs !== undefined && Date.now() - startedAt >= maxDurationMs) {
+                    finishReason = "budget";
+                    budget = { limit: "duration", value: maxDurationMs };
                     break;
                 }
 
@@ -1432,9 +1626,7 @@ class Agent {
                         : {}),
                 };
 
-                const turn = streaming && emit
-                    ? await this.#chatStream(adapter, request, emit)
-                    : await this.#chat(adapter, request);
+                const turn = await chat(request);
 
                 usage = addUsage(usage, turn.usage);
                 text = turn.text;
@@ -1462,6 +1654,39 @@ class Agent {
                 messages.push(assistantTurn);
                 additions.push({ ...assistantTurn });
                 allToolCalls.push(...turn.toolCalls);
+
+                // The token/cost budget is checked **after** the assistant turn is in
+                // the conversation: the paid answer is kept, and the calls it asked for
+                // are answered with a refusal so the thread stays valid for a replay
+                const overTokens = maxTokens !== undefined && usage.totalTokens > maxTokens;
+                const overCost = maxCost !== undefined && (usage.cost ?? 0) > maxCost;
+                if (overTokens || overCost) {
+                    for (const toolCall of turn.toolCalls) {
+                        const skipped: AgentToolResultEntry = {
+                            id: toolCall.id,
+                            name: toolCall.name,
+                            args: toolCall.args,
+                            durationMs: 0,
+                            error: "Skipped: the run budget was exhausted",
+                            errorCode: "AGENT_BUDGET_EXHAUSTED",
+                        };
+                        current.toolResults.push(skipped);
+                        allToolResults.push(skipped);
+                        recordToolStats(toolStats, skipped);
+                        const toolTurn = toolTurnFor(skipped);
+                        messages.push(toolTurn);
+                        additions.push({ ...toolTurn });
+                        emit?.({ type: "tool_result", toolResult: skipped });
+                    }
+                    budget = overTokens
+                        ? { limit: "tokens", value: maxTokens! }
+                        : { limit: "cost", value: maxCost! };
+                    finishReason = "budget";
+                    steps.push(current);
+                    await call.onStepFinish?.(current);
+                    emit?.({ type: "step", step: current });
+                    break;
+                }
 
                 if (!turn.toolCalls.length) {
                     finishReason = turn.finishReason;
@@ -1555,7 +1780,7 @@ class Agent {
                     role: "user" as const,
                     content: `That answer was rejected: ${failure}. Reply with a single valid JSON object matching the schema — no markdown, no commentary.`,
                 }];
-                const turn = await this.#chat(adapter, {
+                const turn = await chat({
                     system,
                     messages: repair,
                     temperature: 0,
@@ -1588,6 +1813,10 @@ class Agent {
             object = candidate as T;
         }
 
+        // Output guardrails — the answer is checked **before** it is stored or
+        // returned: a blocked answer is not persisted, and the caller gets the reason
+        await runGuardrails(outputGuardrails, text, guardrailCtx, "answer");
+
         // A paused run stores **nothing**: the caller resumes with the conversation it
         // was handed back, and an assistant turn with unanswered calls would poison the
         // thread for the protocol
@@ -1599,8 +1828,14 @@ class Agent {
             }
         }
 
+        // A delegated run's tokens and cost are the parent's: they are what the caller
+        // pays for, and what a budget must see
+        usage = addUsage(usage, delegatedUsage);
+
         return {
             text,
+            model,
+            ...(budget ? { budget } : {}),
             ...(object !== undefined ? { object } : {}),
             ...(reasoning ? { reasoning } : {}),
             toolCalls: allToolCalls,
