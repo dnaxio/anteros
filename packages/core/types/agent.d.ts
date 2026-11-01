@@ -104,6 +104,15 @@ export type AgentGuardrails = {
     input?: AgentGuardrail[];
     /** Before the answer is returned or stored — what the model produced. */
     output?: AgentGuardrail[];
+    /**
+     * After a tool **succeeded**, on its serialized result, before the model sees
+     * it (a tool result can carry what the prompt may not).
+     *
+     * A check that throws blocks **that result**, not the run: the model reads
+     * `Error [AGENT_GUARDRAIL_BLOCKED]: …` and goes on. A failed tool result is
+     * never checked.
+     */
+    tool?: AgentGuardrail[];
 };
 
 export type AgentGuardrailContext = {
@@ -112,6 +121,10 @@ export type AgentGuardrailContext = {
     thread?: string;
     resource?: string;
     signal: AbortSignal;
+    /** Set when the check runs on a **tool result** — the tool's name. */
+    tool?: string;
+    /** Set when the check runs on a tool result — the call it answers. */
+    toolCallId?: string;
 };
 
 /**
@@ -834,6 +847,49 @@ export type AgentResume = {
     decisions: Record<string, boolean>;
 };
 
+/**
+ * What a run leaves behind at a step boundary — enough to continue it later
+ * (`agent.resumeRun()`), whatever killed the process in between.
+ *
+ * The conversation is **always valid**: an assistant turn with unanswered tool
+ * calls is never stored, so replaying it back to the model is safe.
+ */
+export type AgentRunState = {
+    runId: string;
+    agentId?: string;
+    /** Completed steps. */
+    step: number;
+    /** The whole conversation as of the last completed step — always valid (no unanswered tool call). */
+    messages: AgentMessage[];
+    usage: AgentUsage;
+    toolStats: AgentToolStats;
+    model?: string;
+    finishReason?: string;
+    /** ISO timestamp. */
+    at: string;
+};
+
+/**
+ * Durable checkpoint of a run — one state per run id, overwritten at every step
+ * boundary and cleared when the run completes.
+ *
+ * ```ts
+ * const checkpoint: AgentRunStore = {
+ *   load: (runId) => runs.get(runId),
+ *   save: (runId, state) => { runs.set(runId, state); },
+ *   clear: (runId) => { runs.delete(runId); },
+ * };
+ * ```
+ *
+ * The three methods may be synchronous; a failure of `save` never fails the run
+ * (it is logged), and the run id is the caller's identity for that run.
+ */
+export type AgentRunStore = {
+    load(runId: string): Promise<AgentRunState | undefined> | AgentRunState | undefined;
+    save(runId: string, state: AgentRunState): Promise<void> | void;
+    clear(runId: string): Promise<void> | void;
+};
+
 export type AgentCallOptions = {
     /** Thread to read from / write to the memory (same as `memory.thread`). */
     thread?: string;
@@ -933,6 +989,23 @@ export type AgentCallOptions = {
     /** Called after each model call, before its tools run. */
     onStepFinish?: (step: AgentStep) => void | Promise<void>;
     /**
+     * Observations of this run — see `AgentTraceEvent`. Overrides the agent's
+     * `onTrace`; a hook that throws is ignored (it never fails the run).
+     */
+    onTrace?: (event: AgentTraceEvent) => void;
+    /**
+     * Identifies this run in the trace (`run.start.runId`) — and the key of its
+     * durable checkpoint: with a `checkpoint` store, the run saves its state after
+     * every completed step under this id, and `agent.resumeRun(runId)` continues it.
+     * No `runId` means no checkpoint (a run without identity cannot be resumed).
+     */
+    runId?: string;
+    /**
+     * Where this run's state is saved after each completed step — overrides the
+     * agent's `checkpoint` for this call. Needs a `runId`.
+     */
+    checkpoint?: AgentRunStore;
+    /**
      * Give up on a single tool after N ms (default: the agent's `toolTimeoutMs`).
      * A tool that times out is reported to the model as an error, and the run goes on.
      */
@@ -989,6 +1062,27 @@ export type AgentToolStats = {
     durationMs: number;
 };
 
+/**
+ * One milestone of a run, handed to `onTrace` — a **plain** event, not a span.
+ *
+ * `at` is `Date.now()`; turning the events into spans (durations, parents,
+ * attributes) is the caller's job, so no tracing dependency is involved.
+ *
+ * ```ts
+ * const agent = new Agent({
+ *   …,
+ *   onTrace: (event) => console.log(event.type, event.at),
+ * });
+ * ```
+ */
+export type AgentTraceEvent =
+    | { type: "run.start"; at: number; agentId?: string; runId?: string; thread?: string; resource?: string }
+    | { type: "step.start"; at: number; step: number }
+    | { type: "model.end"; at: number; step: number; durationMs: number; model: string; usage: AgentUsage; finishReason: string }
+    | { type: "tool.start"; at: number; step: number; tool: string; toolCallId: string }
+    | { type: "tool.end"; at: number; step: number; tool: string; toolCallId: string; durationMs: number; errorCode?: string }
+    | { type: "run.end"; at: number; finishReason: string; durationMs: number; usage: AgentUsage; toolStats: AgentToolStats; error?: string };
+
 export type AgentGenerateResult<T = any> = {
     text: string;
     /** Present when a `schema` / `structuredOutput` was requested. */
@@ -1025,6 +1119,12 @@ export type AgentStreamChunk =
     | { type: "tool_call"; toolCall: AgentToolCall }
     | { type: "tool_result"; toolResult: AgentToolResultEntry }
     | { type: "step"; step: AgentStep }
+    /**
+     * A chunk of a **delegated** run, re-emitted by the parent while the sub-agent
+     * streams — `name` is the child's id. Only emitted when the parent streams;
+     * the child's text never reaches the parent's `textStream`.
+     */
+    | { type: "subagent"; name: string; chunk: AgentStreamChunk }
     | { type: "finish"; finishReason: string; usage: AgentUsage };
 
 /**
@@ -1054,6 +1154,21 @@ export type AgentStreamResult<T = any> = {
     messages: Promise<AgentMessage[]>;
     /** Stop the run — the promises resolve with what has been produced so far. */
     abort: (reason?: string) => void;
+};
+
+/**
+ * `agent.streamObject()` result — everything `stream()` returns, plus the
+ * objects parsed from the text as it arrives.
+ *
+ * `partialObjectStream` **consumes** the run's text, so a caller chooses either
+ * `textStream` or `partialObjectStream` — not both.
+ */
+export type AgentStreamObjectResult<T = any> = AgentStreamResult<T> & {
+    /**
+     * A best-effort parse of the answer so far — `undefined` until the partial
+     * JSON parses. The final, **validated** object is `result.object`.
+     */
+    partialObjectStream: AsyncIterable<T | undefined>;
 };
 
 /** Instructions — static text, or computed per call (A/B tests, dynamic prompts). */
@@ -1245,6 +1360,17 @@ export type AgentConfig = {
     guardrails?: AgentGuardrails;
     /** Store a failed run's conversation by default — see `AgentCallOptions`. */
     savePartial?: boolean;
+    /**
+     * Default durable checkpoint — a run that declares a `runId` saves its state
+     * after each completed step there, and `resumeRun()` continues it. A call's own
+     * `checkpoint` wins. See `AgentRunStore`.
+     */
+    checkpoint?: AgentRunStore;
+    /**
+     * Observe every run of this agent — see `AgentTraceEvent`. A call's own
+     * `onTrace` takes precedence; a hook that throws never fails the run.
+     */
+    onTrace?: (event: AgentTraceEvent) => void;
     /**
      * Other agents exposed to this one **as tools** — the model decides when to
      * delegate: `agents: [researcher]` (an agent definition, usually the default

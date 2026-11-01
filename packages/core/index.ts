@@ -6,6 +6,7 @@ import { useRest } from "./database/rest";
 import { AppError } from "./lib/error";
 import { Agent } from "./lib/agent";
 import { agents } from "./lib/agents";
+import { evaluateAgent } from "./lib/eval";
 import { endpoints } from "./lib/endpoints";
 import * as v from "joi";
 import utils from "./utils";
@@ -46,6 +47,7 @@ export {
     logger,
     Agent,
     agents,
+    evaluateAgent,
     endpoints,
 }
 
@@ -54,6 +56,16 @@ export type {
     AgentRecallHit,
     AgentRecallQuery,
     AgentRecallRecord,
+    AgentRunState,
+    AgentRunStore,
     AgentSemanticRecallOptions,
+    AgentTraceEvent,
 } from "./types/agent";
+
+export type {
+    AgentEvalCase,
+    AgentEvalCaseReport,
+    AgentEvalGrader,
+    AgentEvalReport,
+} from "./lib/eval";
 
