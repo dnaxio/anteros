@@ -38,6 +38,10 @@ function joiToJsonSchema(schema: Joi.Schema, describe = schema.describe() as any
             }
             node.properties = properties;
             if (required.length) node.required = required;
+            // The model is told to stay inside the declared shape. Joi still tolerates
+            // unknown keys at validation time (`allowUnknown`) — the schema is the
+            // stricter of the two on purpose: a stray key costs tokens and attention.
+            node.additionalProperties = describe.flags?.unknown === true;
             break;
         }
         case 'array': {
@@ -73,6 +77,10 @@ function joiToJsonSchema(schema: Joi.Schema, describe = schema.describe() as any
     }
 
     if (describe?.flags?.description) node.description = describe.flags.description;
+    // A default is part of what the model should know: it can omit a field instead of
+    // inventing a value. A function default cannot travel — it is applied at validation.
+    const fallback = describe?.flags?.default;
+    if (fallback !== undefined && typeof fallback !== 'function') node.default = fallback;
     return node;
 }
 

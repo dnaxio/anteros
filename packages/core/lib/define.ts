@@ -199,7 +199,11 @@ function Agent(config: AgentConfig & { id: string; description: string }): Agent
  * The `id` is **required** (it is the name the model calls).
  * A `define.McpTool` is accepted by an agent as-is.
  */
-function Tool(tool: AgentToolDefinition): AgentToolDefinition {
+function Tool<S extends import("zod").ZodType>(
+    tool: AgentToolDefinition<import("zod").output<S>> & { inputSchema: S },
+): AgentToolDefinition<import("zod").output<S>>;
+function Tool<TInput = any>(tool: AgentToolDefinition<TInput>): AgentToolDefinition<TInput>;
+function Tool(tool: AgentToolDefinition<any>): AgentToolDefinition<any> {
     return {
         ...tool,
         enabled: tool.enabled ?? true,

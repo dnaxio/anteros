@@ -256,6 +256,7 @@ function streamResponse(
                     object: await stream.object,
                     toolCalls: await stream.toolCalls,
                     toolResults: await stream.toolResults,
+                    toolStats: await stream.toolStats,
                     steps: await stream.steps,
                     usage: await stream.usage,
                     finishReason: await stream.finishReason,

@@ -594,7 +594,7 @@ describe("Agent", () => {
         expect(definition._isAgent_).toBe(true);
         expect(definition.enabled).toBe(true);
 
-        const tool = define.Tool({ id: "t", execute: () => 1 });
+        const tool = define.Tool({ id: "t", description: "t", execute: () => 1 });
         expect(tool._isTool_).toBe(true);
         expect(tool.enabled).toBe(true);
     });
@@ -757,7 +757,7 @@ describe("agent.generate", () => {
 
         expect(cities).toEqual([]);
         expect(at(result.toolResults, 0).error).toContain("Invalid arguments for tool 'forecast'");
-        expect(request(provider, 1).body.messages[3].content).toContain("Error:");
+        expect(request(provider, 1).body.messages[3].content).toContain("Error [AGENT_TOOL_ARGS_INVALID]:");
     });
 
     it("reports an unknown tool and a throwing tool, and keeps going", async () => {
@@ -770,7 +770,7 @@ describe("agent.generate", () => {
 
         const agent = makeAgent({
             tools: {
-                boom: define.Tool({ id: "boom", execute: () => { throw new Error("kaboom"); } }),
+                boom: define.Tool({ id: "boom", description: "Fails", execute: () => { throw new Error("kaboom"); } }),
             },
         }, { baseUrl: provider.url });
 

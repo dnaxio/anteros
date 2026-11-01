@@ -67,6 +67,12 @@ async function loadSiblingTools(agentFile: string): Promise<Record<string, Agent
             logger.warn(`A tool in '${file}' has no id — ignored (define.Tool requires one)`);
             continue;
         }
+        // The description is the whole prompt of the tool: without it the model cannot
+        // choose it, and an unnamed capability in the toolbox is worse than none.
+        if (!String(tool.description ?? "").trim()) {
+            logger.warn(`Tool '${tool.id}' in '${file}' has no description — ignored (the model cannot choose it)`);
+            continue;
+        }
         tools[tool.id] = tool;
     }
 

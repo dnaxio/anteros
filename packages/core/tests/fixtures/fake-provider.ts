@@ -87,6 +87,25 @@ export function openaiTool(name: string, args: any, id = "call_1"): Response {
     });
 }
 
+/** Several tool calls in one assistant turn — what a model does in parallel. */
+export function openaiToolCalls(calls: Array<{ name: string; args: any; id?: string }>): Response {
+    return Response.json({
+        choices: [{
+            message: {
+                role: "assistant",
+                content: null,
+                tool_calls: calls.map((call, index) => ({
+                    id: call.id ?? `call_${index + 1}`,
+                    type: "function",
+                    function: { name: call.name, arguments: JSON.stringify(call.args) },
+                })),
+            },
+            finish_reason: "tool_calls",
+        }],
+        usage: USAGE,
+    });
+}
+
 export function openaiStream(pieces: string[]): Response {
     const events = pieces.map((text) => JSON.stringify({ choices: [{ delta: { content: text } }] }));
     events.push(JSON.stringify({ choices: [], usage: USAGE }));
@@ -108,6 +127,20 @@ export function anthropicText(text: string, stopReason = "end_turn"): Response {
 export function anthropicTool(name: string, input: any, id = "toolu_1"): Response {
     return Response.json({
         content: [{ type: "tool_use", id, name, input }],
+        stop_reason: "tool_use",
+        usage: A_USAGE,
+    });
+}
+
+/** Several `tool_use` blocks in one turn (Anthropic's parallel calls). */
+export function anthropicToolCalls(calls: Array<{ name: string; input: any; id?: string }>): Response {
+    return Response.json({
+        content: calls.map((call, index) => ({
+            type: "tool_use",
+            id: call.id ?? `toolu_${index + 1}`,
+            name: call.name,
+            input: call.input,
+        })),
         stop_reason: "tool_use",
         usage: A_USAGE,
     });

@@ -55,7 +55,9 @@ function invalid(message: string): AppError {
 
 /** A tool result as the model reads it — the same rendering the runtime uses. */
 function serializeToolResult(entry: AgentToolResultEntry): string {
-    if (entry.error) return `Error: ${entry.error}`;
+    // The code travels with the message, so the model can branch on the cause
+    // (`ORDER_NOT_FOUND`, `AGENT_TOOL_TIMEOUT`…) instead of parsing English.
+    if (entry.error) return entry.errorCode ? `Error [${entry.errorCode}]: ${entry.error}` : `Error: ${entry.error}`;
     const result = entry.result;
     if (typeof result === "string") return result;
     if (result && typeof result === "object" && Array.isArray((result as any).content)) {
@@ -63,6 +65,10 @@ function serializeToolResult(entry: AgentToolResultEntry): string {
             .filter((block: any) => block?.type === "text" && typeof block.text === "string")
             .map((block: any) => block.text);
         if (texts.length) return texts.join("\n");
+        // Media-only result — the text answer is a marker, the media travels beside it.
+        if ((result as any).content.some((block: any) => MEDIA_BLOCK.test(String(block?.type)))) {
+            return toolMediaOf((result as any).content).map(mediaMarker).join("\n");
+        }
     }
     if (result === undefined || result === null) return "OK";
     try {
@@ -70,6 +76,51 @@ function serializeToolResult(entry: AgentToolResultEntry): string {
     } catch {
         return String(result);
     }
+}
+
+/** A tool result block that carries bytes (MCP spells documents `document`). */
+/** A media block a tool result may carry — text is handled separately. */
+type ToolMediaPart = Extract<AgentMediaPart, { type: "image" } | { type: "file" }>;
+
+const MEDIA_BLOCK = /^(image|file|document)$/;
+
+function toolMediaOf(content: any[]): ToolMediaPart[] {
+    const media: ToolMediaPart[] = [];
+    for (const block of content) {
+        const type = String(block?.type ?? "");
+        if (!MEDIA_BLOCK.test(type)) continue;
+        const mimeType = typeof block.mimeType === "string"
+            ? block.mimeType
+            : (typeof block.mime_type === "string" ? block.mime_type : undefined);
+        if (type === "image") {
+            const data = typeof block.data === "string" ? block.data : undefined;
+            const url = typeof block.url === "string" ? block.url : undefined;
+            if (data || url) media.push({ type: "image", ...(url ? { url } : { data }), ...(mimeType ? { mimeType } : {}) });
+            continue;
+        }
+        const data = typeof block.data === "string" ? block.data : undefined;
+        const url = typeof block.url === "string" ? block.url : undefined;
+        if (!data && !url) continue;
+        media.push({
+            type: "file",
+            ...(url ? { url } : { data }),
+            ...(mimeType ? { mimeType } : {}),
+            ...(block.name ?? block.filename ? { name: String(block.name ?? block.filename) } : {}),
+        });
+    }
+    return media;
+}
+
+/** What a text-only protocol (OpenAI) shows of a media tool result. */
+function mediaMarker(part: ToolMediaPart): string {
+    return part.type === "image" ? `[image: ${part.mimeType ?? "image/png"}]` : `[file: ${part.name ?? part.mimeType ?? "file"}]`;
+}
+
+/** The media a tool returned, when its result is `{ content: […] }`. */
+function toolResultMedia(entry: AgentToolResultEntry): ToolMediaPart[] {
+    const result = entry.result;
+    if (entry.error || !result || typeof result !== "object" || !Array.isArray((result as any).content)) return [];
+    return toolMediaOf((result as any).content);
 }
 
 /** The text of a part array — a `system` message is text and nothing else. */
@@ -428,4 +479,4 @@ async function normalizeMessages(input: AgentInput): Promise<AgentMessage[]> {
     return out;
 }
 
-export { normalizeMessages, serializeToolResult };
+export { normalizeMessages, serializeToolResult, toolResultMedia };

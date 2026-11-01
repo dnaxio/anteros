@@ -3,7 +3,7 @@ import { DEFAULT_REDACT_KEYS, isSensitiveKey, redactKeys } from "./redact";
 import { toJsonSchema, validateWithSchema } from "./jsonSchema";
 import { InMemoryAgentMemory, trimMessages } from "./agentMemory";
 import { forMemory, resolveAttachments } from "./attachment";
-import { normalizeMessages, serializeToolResult } from "./messages";
+import { normalizeMessages, serializeToolResult, toolResultMedia } from "./messages";
 import { mcpToolsFor } from "./mcpClient";
 import { skillsBlock } from "./skills";
 import {
@@ -44,6 +44,7 @@ import type {
     AgentToolContext,
     AgentToolMessage,
     AgentToolResultEntry,
+    AgentToolStats,
     AgentTools,
     AgentUsage,
     AgentWorkingMemory,
@@ -360,6 +361,32 @@ async function withTimeout<T>(work: Promise<T>, ms: number, name: string): Promi
     }
 }
 
+/** Run `work` over `items` with at most `limit` in flight, preserving order. */
+async function mapLimited<T, R>(items: T[], limit: number, work: (item: T, index: number) => Promise<R>): Promise<R[]> {
+    const out = new Array<R>(items.length);
+    let next = 0;
+    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+        while (true) {
+            const index = next++;
+            if (index >= items.length) return;
+            out[index] = await work(items[index]!, index);
+        }
+    });
+    await Promise.all(workers);
+    return out;
+}
+
+/** Fold one tool result into the run's aggregate (`result.toolStats`). */
+function recordToolStats(stats: AgentToolStats, entry: AgentToolResultEntry): void {
+    stats.calls += 1;
+    stats.durationMs += entry.durationMs;
+    if (!entry.error) return;
+    stats.errors += 1;
+    const code = entry.errorCode ?? "AGENT_TOOL_FAILED";
+    stats.byCode[code] = (stats.byCode[code] ?? 0) + 1;
+    if (code === "AGENT_TOOL_TIMEOUT") stats.timeouts += 1;
+}
+
 /**
  * The tool calls the conversation has not answered yet — the ones of its last
  * assistant turn that carries calls, minus the `tool` turns that follow. That is
@@ -381,11 +408,26 @@ function unansweredToolCalls(messages: AgentMessage[]): AgentToolCall[] {
 
 /** The `tool` turn a result becomes in the conversation — one shape, one place. */
 function toolTurnFor(result: AgentToolResultEntry): AgentMessage {
+    const media = toolResultMedia(result);
+    if (!media.length) {
+        return {
+            role: "tool",
+            toolCallId: result.id,
+            name: result.name,
+            content: serializeToolResult(result),
+            isError: !!result.error,
+        };
+    }
+    // Media travels **beside** the text: Anthropic accepts image/document blocks in a
+    // `tool_result`; a text-only protocol gets the marker `serializeToolResult` built.
+    const text = serializeToolResult(result);
+    const content: any[] = text ? [{ type: "text", text }] : [];
+    content.push(...media);
     return {
         role: "tool",
         toolCallId: result.id,
         name: result.name,
-        content: serializeToolResult(result),
+        content,
         isError: !!result.error,
     };
 }
@@ -945,12 +987,13 @@ class Agent {
         const object = deferred<T | undefined>();
         const toolCalls = deferred<AgentToolCall[]>();
         const toolResults = deferred<AgentToolResultEntry[]>();
+        const toolStats = deferred<AgentToolStats>();
         const steps = deferred<AgentStep[]>();
         const usage = deferred<AgentUsage>();
         const finishReason = deferred<string>();
         const messages = deferred<AgentMessage[]>();
 
-        const deferreds = [text, reasoning, object, toolCalls, toolResults, steps, usage, finishReason, messages];
+        const deferreds = [text, reasoning, object, toolCalls, toolResults, toolStats, steps, usage, finishReason, messages];
 
         // The caller may only consume `textStream` — a rejected promise nobody
         // awaits must not become an unhandled rejection.
@@ -966,6 +1009,7 @@ class Agent {
                 object.resolve(result.object);
                 toolCalls.resolve(result.toolCalls);
                 toolResults.resolve(result.toolResults);
+                toolStats.resolve(result.toolStats);
                 steps.resolve(result.steps);
                 usage.resolve(result.usage);
                 finishReason.resolve(result.finishReason);
@@ -989,6 +1033,7 @@ class Agent {
             object: object.promise,
             toolCalls: toolCalls.promise,
             toolResults: toolResults.promise,
+            toolStats: toolStats.promise,
             steps: steps.promise,
             usage: usage.promise,
             finishReason: finishReason.promise,
@@ -1178,12 +1223,14 @@ class Agent {
         const tool = tools.get(call.name);
         if (!tool) {
             entry.error = `Unknown tool '${call.name}'`;
+            entry.errorCode = "AGENT_TOOL_UNKNOWN";
             return done();
         }
 
         const { value, error } = await validateWithSchema(tool.inputSchema, call.args);
         if (error) {
             entry.error = `Invalid arguments for tool '${call.name}': ${error}`;
+            entry.errorCode = "AGENT_TOOL_ARGS_INVALID";
             return done();
         }
 
@@ -1216,6 +1263,7 @@ class Agent {
             return done();
         } catch (err: any) {
             entry.error = err?.message ?? String(err);
+            entry.errorCode = err?.code ? String(err.code) : "AGENT_TOOL_FAILED";
             return done();
         }
     }
@@ -1247,6 +1295,10 @@ class Agent {
         // Per-tool deadline and tool parallelism: the call wins over the declaration
         const toolTimeout = call.toolTimeoutMs ?? this.#config.toolTimeoutMs;
         const parallel = call.parallelTools ?? this.#config.parallelTools ?? false;
+        const maxParallelToolCalls = Math.max(
+            1,
+            Math.trunc(call.maxParallelToolCalls ?? this.#config.maxParallelToolCalls ?? 8),
+        );
         const savePartial = call.savePartial ?? this.#config.savePartial ?? false;
 
         // Resuming a paused run: the conversation is the caller's — the paused step is
@@ -1312,6 +1364,7 @@ class Agent {
         const steps: AgentStep[] = [];
         const allToolCalls: AgentToolCall[] = [];
         const allToolResults: AgentToolResultEntry[] = [];
+        const toolStats: AgentToolStats = { calls: 0, errors: 0, byCode: {}, timeouts: 0, durationMs: 0 };
         let usage: AgentUsage = { ...EMPTY_USAGE };
         let text = "";
         let reasoning = "";
@@ -1433,12 +1486,17 @@ class Agent {
                 }
 
                 // The tools of one step: sequential by default (two writes must not
-                // interleave), together when the caller asks for it. The results are
-                // attached in the model's order either way.
+                // interleave), together when the caller asks for it **or** when every
+                // call is read-only. The results are attached in the model's order
+                // either way, and at most `maxParallelToolCalls` run at once.
                 const entries: AgentToolResultEntry[] = [];
-                if (parallel) {
-                    entries.push(...await Promise.all(
-                        turn.toolCalls.map((toolCall) => this.#executeTool(toolCall, tools, step, signal, toolTimeout)),
+                const readOnlyStep = turn.toolCalls.length > 1
+                    && turn.toolCalls.every((toolCall) => tools.get(toolCall.name)?.readOnly === true);
+                if ((parallel || readOnlyStep) && turn.toolCalls.length > 1) {
+                    entries.push(...await mapLimited(
+                        turn.toolCalls,
+                        maxParallelToolCalls,
+                        (toolCall) => this.#executeTool(toolCall, tools, step, signal, toolTimeout),
                     ));
                 } else {
                     for (const toolCall of turn.toolCalls) {
@@ -1450,6 +1508,7 @@ class Agent {
                     const result = entries[index]!;
                     current.toolResults.push(result);
                     allToolResults.push(result);
+                    recordToolStats(toolStats, result);
                     const toolTurn = toolTurnFor(result);
                     messages.push(toolTurn);
                     additions.push({ ...toolTurn });
@@ -1546,6 +1605,7 @@ class Agent {
             ...(reasoning ? { reasoning } : {}),
             toolCalls: allToolCalls,
             toolResults: allToolResults,
+            toolStats,
             steps,
             usage,
             finishReason,

@@ -1,4 +1,5 @@
 import type Joi from "joi";
+import type { z } from "zod";
 import type { useRest } from "../database/rest";
 import type { fn } from "../lib/error";
 import type { jwt } from "../utils/func";
@@ -238,7 +239,13 @@ export type AgentToolMessage = {
     /** Id of the `tool_use` / `tool_call` this message answers. */
     toolCallId: string;
     name: string;
-    content: string;
+    /**
+     * What the model reads. Text is the default; a tool may also return **media**
+     * (`{ content: [{ type: 'image', … }] }`) — Anthropic receives the image as a
+     * `tool_result` block, OpenAI only text plus a marker (its tool message is
+     * text-only), and the stored thread keeps a marker, never the base64.
+     */
+    content: string | AgentMediaPart[];
     isError?: boolean;
 };
 
@@ -291,6 +298,12 @@ export type AgentToolResultEntry = {
     result?: any;
     /** Set when the tool threw, was unknown, or its arguments were invalid. */
     error?: string;
+    /**
+     * Stable code of that failure — `AGENT_TOOL_FAILED`, `AGENT_TOOL_TIMEOUT`,
+     * `AGENT_TOOL_ARGS_INVALID`, `AGENT_TOOL_UNKNOWN`, or the `AppError` code the
+     * tool threw. The model reads it as `Error [CODE]: message`, so it can branch.
+     */
+    errorCode?: string;
     durationMs: number;
 };
 
@@ -364,6 +377,12 @@ export type AgentTool = {
     /** Shown to the model — say what it does and when to use it. */
     description?: string;
     enabled?: boolean;
+    /**
+     * The tool only **reads** — it may run concurrently with the other read-only
+     * tools of the same step, even when `parallelTools` is off. A tool that writes
+     * stays sequential: two writes must not interleave.
+     */
+    readOnly?: boolean;
     /** Arguments schema: Joi, zod or a plain JSON Schema (defaults to an open object). */
     inputSchema?: Joi.Schema | any;
     /** Handler. The returned value is serialized back to the model. */
@@ -387,8 +406,26 @@ export type AgentTool = {
     approval?: boolean;
 };
 
-/** What a tool must carry to be **declared** — `define.Tool` enforces the id. */
-export type AgentToolDefinition = AgentTool & { id: string };
+/**
+ * What a tool must carry to be **declared** — `define.Tool` enforces the `id`
+ * **and** the `description`: a tool the model cannot understand is a tool it cannot
+ * choose, so both are required at the type level.
+ *
+ * `TInput` is the handler's input. It is **inferred** from a zod schema
+ * (`z.output`); Joi has no type inference, so give it explicitly:
+ *
+ * ```ts
+ * define.Tool({ inputSchema: z.object({ city: z.string() }), execute: ({ city }) => … });
+ * define.Tool<{ city: string }>({ inputSchema: v.object({ city: … }), execute: ({ city }) => … });
+ * ```
+ */
+export type AgentToolDefinition<TInput = any> = Omit<AgentTool, "inputSchema" | "execute"> & {
+    id: string;
+    description: string;
+    /** Joi (`v`), zod, or a plain JSON Schema. */
+    inputSchema?: Joi.Schema | z.ZodType | any;
+    execute?: (input: TInput, ctx: AgentToolContext) => any | Promise<any>;
+};
 
 export type AgentTools = Record<string, AgentTool> | AgentTool[];
 
@@ -846,9 +883,15 @@ export type AgentCallOptions = {
      * Run the tools of one step **in parallel** (default `false` — sequential).
      *
      * Only safe when the tools do not write to the same place: two calls of the same
-     * tool with the same target can interleave. Read-only tools are the point.
+     * tool with the same target can interleave. Read-only tools (`readOnly: true`)
+     * already run together without this flag.
      */
     parallelTools?: boolean;
+    /**
+     * How many tool calls of one step may be in flight at once (default `8`).
+     * A model that emits 50 calls in a turn must not open 50 outbound requests.
+     */
+    maxParallelToolCalls?: number;
     /**
      * Store what the run produced even when it **fails** (default `false`).
      *
@@ -864,6 +907,20 @@ export type AgentCallOptions = {
     resume?: AgentResume;
 };
 
+/** Aggregate of the tool calls of one run — what `result.toolStats` carries. */
+export type AgentToolStats = {
+    /** Calls executed (unknown tools and invalid arguments included). */
+    calls: number;
+    /** Calls that failed, whatever the cause. */
+    errors: number;
+    /** Failures by code (`AGENT_TOOL_TIMEOUT`, `AGENT_TOOL_UNKNOWN`…). */
+    byCode: Record<string, number>;
+    /** Abandoned at their deadline (`AGENT_TOOL_TIMEOUT`). */
+    timeouts: number;
+    /** Sum of the durations of every call, in milliseconds. */
+    durationMs: number;
+};
+
 export type AgentGenerateResult<T = any> = {
     text: string;
     /** Present when a `schema` / `structuredOutput` was requested. */
@@ -872,6 +929,8 @@ export type AgentGenerateResult<T = any> = {
     reasoning?: string;
     toolCalls: AgentToolCall[];
     toolResults: AgentToolResultEntry[];
+    /** Aggregate of every tool call of the run — counts, failures, time. */
+    toolStats: AgentToolStats;
     steps: AgentStep[];
     usage: AgentUsage;
     finishReason: string;
@@ -911,6 +970,8 @@ export type AgentStreamResult<T = any> = {
     object: Promise<T | undefined>;
     toolCalls: Promise<AgentToolCall[]>;
     toolResults: Promise<AgentToolResultEntry[]>;
+    /** Aggregate of every tool call of the run — same as `generate()`. */
+    toolStats: Promise<AgentToolStats>;
     steps: Promise<AgentStep[]>;
     usage: Promise<AgentUsage>;
     finishReason: Promise<string>;
@@ -1094,6 +1155,8 @@ export type AgentConfig = {
     toolTimeoutMs?: number;
     /** Run the tools of one step in parallel by default — see `AgentCallOptions`. */
     parallelTools?: boolean;
+    /** Cap the tool calls in flight per step — see `AgentCallOptions`. */
+    maxParallelToolCalls?: number;
     /** Store a failed run's conversation by default — see `AgentCallOptions`. */
     savePartial?: boolean;
     /**

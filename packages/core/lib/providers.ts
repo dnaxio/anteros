@@ -201,6 +201,23 @@ function openaiContent(content: string | AgentMediaPart[]): any {
     });
 }
 
+/** A tool message's text, with a marker for the media a text-only protocol cannot take. */
+function toolText(content: string | AgentMediaPart[]): string {
+    if (typeof content === "string") return content;
+    return content.map((part) => {
+        switch (part.type) {
+            case "text":
+                return part.text;
+            case "image":
+                return `[image: ${part.mimeType ?? "image/png"}]`;
+            case "file":
+                return `[file: ${part.name ?? part.mimeType ?? "file"}]`;
+            default:
+                return "";
+        }
+    }).filter(Boolean).join("\n");
+}
+
 /** `AgentMessage[]` → OpenAI `messages[]`. */
 function openaiMessages(system: string | undefined, messages: AgentMessage[]): any[] {
     const out: any[] = [];
@@ -229,7 +246,8 @@ function openaiMessages(system: string | undefined, messages: AgentMessage[]): a
                 break;
             }
             case "tool":
-                out.push({ role: "tool", tool_call_id: message.toolCallId, content: message.content });
+                // OpenAI's tool message is text-only: a media result arrives as a marker
+                out.push({ role: "tool", tool_call_id: message.toolCallId, content: toolText(message.content) });
                 break;
         }
     }
@@ -296,7 +314,13 @@ function anthropicMessages(messages: AgentMessage[]): { system: string | undefin
                 break;
             }
             case "tool": {
-                const block: any = { type: "tool_result", tool_use_id: message.toolCallId, content: message.content };
+                // A string stays a string; a part array (text + image/document) is
+                // converted block by block — `tool_result` accepts both.
+                const block: any = {
+                    type: "tool_result",
+                    tool_use_id: message.toolCallId,
+                    content: typeof message.content === "string" ? message.content : anthropicContent(message.content),
+                };
                 if (message.isError) block.is_error = true;
                 const last = out[out.length - 1];
                 if (last?.role === "user" && Array.isArray(last.content)
