@@ -72,6 +72,7 @@ bun run index.ts
 | `@anteros/cli` | The `anteros` binary — `create`, `dev`, `doctor` |
 | `@anteros/sdk` | Typed client for the HTTP API |
 | `@anteros/duckdb` | DuckDB over the Quack protocol — instance, attached client, server, the `antd` CLI, FTS, VSS, retention |
+| `@anteros/reco` | Face detection and ArcFace embeddings — InsightFace `buffalo_l` on ONNX Runtime, locally |
 
 Agents and their tools live under `{tenant.dir}/ai/`:
 

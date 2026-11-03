@@ -1,0 +1,41 @@
+{
+  "name": "@anteros/reco",
+  "version": "0.0.1",
+  "description": "Anteros face recognition — InsightFace detection and ArcFace embeddings on ONNX Runtime, locally",
+  "main": "index.ts",
+  "module": "index.ts",
+  "types": "index.ts",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "files": [
+    "lib",
+    "scripts",
+    "types",
+    "index.ts",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./index.ts",
+      "import": "./index.ts",
+      "default": "./index.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "models": "bun run scripts/download-models.ts",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "onnxruntime-node": "^1.31.1",
+    "sharp": "^0.35.5"
+  }
+}

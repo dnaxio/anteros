@@ -33,6 +33,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .env.production.local
 .env.local
 
+# ONNX weights (downloaded, not committed)
+/models/
+packages/reco/models/
+
 # caches
 .eslintcache
 .cache
