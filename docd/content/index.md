@@ -6,7 +6,11 @@ seo:
   description: The backend for your whole team — Bun runtime, MongoDB, multi-tenant architecture, AI agents, real-time, caching, crypto, workflows, MCP tools, files and audit trail.
 ---
 
-::landing-hero{:siteName='"Anteros"' :badge='{"label":"v0.0.41","text":"Now available","href":"/docs/getting-started/quick-start"}' :headline='"Build backends at light speed."' :description='"The backend for your whole team — Bun runtime, MongoDB, multi-tenancy, realtime, caching, workflows, AI agents, MCP tools and a built-in audit trail. All in one."' :navLinks='[{"label":"Docs","href":"/docs/getting-started/introduction"},{"label":"Quick Start","href":"/docs/getting-started/quick-start"},{"label":"AI","href":"/docs/ai/agents"},{"label":"CLI","href":"/docs/cli/installation"},{"label":"Reference","href":"/docs/reference/configuration"}]' :primaryCta='{"label":"Get Started","href":"/docs/getting-started/quick-start"}' :secondaryCta='{"label":"Read the docs","href":"/docs/getting-started/introduction"}'}
+::landing-hero{:siteName='"Anteros"' :headline='"Build backends at light speed."' :description='"The backend for your whole team — Bun runtime, MongoDB, multi-tenancy, realtime, caching, workflows, AI agents, MCP tools and a built-in audit trail. All in one."' :navLinks='[{"label":"Docs","href":"/docs/getting-started/introduction"},{"label":"Quick Start","href":"/docs/getting-started/quick-start"},{"label":"AI","href":"/docs/ai/agents"},{"label":"CLI","href":"/docs/cli/installation"},{"label":"Reference","href":"/docs/reference/configuration"}]' :primaryCta='{"label":"Get Started","href":"/docs/getting-started/quick-start"}' :secondaryCta='{"label":"Read the docs","href":"/docs/getting-started/introduction"}'}
+
+#badge
+  ::landing-version-badge
+  ::
 
 ::
 

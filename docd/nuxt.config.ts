@@ -1,5 +1,20 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+/**
+ * The landing badge shows the version of `@anteros/core` actually in the monorepo,
+ * so a release can never leave a stale `vX.Y.Z` on the home page.
+ */
+const coreVersion = JSON.parse(
+  readFileSync(fileURLToPath(new URL("../packages/core/package.json", import.meta.url)), "utf8"),
+).version as string;
+
 export default defineNuxtConfig({
   extends: ["@baybreezy/docd"],
+
+  runtimeConfig: {
+    public: { coreVersion },
+  },
 
   site: {
     name: "Anteros",
