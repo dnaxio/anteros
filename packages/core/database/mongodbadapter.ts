@@ -38,6 +38,25 @@ function isProcessAlive(pid: number): boolean {
         return err?.code === 'EPERM';
     }
 }
+
+/**
+ * Resolve a collection definition or fail with the framework's own error.
+ *
+ * The `@CheckIfCollectionExists()` guard runs before the method, but the definition set
+ * can be replaced between the guard and the second lookup (a reload, or a deferred
+ * factory such as the query cache). Never cast `getCollection()` to `Collection` — a
+ * vanished definition would turn into `null is not an object (evaluating 'col.hooks')`.
+ */
+function requireCollection(collectionName: string, tenantId: string): Collection {
+    const col = getCollection(collectionName, tenantId)
+    if (!col) {
+        throw new AppError(`collection '${collectionName}' not found`, {
+            code: 'COLLECTION_NOT_FOUND',
+            status: 500,
+        })
+    }
+    return col
+}
 import { MongoClient, ObjectId, AggregationCursor } from "mongodb";
 import type { FindOptions, findOneOptions } from "../types/mongo";
 import type { FindCallOptions } from "../types/mongo";
@@ -387,7 +406,7 @@ class MongoRest {
         func.boundMatchOperators(pipeline)
         // Audited with the parameters only — the change stream itself is a live object
         return this.#executeWithAudit('watch', collection, { pipeline, options }, async () => {
-            const col = getCollection(collection, this.#tenant.id) as Collection
+            const col = requireCollection(collection, this.#tenant.id)
             const isSafe = func.isSafeAggregatePipeline(pipeline);
             if (!isSafe.isSafe) {
                 throw isSafe.error;
@@ -408,7 +427,7 @@ class MongoRest {
         const action = 'aggregate' as ActionsApiList
         return this.#executeReadWithAudit(action, collection, { pipeline }, async () => {
             try {
-                const col = getCollection(collection, this.#tenant.id) as Collection
+                const col = requireCollection(collection, this.#tenant.id)
                 // Flaw 12: restrict $lookup targets to this tenant's declared collections
                 const allowedCollections = [
                     ...(cfg.collections ?? [])
@@ -489,7 +508,7 @@ class MongoRest {
         const countPromise = withCount
             ? this.countDocuments(collection, params.$match ?? {})
             : null;
-        const col = getCollection(collection, this.#tenant.id) as Collection
+        const col = requireCollection(collection, this.#tenant.id)
         let pipeline = func.buildPipeline({ ...params, $limit: params.$limit ?? 0 }, { col: col })
         pipeline = await func.buildInput(pipeline, { rest: this })
         pipeline = func.toBson(pipeline, { col })
@@ -565,7 +584,7 @@ class MongoRest {
         // `break`/`return()` — which triggers the `finally` below). Parameters only.
         const start = Date.now();
         let failure: any = null;
-        const col = getCollection(collection, this.#tenant.id) as Collection
+        const col = requireCollection(collection, this.#tenant.id)
         const allowedCollections = [
             ...(cfg.collections ?? []).filter((c) => c._tenant_ === this.tenant_id).map((c) => c.slug),
             ...(cfg.fileCollections ?? []).filter((fc) => fc._tenant_ === this.tenant_id).map((fc) => fc.slug),
@@ -624,11 +643,13 @@ class MongoRest {
     @CheckIfCollectionExists()
     async find(collection: string, params: FindOptions = {}, options: FindCallOptions = {}): Promise<Document[]> {
         const action = 'find' as ActionsApiList
+        // Resolve once, before any await: a cache-miss factory may run later, after the
+        // definition set was replaced — the call keeps the collection it started with.
+        const col = requireCollection(collection, this.#tenant.id)
         return this.#executeReadWithAudit(action, collection, { params, options }, async () => {
             try {
                 // Real query — hooks + pipeline + toArray
                 const run = async (): Promise<Document[]> => {
-                    const col = getCollection(collection, this.#tenant.id) as Collection
                     let pipeline = func.buildPipeline(params, { col: col })
                     pipeline = await func.buildInput(pipeline, { rest: this })
                     pipeline = func.toBson(pipeline, { col })
@@ -669,7 +690,7 @@ class MongoRest {
         const action = 'findOne' as ActionsApiList
         return this.#executeReadWithAudit(action, collection, { id: _id, params }, async () => {
             try {
-                const col = getCollection(collection, this.#tenant.id) as Collection
+                const col = requireCollection(collection, this.#tenant.id)
                 let pipeline = func.buildPipeline({
                     ...params,
                     $match: { _id },
@@ -707,7 +728,7 @@ class MongoRest {
     async insertOne<T>(collection: string, data: T): Promise<T & { _id: string }> {
         const action = 'insertOne' as ActionsApiList
         return this.#executeWithAudit(action, collection, { data }, async () => {
-            const col = getCollection(collection, this.#tenant.id) as Collection
+            const col = requireCollection(collection, this.#tenant.id)
 
             data = await func.buildInput(data as T, {
                 action: action, col: col, rest: this
@@ -744,7 +765,7 @@ class MongoRest {
     async insertMany<T>(collection: string, data: T[]): Promise<(T & { _id: string })[]> {
         const action = 'insertMany' as ActionsApiList
         return this.#executeWithAudit(action, collection, { count: data.length }, async () => {
-            const col = getCollection(collection, this.#tenant.id) as Collection
+            const col = requireCollection(collection, this.#tenant.id)
             let dataInput: T[] = []
 
             for (let d of data) {
@@ -790,7 +811,7 @@ class MongoRest {
     async updateOne(collection: string, _id: string, update: UpdateFilter<any>) {
         const action = 'updateOne' as ActionsApiList
         return this.#executeWithAudit(action, collection, { id: _id, update }, async () => {
-            const col = getCollection(collection, this.#tenant.id) as Collection
+            const col = requireCollection(collection, this.#tenant.id)
 
             if (update.$set) {
                 update.$set = await func.buildInput(update.$set, { action: action, col: col })
@@ -832,7 +853,7 @@ class MongoRest {
         func.assertSafeFilter(filter)
         const action = 'findOneAndUpdate' as ActionsApiList
         return this.#executeWithAudit(action, collection, { filter, update, options }, async () => {
-            const col = getCollection(collection, this.#tenant.id) as Collection
+            const col = requireCollection(collection, this.#tenant.id)
 
 
 
@@ -902,7 +923,7 @@ class MongoRest {
     async updateMany(collection: string, _ids: string[], update: UpdateFilter<any>): Promise<UpdateResult> {
         const action = 'updateMany' as ActionsApiList
         return this.#executeWithAudit(action, collection, { ids: _ids, update }, async () => {
-            const col = getCollection(collection, this.#tenant.id) as Collection
+            const col = requireCollection(collection, this.#tenant.id)
 
             if (update.$set) {
                 update.$set = await func.buildInput(update.$set, { action: action, col: col })
@@ -940,7 +961,7 @@ class MongoRest {
     async deleteOne(collection: string, _id: string) {
         const action = 'deleteOne' as ActionsApiList
         return this.#executeWithAudit(action, collection, { id: _id }, async () => {
-            const col = getCollection(collection, this.#tenant.id) as Collection
+            const col = requireCollection(collection, this.#tenant.id)
 
             const meta: any = { action, collection, id: _id }
             if (col.hooks?.beforeOperation) {
@@ -969,7 +990,7 @@ class MongoRest {
     async deleteMany(collection: string, _ids: string[]): Promise<DeleteResult> {
         const action = 'deleteMany' as ActionsApiList
         return this.#executeWithAudit(action, collection, { ids: _ids }, async () => {
-            const col = getCollection(collection, this.#tenant.id) as Collection
+            const col = requireCollection(collection, this.#tenant.id)
 
             const meta: any = { action, collection, ids: _ids }
             if (col.hooks?.beforeOperation) {
@@ -1000,7 +1021,7 @@ class MongoRest {
         const action = 'bulkWrite' as ActionsApiList
         return this.#executeWithAudit(action, collection, { count: operations.length }, async () => {
             for (let operation of operations) {
-                const col = getCollection(collection, this.#tenant.id) as Collection
+                const col = requireCollection(collection, this.#tenant.id)
 
                 if ('insertOne' in operation) {
                     operation.insertOne.document = func.toBson(
@@ -1066,7 +1087,7 @@ class MongoRest {
         assertBulkFilters(operations);
         const action = 'bulkUpdate' as ActionsApiList
         return this.#executeWithAudit(action, collection, { count: operations.length }, async () => {
-            const col = getCollection(collection, this.#tenant.id) as Collection
+            const col = requireCollection(collection, this.#tenant.id)
 
             for (const operation of operations) {
                 if ('updateOne' in operation) {
@@ -1481,4 +1502,4 @@ class MongoRest {
 
 }
 
-export { MongoRest }
+export { MongoRest,ObjectId }

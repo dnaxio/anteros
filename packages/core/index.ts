@@ -10,6 +10,7 @@ import { evaluateAgent } from "./lib/eval";
 import { endpoints } from "./lib/endpoints";
 import * as v from "joi";
 import utils from "./utils";
+import {ObjectId} from "mongodb"
 
 
 
@@ -49,6 +50,7 @@ export {
     agents,
     evaluateAgent,
     endpoints,
+
 }
 
 export type {
@@ -68,4 +70,3 @@ export type {
     AgentEvalGrader,
     AgentEvalReport,
 } from "./lib/eval";
-

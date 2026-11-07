@@ -277,3 +277,28 @@ describe("in-process `rest` — `$rename` cannot target a read-only field (#43)"
         expect((await rest.findOne("people", doc._id))?.name).toBe("ren");
     });
 });
+
+describe("collection definitions — a definition that disappears mid-call", () => {
+    it("fails with COLLECTION_NOT_FOUND instead of a TypeError on `col.hooks`", async () => {
+        const saved = (cfg as any).collections;
+        let reads = 0;
+        Object.defineProperty(cfg, "collections", {
+            configurable: true,
+            get() {
+                reads += 1;
+                return reads === 1 ? saved : [];
+            },
+        });
+
+        try {
+            const code = await internal.find("people").then(
+                () => "resolved",
+                (error: any) => error?.code,
+            );
+            // One read for the guard, one for the method's own (checked) resolution.
+            expect({ reads, code }).toEqual({ reads: 2, code: "COLLECTION_NOT_FOUND" });
+        } finally {
+            Object.defineProperty(cfg, "collections", { configurable: true, writable: true, value: saved });
+        }
+    });
+});
