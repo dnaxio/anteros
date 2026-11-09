@@ -18,6 +18,19 @@ let rest: InstanceType<typeof useRest>;
 let sourceClient: MongoClient;
 let destClient: MongoClient;
 
+/** Poll `check` until it holds — a change stream is asynchronous by nature. */
+async function waitFor(check: () => Promise<boolean>, timeout = 8_000, step = 50): Promise<boolean> {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+        if (await check()) return true;
+        await Bun.sleep(step);
+    }
+    return false;
+}
+
+const onDest = (filter: Record<string, any>) => destClient.db().collection("orders").findOne(filter);
+const countOnDest = (filter: Record<string, any> = {}) => destClient.db().collection("orders").countDocuments(filter);
+
 beforeAll(async () => {
     formatConfig({
         server: { port: 4000 },
@@ -26,10 +39,7 @@ beforeAll(async () => {
             dir: "src",
             database: { uri: SRC_DB },
             replication: {
-                // These cases exercise the scan engine (cursor, tombstones, initial sync)
-                mode: "scan",
                 runOnBoot: false,
-                schedule: { interval: "1h" },
                 destinations: [{ id: DEST_ID, uri: DEST_DB }],
             },
         }],
@@ -76,14 +86,13 @@ describe("replication", () => {
     it("replicates inserted documents", async () => {
         const marker = `ins-${crypto.randomUUID()}`;
         const source: any = await rest.insertOne("orders", { title: marker, status: "new" });
-        await replicateTenant(TEST_TENANT);
+        expect(await waitFor(async () => Boolean(await onDest({ title: marker })))).toBe(true);
 
-        const dest = await destClient.db().collection("orders").findOne({ title: marker });
-        expect(dest).toBeDefined();
-        expect((dest as any)?.status).toBe("new");
+        const dest: any = await onDest({ title: marker });
+        expect(dest?.status).toBe("new");
         // The destination keeps the **same `_id`** (the upsert is keyed on it), same BSON type
-        expect((dest as any)?._id.toString()).toBe(source._id);
-        expect((dest as any)?._id).toBeInstanceOf(ObjectId);
+        expect(dest?._id.toString()).toBe(source._id);
+        expect(dest?._id).toBeInstanceOf(ObjectId);
     });
 
     it("keeps a custom `_id` type (string) as-is", async () => {
@@ -95,10 +104,9 @@ describe("replication", () => {
             status: "new",
             updatedAt: new Date(),
         });
-        await replicateTenant(TEST_TENANT);
+        expect(await waitFor(async () => Boolean(await onDest({ title: marker })))).toBe(true);
 
-        const dest: any = await destClient.db().collection("orders").findOne({ title: marker });
-        expect(dest).toBeDefined();
+        const dest: any = await onDest({ title: marker });
         expect(dest._id).toBe(customId);
         expect(typeof dest._id).toBe("string");
     });
@@ -116,11 +124,10 @@ describe("replication", () => {
             customer: customerId.toHexString(),
             paidAt: paidAt.toISOString(),
         });
-        await replicateTenant(TEST_TENANT);
+        expect(await waitFor(async () => Boolean(await onDest({ title: marker })))).toBe(true);
 
         // …and the destination must hold the same BSON types, not strings
-        const dest: any = await destClient.db().collection("orders").findOne({ title: marker });
-        expect(dest).toBeDefined();
+        const dest: any = await onDest({ title: marker });
         expect(dest._id).toBeInstanceOf(ObjectId);
         expect(dest._id.toString()).toBe(source._id);
         expect(dest.customer).toBeInstanceOf(ObjectId);
@@ -137,54 +144,42 @@ describe("replication", () => {
         expect(typeof raw.customer).toBe(typeof dest.customer);
     });
 
-    it("replicates updates", async () => {
+    it("replicates updates in place", async () => {
         const marker = `upd-${crypto.randomUUID()}`;
         const doc: any = await rest.insertOne("orders", { title: marker, status: "draft" });
-        await replicateTenant(TEST_TENANT);
+        expect(await waitFor(async () => Boolean(await onDest({ title: marker })))).toBe(true);
 
         await rest.updateOne("orders", doc._id, { $set: { status: "paid" } });
-        await replicateTenant(TEST_TENANT);
-
-        const dest = await destClient.db().collection("orders").findOne({ title: marker });
-        expect((dest as any)?.status).toBe("paid");
+        expect(await waitFor(async () => (await onDest({ title: marker }))?.status === "paid")).toBe(true);
+        expect(await countOnDest({ title: marker })).toBe(1);
     });
 
-    it("replicates deletes via tombstone", async () => {
+    it("propagates deletes from the oplog", async () => {
         const marker = `del-${crypto.randomUUID()}`;
         const doc: any = await rest.insertOne("orders", { title: marker, status: "x" });
-        await replicateTenant(TEST_TENANT);
-
-        const before = await destClient.db().collection("orders").findOne({ title: marker });
-        expect(before).toBeDefined();
+        expect(await waitFor(async () => Boolean(await onDest({ title: marker })))).toBe(true);
 
         await rest.deleteOne("orders", doc._id);
-        await replicateTenant(TEST_TENANT);
-
-        const after = await destClient.db().collection("orders").findOne({ title: marker });
-        expect(after).toBeNull();
+        expect(await waitFor(async () => (await countOnDest({ title: marker })) === 0)).toBe(true);
     });
 
-    it("does not re-copy unchanged documents (cursor is persisted)", async () => {
-        const marker = `resume-${crypto.randomUUID()}`;
+    it("leaves a streamed collection alone when a run is triggered", async () => {
+        // The stream owns `orders`: a one-shot run takes no lock on it and reports
+        // nothing, because a backfill on top of a live stream could overwrite a
+        // newer event with a stale read
+        const results = await replicateTenant(TEST_TENANT);
+        expect(results.find((result) => result.collection === "orders")).toBeUndefined();
+    });
+
+    it("stores the stream position in _replication_", async () => {
+        const marker = `state-${crypto.randomUUID()}`;
         await rest.insertOne("orders", { title: marker, status: "new" });
-
-        const first = await replicateTenant(TEST_TENANT);
-        const second = await replicateTenant(TEST_TENANT);
-
-        const r1 = first.find((r) => r.collection === "orders" && r.destination === DEST_ID);
-        const r2 = second.find((r) => r.collection === "orders" && r.destination === DEST_ID);
-        expect(r1?.inserted).toBeGreaterThanOrEqual(1);
-        expect(r2?.inserted).toBe(0);
-        expect(r2?.updated).toBe(0);
-    });
-
-    it("stores state in _replication_", async () => {
-        await rest.insertOne("orders", { title: `state-${crypto.randomUUID()}`, status: "new" });
-        await replicateTenant(TEST_TENANT);
+        expect(await waitFor(async () => Boolean(await onDest({ title: marker })))).toBe(true);
 
         const state = await getReplicationState(TEST_TENANT, DEST_ID, "orders");
         expect(state.length).toBe(1);
-        expect(state[0]!.status).toBe("success");
-        expect(state[0]!.cursor).toBeDefined();
+        expect(state[0]!.status).toBe("watching");
+        expect(state[0]!.resumeToken).toBeDefined();
+        expect(state[0]!.key).toBe("updatedAt");
     });
 });

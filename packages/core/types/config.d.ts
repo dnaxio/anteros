@@ -10,6 +10,8 @@ import type { McpTool, McpResource } from "./mcp";
 import type { VarDefinition } from "./vars";
 import type { AgentDefinition } from "./agent";
 import type { AuditFileConfig } from "../lib/audit";
+import type { AuditQuackConfig } from "../lib/auditQuack";
+import type { AuditDriver } from "../lib/auditDriver";
 export type ServerConfig = {
     debug?: boolean;
     version?: string;
@@ -30,6 +32,20 @@ export type ServerConfig = {
          */
         audit?: {
             /**
+             * Where the audit trail is written (default: `'default'`) — the storage
+             * driver, like `cache.driver`.
+             *
+             * - `'default'` — the `_audit_` collection; `file` / `quack`, when configured,
+             *   are additional copies.
+             * - `'file'` — the JSONL file **instead of** `_audit_`.
+             * - `'quack'` — the DuckDB table **instead of** `_audit_`.
+             *
+             * ⚠️ With `'file'` or `'quack'`, `_audit_` is not written:
+             * `rest.audit.getActivities()` returns nothing and replication has nothing to
+             * copy. A driver selected but not configured falls back to `'default'`.
+             */
+            driver?: AuditDriver;
+            /**
              * How long `_audit_` entries are kept (MongoDB TTL on `ts`).
              * Duration string: `'90d'`, `'24h'`.
              * `false` → explicitly disabled (drops the TTL index if one exists).
@@ -43,6 +59,13 @@ export type ServerConfig = {
              * `false` / omitted → disabled.
              */
             file?: AuditFileConfig;
+            /**
+             * DuckDB mirror of the audit trail, fed from the same choke point as
+             * `_audit_` and pruned by age. A `@anteros/duckdb` table (`id / ts / data`)
+             * on a **quack server** (`quack:host:port`), or a local `.duckdb` file.
+             * `false` / omitted → disabled. `_audit_` stays the primary store.
+             */
+            quack?: AuditQuackConfig;
             /**
              * Object keys whose value is replaced by `"[redacted]"` in every audit
              * entry (`operation.input`, `operation.result` and `meta`), at any depth,
@@ -92,7 +115,7 @@ export type ServerConfig = {
          *   no middlewares. Loaded: tenant databases, collections, file collections,
          *   variables and lifecycle hooks (`beforeBoot` / `onDestroy`).
          * - `'no-replication'` — a full server that never starts the replication
-         *   engine (no scheduling, no tombstones, no `_replication_` state).
+         *   engine (no change streams, no `_replication_` state).
          * - `'api-only'` — the HTTP API and nothing around it: no replication, no
          *   scripts, no sockets.
          *

@@ -3,7 +3,7 @@ import { MongoClient } from "mongodb";
 import { useRest } from "../database/rest";
 import { formatConfig, cfg } from "../server/config";
 import { syncVars } from "../database/vars";
-import { startReplication, stopReplication, replicateTenant } from "../database/replication";
+import { startReplication, stopReplication } from "../database/replication";
 
 const TEST_TENANT = "vars-repl";
 const SRC_DB = "mongodb://localhost:27017/_VARS_REPL_SRC";
@@ -13,6 +13,16 @@ let rest: InstanceType<typeof useRest>;
 let sourceClient: MongoClient;
 let destClient: MongoClient;
 
+/** Poll `check` until it holds — a change stream is asynchronous by nature. */
+async function waitFor(check: () => Promise<boolean>, timeout = 8_000, step = 50): Promise<boolean> {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+        if (await check()) return true;
+        await Bun.sleep(step);
+    }
+    return false;
+}
+
 beforeAll(async () => {
     formatConfig({
         server: { port: 4000 },
@@ -21,10 +31,7 @@ beforeAll(async () => {
             dir: "packages/core/tests/fixtures/vars-tenant",
             database: { uri: SRC_DB },
             replication: {
-                // These cases exercise the scan engine (vars namespace filter)
-                mode: "scan",
                 runOnBoot: false,
-                schedule: { interval: "1h" },
                 destinations: [{ id: "backup", uri: DEST_DB }],
             },
         }],
@@ -58,40 +65,40 @@ const destVar = (key: string, ns = "config") =>
 describe("vars replication", () => {
     it("replicates the `_vars_` collection (all namespaces)", async () => {
         await rest.vars.set("config", "licence", "REPL-1");
-        await replicateTenant(TEST_TENANT);
-
+        expect(await waitFor(async () => Boolean(await destVar("licence")))).toBe(true);
         expect((await destVar("licence"))?.value).toBe("REPL-1");
 
-        // Seeded defaults are replicated too
+        // Seeded defaults existed before the stream started: the cold-start backfill
+        // copies them
+        expect(await waitFor(async () => Boolean(await destVar("maxUsers")))).toBe(true);
         expect((await destVar("maxUsers"))?.value).toBe(100);
     });
 
     it("propagates variable deletion", async () => {
         await rest.vars.set("config", "tmp", "x", { ttl: "1h" });
-        await replicateTenant(TEST_TENANT);
-        expect(await destVar("tmp")).toBeDefined();
+        expect(await waitFor(async () => Boolean(await destVar("tmp")))).toBe(true);
 
         await rest.vars.del("config", "tmp");
-        await replicateTenant(TEST_TENANT);
-        expect(await destVar("tmp")).toBeNull();
+        expect(await waitFor(async () => (await destVar("tmp")) === null)).toBe(true);
     });
 
     it("propagates scoped variables", async () => {
         const mine = "aabbccddeeff001122334455";
         await rest.vars.scope(mine).set("config", "licence", "SCOPED-1");
-        await replicateTenant(TEST_TENANT);
 
-        const dest = await destClient.db().collection("_vars_").findOne({
-            ns: "config", key: "licence", scope: { $ne: null },
-        });
-        expect(dest?.value).toBe("SCOPED-1");
+        expect(await waitFor(async () => {
+            const dest = await destClient.db().collection("_vars_").findOne({
+                ns: "config", key: "licence", scope: { $ne: null },
+            });
+            return dest?.value === "SCOPED-1";
+        })).toBe(true);
     });
 
     it("does NOT replicate namespaces that opt out (`enabled: false`)", async () => {
-        // `private.var.ts` declares `replication: { enabled: false }` — it must
-        // never reach the destination.
+        // `private.var.ts` declares `replication: { enabled: false }` — the stream's
+        // post-image filter drops it, so it must never reach the destination.
         await rest.vars.set("private", "secret", "top-secret");
-        await replicateTenant(TEST_TENANT);
+        await Bun.sleep(500); // long enough for an unfiltered event to land
 
         expect(await destClient.db().collection("_vars_").findOne({ ns: "private" })).toBeNull();
     });

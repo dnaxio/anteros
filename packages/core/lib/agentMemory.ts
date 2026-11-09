@@ -1,7 +1,6 @@
 import { AppError } from "./error";
 import { parseDuration } from "../utils/func";
 import { syncTtlRetention } from "../database/ttl";
-import { writeDeleteMarkers, replicatesCollection } from "../database/deleteLog";
 import { Redis } from "ioredis";
 import { createHash } from "node:crypto";
 import type { Db } from "mongodb";
@@ -436,13 +435,6 @@ export class MongoAgentMemory implements AgentMemory {
 
         const key = threadKey(threadId, ctx, this.#options.scoped ?? true);
         await db.collection(this.collection).deleteOne({ _id: key as any });
-
-        // A deleted thread no longer exists, so a date cursor can never see it —
-        // leave a tombstone so the deletion reaches the destinations too. Only when
-        // that collection is actually replicated for the tenant.
-        if (ctx?.tenant && replicatesCollection(ctx.tenant, this.collection)) {
-            await writeDeleteMarkers(db, ctx.tenant, this.collection, [key]);
-        }
     }
 
     async list(ctx?: AgentMemoryContext & { limit?: number }): Promise<AgentThread[]> {

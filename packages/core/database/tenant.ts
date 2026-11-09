@@ -2,6 +2,7 @@ import type { Tenant } from "../types/tenant";
 import { cfg } from "../server/config";
 import { useRest } from "./rest";
 import { setupAuditCollection, resolveAuditRetention } from "./audit";
+import { warnDriverConsequences } from "../lib/auditDriver";
 async function syncTenants() {
     try {
         for await (let tenant of cfg.tenants ?? []) {
@@ -21,6 +22,8 @@ async function syncTenants() {
             // One-off audit setup: legacy rename, query indexes, retention
             // (tenant config wins, `server.audit.retention` is the fallback)
             await setupAuditCollection(db, resolveAuditRetention(tenant))
+            // A `file` / `quack` driver writes elsewhere: say what that costs, once
+            warnDriverConsequences(tenant)
         }
     } catch (err: any) {
         console.error('Error bootstrapping tenants', cfg.debug ? err : err?.message)

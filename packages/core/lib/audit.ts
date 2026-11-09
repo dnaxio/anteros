@@ -240,18 +240,22 @@ async function drain(key: string, tenantId: string): Promise<void> {
 /**
  * Append activities to the tenant's local audit file — opt-in, fire-and-forget:
  * it never blocks the caller and never throws.
+ *
+ * The returned promise settles once the lines are on disk; `await` it only when the
+ * file is the **engine** (the only copy), never for a mirror.
  */
-function writeAuditFile(tenant: Tenant | null | undefined, activities: unknown[]): void {
-    if (!tenant || !activities?.length) return
+function writeAuditFile(tenant: Tenant | null | undefined, activities: unknown[]): Promise<void> {
+    if (!tenant || !activities?.length) return Promise.resolve()
 
     const resolved = resolveAuditFile(tenant)
-    if (!resolved) return
+    if (!resolved) return Promise.resolve()
 
     const key = `${tenant.id}:${resolved.dir}`
     const sink = getSink(key, resolved)
     for (const activity of activities) sink.pending.push(safeStringify(activity))
 
     sink.inFlight = drain(key, tenant.id).catch(() => {})
+    return sink.inFlight
 }
 
 /** Wait until every pending line is on disk (tests, graceful shutdown). */

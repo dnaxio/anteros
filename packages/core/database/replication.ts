@@ -3,17 +3,14 @@ import { cfg } from "../server/config";
 import { getTenant } from "./tenant";
 import { useRest } from "./rest";
 import { logger } from "../utils/logger";
-import * as func from "../utils/func";
 import * as os from "node:os";
 import type { Collection } from "../types/collection";
 import type { Tenant } from "../types/tenant";
-import type { HookContext } from "../types/hook";
 import type {
     ReplicationConfig,
     ReplicationDestination,
     ReplicationInitialSync,
     ReplicationMetaName,
-    ReplicationMode,
     ReplicationResetOptions,
     ReplicationResetResult,
     ReplicationRunResult,
@@ -35,8 +32,6 @@ const DEFAULT_BATCH = 1000;
 const BULK_CHUNK = 1000;
 /** Distributed-lock TTL used to guard a run across cluster workers. */
 const LOCK_TTL = 5 * 60_000;
-/** Change detection out of the box — a date scan has to be opted into. */
-const DEFAULT_MODE: ReplicationMode = "changeStream";
 /** How often a watcher persists its resume token (bounded write rate on `_replication_`). */
 const STATE_FLUSH_MS = 5_000;
 /** Reopen delay of a failed change stream, doubling up to `WATCH_MAX_BACKOFF_MS`. */
@@ -59,9 +54,10 @@ const WATCH_LOCK_RETRY_MS = 500;
 
 /**
  * Framework collections replication covers **by default**, with the date key each
- * one is read with (the engine's cursor). `'vars'` is handled apart, per namespace,
- * and `'memory'` covers the agent memory collections — whose names the tenant
- * chooses, so they come from the agent registry instead (see below).
+ * one's **backfill** is read with (the stream itself needs no key). `'vars'` is
+ * handled apart, per namespace, and `'memory'` covers the agent memory collections
+ * — whose names the tenant chooses, so they come from the agent registry instead
+ * (see below).
  */
 const META_COLLECTIONS: Record<Exclude<ReplicationMetaName, 'vars' | 'memory'>, { slug: string; key: string }> = {
     audit: { slug: "_audit_", key: "ts" },
@@ -135,10 +131,7 @@ type Runtime = {
     running: boolean;
 };
 
-type Job = { tenant: string; stop: () => void };
-
 const runtimes = new Map<string, Runtime>();
-const jobs: Job[] = [];
 /** Ensured indexes / collections — avoids re-creating them on every run. */
 const ensured = new Set<string>();
 let started = false;
@@ -167,15 +160,6 @@ function validateReplication(config: ReplicationConfig): void {
     }
 }
 
-/**
- * Change detection for a tenant. Deliberately tenant-wide (not per collection): the
- * mode decides how the *runs* are scheduled, and a mixed mode would need a schedule
- * and a stream at once for the same destination.
- */
-function resolveMode(config: ReplicationConfig): ReplicationMode {
-    return config.mode ?? DEFAULT_MODE;
-}
-
 function resolveKey(collection: Collection, config: ReplicationConfig): string {
     return collection.replication?.key ?? config.key ?? DEFAULT_KEY;
 }
@@ -193,10 +177,6 @@ function watchLockName(destinationId: string, slug: string): string {
     return `replication:${destinationId}:${slug}`;
 }
 
-function deleteMarkerId(collection: Collection, docId: string): string {
-    return `rep.delete:${collection._tenant_}:${collection.slug}:${docId}`;
-}
-
 function filterCollections(collections: Collection[], destination: ReplicationDestination): Collection[] {
     if (!destination.collections?.length) return collections;
     const wanted = new Set(destination.collections);
@@ -205,14 +185,6 @@ function filterCollections(collections: Collection[], destination: ReplicationDe
 
 function runtimesFor(tenantId: string): Runtime[] {
     return [...runtimes.values()].filter((rt) => rt.tenantId === tenantId && rt.destination.enabled !== false);
-}
-
-/** Active destination ids that must apply deletes for the given collection. */
-function deleteDestinationsFor(config: ReplicationConfig, collection: Collection): string[] {
-    return (config.destinations ?? [])
-        .filter((d) => d.enabled !== false && d.id && d.uri)
-        .filter((d) => !d.collections?.length || d.collections.includes(collection.slug))
-        .map((d) => d.id);
 }
 
 /* ------------------------------------------------------------------ */
@@ -238,13 +210,6 @@ function incrementalFilter(key: string, cursor: { value: any; id: any } | null):
 function mergedFilter(base: Record<string, any> | undefined, incremental: Record<string, any>): Record<string, any> {
     if (!base) return incremental;
     return Object.keys(incremental).length ? { $and: [base, incremental] } : base;
-}
-
-/** Rewind the cursor by `lookback` ms to catch out-of-order / clock-skewed writes. */
-function applyLookback(cursor: { value: any; id: any } | null, lookback: number): { value: any; id: any } | null {
-    if (!cursor || cursor.value === null || cursor.value === undefined || !lookback) return cursor;
-    const value = cursor.value instanceof Date ? new Date(cursor.value.getTime() - lookback) : cursor.value;
-    return { value, id: cursor.id };
 }
 
 /**
@@ -321,7 +286,6 @@ async function saveState(
     stats: ReplicationStats,
     status: ReplicationState["status"],
     error: string | null,
-    mode: ReplicationMode = DEFAULT_MODE,
 ): Promise<void> {
     const now = new Date();
     await meta.updateOne(
@@ -333,7 +297,6 @@ async function saveState(
                 destination: runtime.destination.id,
                 collection: collection.slug,
                 key,
-                mode,
                 cursor,
                 lastRunAt: now,
                 status,
@@ -359,110 +322,6 @@ async function markError(meta: any, stateId: string, error: string): Promise<voi
         { $set: { status: "error", error, updatedAt: now }, $setOnInsert: { createdAt: now } },
         { upsert: true },
     ).catch(() => {});
-}
-
-/* ------------------------------------------------------------------ */
-/* Deletes (hook + tombstone)                                          */
-/* ------------------------------------------------------------------ */
-
-async function recordDeletes(collection: Collection, ctx: HookContext): Promise<void> {
-    if (ctx.action !== "deleteOne" && ctx.action !== "deleteMany") return;
-    const ids: string[] = ctx.action === "deleteOne"
-        ? (ctx.meta.id ? [String(ctx.meta.id)] : [])
-        : (ctx.meta.ids ?? []).map((id) => String(id));
-    if (!ids.length) return;
-
-    const db = (ctx.rest as any)?.db as Db | undefined;
-    if (!db) return;
-
-    const meta = db.collection(META_COLLECTION);
-    const now = new Date();
-    const ops = ids.map((docId) => {
-        const _id = deleteMarkerId(collection, docId);
-        return {
-            replaceOne: {
-                filter: { _id },
-                replacement: {
-                    _id,
-                    type: "delete",
-                    tenant: collection._tenant_,
-                    collection: collection.slug,
-                    docId,
-                    deletedAt: now,
-                    synced: [],
-                    updatedAt: now,
-                },
-                upsert: true,
-            },
-        };
-    });
-    await meta.bulkWrite(ops as any, { ordered: false });
-}
-
-function instrumentCollection(collection: Collection): void {
-    if (!collection.hooks) collection.hooks = {};
-    const hooks: any = collection.hooks;
-    if (hooks._replicationDeleteHook) return;
-    const previous = collection.hooks.afterOperation;
-    collection.hooks.afterOperation = async (ctx: HookContext) => {
-        if (previous) await previous(ctx);
-        await recordDeletes(collection, ctx).catch((err) =>
-            logger.file("warn", "replication: failed to record delete", { collection: collection.slug, error: err?.message }),
-        );
-    };
-    hooks._replicationDeleteHook = true;
-}
-
-/**
- * Apply pending delete tombstones on the destination. The `key` guard prevents
- * deleting a document that was re-inserted/updated after the deletion occurred.
- */
-async function flushDeletes(
-    meta: any,
-    runtime: Runtime,
-    collection: Collection,
-    key: string,
-    batchSize: number,
-    expectedDestinations: string[],
-): Promise<{ deleted: number; processed: number }> {
-    const markers = await meta.find({
-        type: "delete",
-        collection: collection.slug,
-        synced: { $ne: runtime.destination.id },
-    }).limit(batchSize).toArray();
-    if (!markers.length) return { deleted: 0, processed: 0 };
-
-    const ops = markers.map((m: any) => ({
-        deleteOne: {
-            filter: {
-                _id: toId(m.docId),
-                // The key is a Date on most collections, but a number on `_locks_`:
-                // accept either, so a numeric key never silently skips the delete
-                $or: [
-                    { [key]: { $lte: m.deletedAt } },
-                    { [key]: { $lte: m.deletedAt?.getTime?.() ?? m.deletedAt } },
-                ],
-            },
-        },
-    }));
-    const res = await withRetry(() => runtime.db.collection(collection.slug).bulkWrite(ops as any, { ordered: false }));
-    const applied = (res as any).deletedCount ?? 0;
-
-    await meta.updateMany(
-        { _id: { $in: markers.map((m: any) => m._id) } },
-        { $addToSet: { synced: runtime.destination.id }, $set: { updatedAt: new Date() } },
-    );
-
-    // Purge tombstones fully applied by every expected destination.
-    if (expectedDestinations.length) {
-        await meta.deleteMany({
-            type: "delete",
-            collection: collection.slug,
-            synced: { $all: expectedDestinations },
-        }).catch(() => {});
-    }
-
-    return { deleted: applied, processed: markers.length };
 }
 
 /* ------------------------------------------------------------------ */
@@ -506,63 +365,37 @@ async function replicateCollection(
     meta: any,
 ): Promise<ReplicationStats> {
     const startedAt = Date.now();
+    const stateId = stateIdFor(tenant.id, runtime.destination.id, collection.slug);
 
-    // In `changeStream` mode the stream is the change detector: a run only seeds a
-    // destination that has never been backfilled (a fresh tenant, or after
-    // `replication.reset()`). Scanning on top of a live stream would let a stale
-    // read overwrite a newer event — see `startWatcher` for the per-collection lock
-    // that keeps the two apart.
-    if (resolveMode(config) === "changeStream") {
-        const stateId = stateIdFor(tenant.id, runtime.destination.id, collection.slug);
-        if (await meta.findOne({ _id: stateId })) {
-            return { inserted: 0, updated: 0, deleted: 0, failed: 0, batches: 0, durationMs: Date.now() - startedAt };
-        }
+    // A run only seeds a destination that has never been backfilled (a fresh
+    // tenant, or after `replication.reset()`). Once a state document exists a
+    // change stream owns the collection and is already up to date — backfilling on
+    // top of it would let a stale read overwrite a newer event. The
+    // `replication:<destination>:<collection>` lock in `replicateTenant` is what
+    // keeps the two writers apart.
+    if (await meta.findOne({ _id: stateId })) {
+        return { inserted: 0, updated: 0, deleted: 0, failed: 0, batches: 0, durationMs: Date.now() - startedAt };
     }
 
-    const { stats, cursor } = await scanCollection(tenant, runtime, collection, config, key, meta);
-
-    // Deletes are always propagated too — a deleted document no longer exists, so
-    // a date cursor can never see it; they are captured by the hook + tombstone.
-    // In `changeStream` mode the stream carries deletes natively, so this is only a
-    // safety net for a backfill that raced with an applicative delete.
-    {
-        const expected = deleteDestinationsFor(config, collection);
-        while (true) {
-            const { deleted, processed } = await flushDeletes(meta, runtime, collection, key, config.batchSize ?? DEFAULT_BATCH, expected);
-            stats.deleted += deleted;
-            if (processed < (config.batchSize ?? DEFAULT_BATCH)) break;
-        }
-    }
+    const { stats, cursor } = await backfillCollection(tenant, runtime, collection, config, key, meta);
 
     stats.durationMs = Date.now() - startedAt;
-    await saveState(
-        meta,
-        stateIdFor(tenant.id, runtime.destination.id, collection.slug),
-        tenant,
-        runtime,
-        collection,
-        key,
-        cursor,
-        stats,
-        "success",
-        null,
-        resolveMode(config),
-    );
+    await saveState(meta, stateId, tenant, runtime, collection, key, cursor, stats, "success", null);
     return stats;
 }
 
 /**
- * One pass over the source, from the position stored in `_replication_`.
+ * Copy the source into the destination, from the position stored in `_replication_`.
  *
- * This is the scan engine's core **and** the backfill a change stream runs on its
- * first run — which is why it is shared: the indexes, the mirrored
- * audit/workflow retention, the `initialSync` seeding and the batched upserts are
- * identical, only the change *detection* differs.
+ * This is the **backfill**: the one-shot run a stream performs on a cold start
+ * (no resume token yet — a fresh tenant, `seed()`, `reset()`), and what
+ * `replication.now()` runs for a collection nobody has seeded. The indexes, the
+ * mirrored audit/workflow retention, the `initialSync` seeding and the batched
+ * upserts all live here.
  *
- * It leaves the state `running` and never flushes delete tombstones: the caller
- * owns the run's final status.
+ * It leaves the state `running`: the caller owns the run's final status.
  */
-async function scanCollection(
+async function backfillCollection(
     tenant: Tenant,
     runtime: Runtime,
     collection: Collection,
@@ -577,16 +410,15 @@ async function scanCollection(
     const source = tenant.database.db!.collection(collection.slug);
     const target = runtime.db.collection(collection.slug);
     const batchSize = config.batchSize ?? DEFAULT_BATCH;
-    const lookback = config.lookback ?? 0;
     const startedAt = Date.now();
     const stats: ReplicationStats = { inserted: 0, updated: 0, deleted: 0, failed: 0, batches: 0, durationMs: 0 };
 
     await ensureIndex(tenant.database.db!, collection.slug, key, "source");
     await ensureIndex(runtime.db, collection.slug, key, `destination:${runtime.destination.id}`);
 
-    // Meta collections have no hooks, so their deletions never reach the
-    // destination (an audit TTL expiry is invisible to a date cursor): mirror the
-    // source's retention on the destination, otherwise the copy grows forever.
+    // Mirror the source's audit/workflow retention on the destination as well: the
+    // stream already propagates the TTL deletes one by one, but the index keeps a
+    // restored or re-seeded destination pruned on its own.
     if (collection.slug === '_audit_' || collection.slug === '_workflows_') {
         const isAudit = collection.slug === '_audit_';
         const retention = isAudit ? resolveAuditRetention(tenant) : resolveWorkflowsRetention(tenant);
@@ -615,12 +447,11 @@ async function scanCollection(
     // the opted-in namespaces).
     const baseFilter = (collection as any)._baseFilter_ as Record<string, any> | undefined;
 
-    // Inserts and updates are always replicated: both refresh the date key, so
-    // the incremental cursor picks them up — there is no way (nor need) to tell
-    // them apart.
+    // Inserts and updates are copied the same way: both refresh the date key, so
+    // the incremental cursor picks them up.
     while (true) {
         const docs = await source
-            .find(mergedFilter(baseFilter, incrementalFilter(key, applyLookback(cursor, lookback))) as any)
+            .find(mergedFilter(baseFilter, incrementalFilter(key, cursor)) as any)
             .sort({ [key]: 1, _id: 1 } as any)
             .limit(batchSize)
             .toArray();
@@ -636,7 +467,7 @@ async function scanCollection(
         if (!last) break;
         cursor = { value: last[key] ?? null, id: last._id ?? null };
 
-        await saveState(meta, stateId, tenant, runtime, collection, key, cursor, stats, "running", null, resolveMode(config));
+        await saveState(meta, stateId, tenant, runtime, collection, key, cursor, stats, "running", null);
         if (docs.length < batchSize) break;
     }
 
@@ -645,7 +476,7 @@ async function scanCollection(
 }
 
 /* ------------------------------------------------------------------ */
-/* Change streams (`mode: 'changeStream'`)                             */
+/* Change streams                                                      */
 /* ------------------------------------------------------------------ */
 
 /** One watcher per (tenant, destination) — it tails every collection in parallel. */
@@ -726,7 +557,6 @@ async function saveWatchState(
         destination: runtime.destination.id,
         collection: collection.slug,
         key,
-        mode: "changeStream",
         status,
         lastRunAt: now,
         stats: { ...stats },
@@ -738,8 +568,8 @@ async function saveWatchState(
 
     await meta.updateOne(
         { _id: stateId },
-        // `cursor` belongs to the scan and `resumeToken` to the stream: neither
-        // overwrites the other, so `replication.now()` stays usable in this mode
+        // `cursor` is the backfill position, `resumeToken` the stream's: neither
+        // overwrites the other, so `replication.now()` keeps a resumable seed
         { $set: set, $setOnInsert: { createdAt: now, cursor: { value: null, id: null } } },
         { upsert: true },
     );
@@ -765,8 +595,8 @@ async function applyChangeEvent(
         case "delete": {
             const id = event.documentKey?._id;
             if (id === undefined) return { written: false, deleted: false };
-            // `_id` comes back typed from the oplog: no string round-trip like the
-            // tombstone path, so an `ObjectId` is deleted as an `ObjectId`
+            // `_id` comes back typed from the oplog: an `ObjectId` is deleted as an
+            // `ObjectId`, with no string round-trip
             await withRetry(() => target.deleteOne({ _id: toId(id) }));
             return { written: false, deleted: true };
         }
@@ -786,9 +616,8 @@ async function applyChangeEvent(
  * Tail one collection and mirror every event on the destination, until `stopped`
  * is set.
  *
- * Deletes come straight from the oplog, which is the one thing a date cursor can
- * never observe — including the TTL expiries of `_audit_` / `_workflows_`, which no
- * hook sees.
+ * Deletes come straight from the oplog — including the TTL expiries of `_audit_` /
+ * `_workflows_`, which no hook sees.
  *
  * A transient driver error reopens the stream from the last **persisted** resume
  * token: at most `STATE_FLUSH_MS` of events are replayed, and every write is an
@@ -815,15 +644,14 @@ async function watchCollection(
     let startAt: any = null;
     let lastFlush = 0;
 
-    // Nothing to resume from (first run, `seed()`, `reset()`, or a state left by a
-    // scan-mode pass): backfill first. The stream's starting point is taken
-    // **before** it, so a write that lands while the backfill runs is replayed by the
-    // stream afterwards instead of being lost — the upsert is idempotent, a lost
-    // event is not.
+    // Nothing to resume from (first run, `seed()`, `reset()`): backfill first. The
+    // stream's starting point is taken **before** it, so a write that lands while
+    // the backfill runs is replayed by the stream afterwards instead of being lost
+    // — the upsert is idempotent, a lost event is not.
     if (!token) {
         startAt = await currentOperationTime(tenant.database.db!);
         try {
-            const { stats: backfill } = await scanCollection(tenant, runtime, collection, config, key, meta);
+            const { stats: backfill } = await backfillCollection(tenant, runtime, collection, config, key, meta);
             Object.assign(stats, { ...backfill, deleted: 0 });
         } catch (err: any) {
             logger.file("error", "replication: backfill failed, watching from now", {
@@ -917,9 +745,9 @@ async function watchCollection(
  * own **`replication:<destination>:<collection>`** lock.
  *
  * That lock is the whole arbitration: a one-shot run (`replication.now()`, the boot
- * catch-up) takes the same one for the duration of its pass, so the stream and the
- * scan can never write the same collection at the same time — and two cluster nodes
- * can never tail the same collection onto the same destination.
+ * catch-up) takes the same one for the duration of its backfill, so the stream and
+ * the run can never write the same collection at the same time — and two cluster
+ * nodes can never tail the same collection onto the same destination.
  */
 async function startWatcher(tenant: Tenant, runtime: Runtime, config: ReplicationConfig, meta: any): Promise<void> {
     const watcherKey = `${tenant.id}:${runtime.destination.id}`;
@@ -1046,6 +874,13 @@ async function replicateTenant(
     const mainDb = tenant?.database?.db;
     if (!tenant || !config || !mainDb) return [];
 
+    // A one-shot copy without a stream would never see a later change — nor any
+    // delete — so it is not replication: refuse rather than half-replicate.
+    if (!(await supportsChangeStreams(tenantId, mainDb))) {
+        logger.file("error", "replication: change streams unavailable — a replica set is required, run skipped", { tenant: tenantId });
+        return [];
+    }
+
     const collections = replicatedCollectionsFor(tenantId, config);
     const results: ReplicationRunResult[] = [];
     const meta = mainDb.collection(META_COLLECTION);
@@ -1167,12 +1002,11 @@ async function getReplicationState(tenantId: string, destinationId?: string, col
 
 /**
  * Forget replication progress for a tenant — deletes the `_replication_` state
- * (cursor, stats, status), so the next run starts over. Destination data is
- * never touched: only the bookkeeping is cleared.
+ * (backfill position, resume token, stats, status), so the next run starts over.
+ * Destination data is never touched: only the bookkeeping is cleared, and the
+ * re-armed stream cold-starts with a fresh backfill.
  *
- * Scope it with `destination` and/or `collection`. Pending delete tombstones are
- * cleared too, unless the reset is scoped to a single destination (tombstones
- * carry a shared `synced[]` list) or `tombstones: false`.
+ * Scope it with `destination` and/or `collection`.
  */
 async function resetReplication(
     tenantId: string,
@@ -1180,7 +1014,7 @@ async function resetReplication(
 ): Promise<ReplicationResetResult> {
     const tenant = getTenant(tenantId);
     const db = tenant?.database?.db;
-    if (!tenant || !db) return { tenant: tenantId, state: 0, tombstones: 0 };
+    if (!tenant || !db) return { tenant: tenantId, state: 0 };
 
     const meta = db.collection(META_COLLECTION);
 
@@ -1195,33 +1029,25 @@ async function resetReplication(
     const stateRes = await meta.deleteMany(stateFilter);
     const state = stateRes.deletedCount ?? 0;
 
-    let tombstones = 0;
-    if (opts?.tombstones !== false && !opts?.destination) {
-        const tombFilter: Record<string, any> = { type: "delete", tenant: tenantId };
-        if (opts?.collection) tombFilter.collection = opts.collection;
-        const tombRes = await meta.deleteMany(tombFilter);
-        tombstones = tombRes.deletedCount ?? 0;
-    }
-
     logger.file("replication: reset", {
         tenant: tenantId,
         destination: opts?.destination ?? null,
         collection: opts?.collection ?? null,
         state,
-        tombstones,
     });
 
     // A running stream keeps its position in memory and would silently undo the reset
     // on its next flush: restart it, so it cold-starts from the cleared position
     await startWatchers(tenantId, stoppedWatchers).catch(() => {});
 
-    return { tenant: tenantId, state, tombstones };
+    return { tenant: tenantId, state };
 }
 
 /**
- * Set the starting point of replication for a tenant by writing the `_replication_`
- * cursor — the counterpart of `reset()`. Use it from `beforeBoot` to start a
- * replication from a given date (or `'now'` / `'latest'`) instead of backfilling.
+ * Set where a tenant's **backfill** starts, by writing the `_replication_` cursor —
+ * the counterpart of `reset()`. Use it from `beforeBoot` to start from a given date
+ * (or `'now'` / `'latest'`) instead of copying everything: the watch that follows
+ * picks up from there, and every event after it comes from the stream anyway.
  *
  * The date field is the collection's replication key (`replication.key`, default
  * `updatedAt`). Scope with `destination` and/or `collection`.
@@ -1307,34 +1133,8 @@ async function seedReplication(
 }
 
 /* ------------------------------------------------------------------ */
-/* Scheduling / lifecycle                                              */
+/* Lifecycle                                                           */
 /* ------------------------------------------------------------------ */
-
-function scheduleTenant(tenant: Tenant, config: ReplicationConfig): void {
-    const run = () => {
-        replicateTenant(tenant.id).catch((err) =>
-            logger.file("error", "replication: scheduled run failed", { tenant: tenant.id, error: err?.message }),
-        );
-    };
-
-    if (config.schedule && "cron" in config.schedule) {
-        try {
-            const job: any = (Bun as any).cron(config.schedule.cron, run);
-            jobs.push({ tenant: tenant.id, stop: () => { try { job?.stop?.(); } catch { /* ignore */ } } });
-            logger.file("replication: scheduled", { tenant: tenant.id, cron: config.schedule.cron });
-            return;
-        } catch (err: any) {
-            logger.file("error", "replication: invalid cron expression", { tenant: tenant.id, cron: config.schedule.cron, error: err?.message });
-        }
-    }
-
-    const intervalValue = config.schedule && "interval" in config.schedule ? config.schedule.interval : undefined;
-    const interval = Math.max(1000, func.parseDuration(intervalValue ?? "5m") ?? 5 * 60_000);
-    const timer = setInterval(run, interval);
-    (timer as any)?.unref?.();
-    jobs.push({ tenant: tenant.id, stop: () => clearInterval(timer) });
-    logger.file("replication: scheduled", { tenant: tenant.id, intervalMs: interval });
-}
 
 async function startReplication(): Promise<void> {
     if (started) return;
@@ -1349,14 +1149,15 @@ async function startReplication(): Promise<void> {
         const mainDb = tenant.database?.db;
         if (!config || !mainDb) continue;
 
-        // Change detection: change streams unless the tenant asked for a scan, or the
-        // source is a standalone mongod — they are a replica-set/sharded feature
-        const requested = config.mode ?? DEFAULT_MODE;
-        const streaming = requested === "changeStream" && await supportsChangeStreams(tenant.id, mainDb);
-        if (requested === "changeStream" && !streaming) {
-            logger.file("warn", "replication: change streams unavailable on this source, falling back to scan mode", {
+        // Change streams are the only change detector: they read the oplog, so they
+        // need a replica set (or a sharded cluster). There is deliberately no
+        // fallback — a date scan cannot see a delete, so falling back would make the
+        // destination diverge silently.
+        if (!(await supportsChangeStreams(tenant.id, mainDb))) {
+            logger.file("error", "replication: change streams unavailable — a replica set is required, tenant skipped", {
                 tenant: tenant.id,
             });
+            continue;
         }
 
         let connected = false;
@@ -1382,30 +1183,9 @@ async function startReplication(): Promise<void> {
 
         if (!connected) continue;
 
-    // In `changeStream` mode the stream carries deletes natively — including the TTL
-    // expiries no hook can see — so a tombstone would only pile up in
-    // `_replication_` without anyone flushing it (one-shot runs leave the streamed
-    // collections alone). The hook is therefore installed for the scan mode only.
-    if (!streaming) {
-        for (const collection of [...(cfg.collections ?? []), ...((cfg.fileCollections ?? []) as any[])]) {
-            if (collection._tenant_ === tenant.id && collection.replication?.enabled) {
-                instrumentCollection(collection);
-            }
-        }
-    }
-
-        if (streaming) {
-            // The stream is continuous: a schedule would only add load on top of it.
-            // `runOnBoot` (below) is what catches up a destination that was down.
-            if (config.schedule) {
-                logger.file("warn", "replication: schedule ignored in changeStream mode", { tenant: tenant.id });
-            }
-            const meta = mainDb.collection(META_COLLECTION);
-            for (const runtime of runtimesFor(tenant.id)) {
-                await startWatcher(tenant, runtime, config, meta);
-            }
-        } else {
-            scheduleTenant(tenant, config);
+        const meta = mainDb.collection(META_COLLECTION);
+        for (const runtime of runtimesFor(tenant.id)) {
+            await startWatcher(tenant, runtime, config, meta);
         }
 
         if (config.runOnBoot !== false) {
@@ -1422,10 +1202,6 @@ async function stopReplication(): Promise<void> {
         try { await watcher.stop(); } catch { /* already stopped */ }
     }
     watchers.clear();
-    for (const job of jobs) {
-        try { job.stop(); } catch { /* ignore */ }
-    }
-    jobs.length = 0;
     for (const runtime of runtimes.values()) {
         try { await runtime.client.close(); } catch { /* ignore */ }
     }

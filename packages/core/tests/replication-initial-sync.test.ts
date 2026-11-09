@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { MongoClient } from "mongodb";
 import { useRest } from "../database/rest";
 import { formatConfig, cfg } from "../server/config";
-import { startReplication, stopReplication, replicateTenant } from "../database/replication";
+import { startReplication, stopReplication } from "../database/replication";
 
 const TEST_TENANT = "replinit";
 const SRC_DB = "mongodb://localhost:27017/_REPL_INIT_SRC";
@@ -13,6 +13,18 @@ let rest: InstanceType<typeof useRest>;
 let sourceClient: MongoClient;
 let destClient: MongoClient;
 
+/** Poll `check` until it holds — a change stream is asynchronous by nature. */
+async function waitFor(check: () => Promise<boolean>, timeout = 8_000, step = 50): Promise<boolean> {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+        if (await check()) return true;
+        await Bun.sleep(step);
+    }
+    return false;
+}
+
+const onDest = (title: string) => destClient.db().collection("orders").findOne({ title });
+
 beforeAll(async () => {
     formatConfig({
         server: { port: 4000 },
@@ -21,10 +33,7 @@ beforeAll(async () => {
             dir: "src",
             database: { uri: SRC_DB },
             replication: {
-                // These cases exercise the scan engine's `initialSync` seeding
-                mode: "scan",
                 runOnBoot: false,
-                schedule: { interval: "1h" },
                 destinations: [{ id: DEST_ID, uri: DEST_DB }],
             },
         }],
@@ -48,11 +57,17 @@ beforeAll(async () => {
         },
     ];
 
-    await startReplication();
-
     rest = new useRest({ tenant_id: TEST_TENANT });
     destClient = new MongoClient(DEST_DB, { serverSelectionTimeoutMS: 3000 });
     await destClient.connect();
+    await destClient.db().dropDatabase();
+
+    // Written **before** replication starts: they exist on the source when the cold
+    // start resolves `initialSync: 'latest'`, and must never be copied.
+    await rest.insertOne("orders", { title: `old-1-${crypto.randomUUID()}` });
+    await rest.insertOne("orders", { title: `old-2-${crypto.randomUUID()}` });
+
+    await startReplication();
 });
 
 afterAll(async () => {
@@ -65,24 +80,15 @@ afterAll(async () => {
 
 describe("replication initialSync", () => {
     it("skips pre-existing documents with initialSync: 'latest'", async () => {
-        await rest.insertOne("orders", { title: `old-1-${crypto.randomUUID()}` });
-        await rest.insertOne("orders", { title: `old-2-${crypto.randomUUID()}` });
-
-        await replicateTenant(TEST_TENANT);
-
-        const count = await destClient.db().collection("orders").countDocuments();
-        expect(count).toBe(0); // existing docs are NOT backfilled
-    });
-
-    it("replicates documents added after the initial sync", async () => {
-        await Bun.sleep(5); // ensure the new doc has a strictly newer updatedAt
-
         const marker = `new-${crypto.randomUUID()}`;
         await rest.insertOne("orders", { title: marker });
 
-        await replicateTenant(TEST_TENANT);
+        // The new document arrives…
+        expect(await waitFor(async () => Boolean(await onDest(marker)))).toBe(true);
 
-        const dest = await destClient.db().collection("orders").findOne({ title: marker });
-        expect(dest).toBeDefined();
-    });
+        // …and the two pre-existing ones never did: the backfill started at the
+        // latest document and the stream only replays what came after it
+        const count = await destClient.db().collection("orders").countDocuments();
+        expect(count).toBe(1);
+    }, 20_000);
 });

@@ -1,12 +1,11 @@
 /**
- * Change-stream replication — the **default** mode (`replication.mode` unset).
+ * Change-stream replication — the engine.
  *
- * What separates it from the scan engine, and what these cases pin down:
+ * What these cases pin down:
  *  - nothing has to be triggered: a write reaches the destination on its own;
  *  - deletes come from the oplog, so a collection **without hooks** propagates them
- *    too (the scan engine can only see applicative tombstones, which is why an
- *    `_audit_` entry deleted out of band used to survive on the destination);
- *  - the position is a resume token, not a date cursor;
+ *    too (an `_audit_` entry deleted out of band follows the data);
+ *  - the position is a resume token;
  *  - the stream owns a collection, so a one-shot run leaves it alone;
  *  - `reset()` re-arms the stream, which cold-starts again.
  */
@@ -65,8 +64,8 @@ beforeAll(async () => {
                 id: ORDERS_T,
                 dir: ORDERS_DIR,
                 database: { uri: ORDERS_SRC },
-                // No `mode`: change streams are the default. No `key`, no `batchSize`,
-                // no `schedule` either — the stream is the whole engine.
+                // No `key`, no `batchSize`: the stream is the whole engine — the
+                // only thing a run does is backfill a collection nobody seeded yet.
                 replication: { runOnBoot: false, destinations: [{ id: DEST_ID, uri: ORDERS_DST }] },
             },
             {
@@ -153,16 +152,15 @@ describe("replication — changeStream mode", () => {
         } as any]);
         expect(await waitFor(async () => Boolean(await auditDest().findOne({ "operation.action": marker })))).toBe(true);
 
-        // Out of band: no applicative hook runs, no tombstone is written — the scan
-        // engine would leave this entry on the destination forever
+        // Out of band: no applicative hook runs, no tombstone is written — only the
+        // oplog knows about this one
         await src.db().collection(AUDIT_COLLECTION).deleteOne({ "operation.action": marker } as any);
 
         expect(await waitFor(async () => (await auditDest().countDocuments({ "operation.action": marker })) === 0)).toBe(true);
     }, 20_000);
 
-    it("stores a resume token in `_replication_`, tagged with the mode", async () => {
+    it("stores a resume token in `_replication_`", async () => {
         const [state] = await getReplicationState(ORDERS_T, DEST_ID, "orders");
-        expect(state?.mode).toBe("changeStream");
         expect(state?.resumeToken).toBeDefined();
         expect(state?.status).toBe("watching");
     });

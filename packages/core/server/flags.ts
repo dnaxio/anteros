@@ -7,7 +7,7 @@
 export type BootCapabilities = {
     /** HTTP server: routes, services, MCP tools, middlewares, `/health` */
     api: boolean
-    /** Replication engine: schedule, tombstones, `_replication_` state */
+    /** Replication engine: change streams, `_replication_` state */
     replication: boolean
     /** `runScripts()` shortly after boot */
     scripts: boolean

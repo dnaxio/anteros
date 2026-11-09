@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { Agent } from "../lib/agent";
 import { InMemoryAgentMemory, MongoAgentMemory, RedisAgentMemory, customAgentMemory, semanticRecall } from "../lib/agentMemory";
-import { replicatesCollection, replicatesMetaCollection } from "../database/deleteLog";
 import { formatConfig, cfg } from "../server/config";
 import { syncTenants } from "../database/tenant";
 import { useRest } from "../database/rest";
@@ -405,99 +404,6 @@ describe("agents.memory.Mongo", () => {
         const memory = new MongoAgentMemory({ collection: MEMORY });
         await expect(memory.get("t", {})).rejects.toMatchObject({ code: "AGENT_MEMORY_NO_REST" });
         await expect(memory.save("t", [], {})).rejects.toMatchObject({ code: "AGENT_MEMORY_NO_REST" });
-    });
-});
-
-// ─── Delete propagation ─────────────────────────────────�───────────────────
-
-const tenantConfig = () => (cfg.tenants ?? []).find((t) => t.id === TENANT) as any;
-const markersFor = (docId: string) => rest.db.collection("_replication_").countDocuments({
-    type: "delete", collection: MEMORY, docId,
-});
-
-describe("replicatesCollection / replicatesMetaCollection", () => {
-    it("follows enabled, destinations and exclude", () => {
-        // Nothing configured
-        expect(replicatesCollection(TENANT, MEMORY)).toBe(false);
-        expect(replicatesMetaCollection(TENANT, "memory")).toBe(false);
-        expect(replicatesMetaCollection("unknown", "memory")).toBe(false);
-
-        tenantConfig().replication = { enabled: false, destinations: [{ id: "b", uri: "mongodb://localhost:27017/x" }] };
-        expect(replicatesCollection(TENANT, MEMORY)).toBe(false);
-
-        tenantConfig().replication = { destinations: [] };
-        expect(replicatesCollection(TENANT, MEMORY)).toBe(false);
-
-        tenantConfig().replication = { destinations: [{ id: "b", uri: "mongodb://localhost:27017/x" }] };
-        // The published memory collection is replicated — by its own slug, under the `memory` name
-        expect(replicatesCollection(TENANT, MEMORY)).toBe(true);
-        expect(replicatesMetaCollection(TENANT, "memory")).toBe(true);
-        expect(replicatesMetaCollection(TENANT, "audit")).toBe(true);
-        expect(replicatesCollection(TENANT, "_audit_")).toBe(true);
-        expect(replicatesCollection(TENANT, "_vars_")).toBe(true);
-        // A collection nobody knows (not declared, not opted in) is not replicated
-        expect(replicatesCollection(TENANT, "whatever")).toBe(false);
-
-        tenantConfig().replication.exclude = ["memory"];
-        expect(replicatesCollection(TENANT, MEMORY)).toBe(false);
-        expect(replicatesMetaCollection(TENANT, "memory")).toBe(false);
-        expect(replicatesMetaCollection(TENANT, "audit")).toBe(true);
-        expect(replicatesCollection(TENANT, "_audit_")).toBe(true);
-
-        delete tenantConfig().replication;
-    });
-});
-
-describe("agents.memory.Mongo — delete propagation", () => {
-    const replicated = { destinations: [{ id: "backup", uri: "mongodb://localhost:27017/_AGENT_MEMORY_DEST" }] };
-
-    it("writes a tombstone for a cleared thread so the deletion reaches the destinations", async () => {
-        tenantConfig().replication = { ...replicated };
-        try {
-            const memory = new MongoAgentMemory({ collection: MEMORY });
-            await memory.save("gone", [message("user", "hi")], { rest, tenant: TENANT, resourceId: "u1" });
-            await memory.clear("gone", { rest, tenant: TENANT, resourceId: "u1" });
-
-            const marker: any = await rest.db.collection("_replication_").findOne({
-                type: "delete", collection: MEMORY, docId: "u1:gone",
-            });
-            expect(marker).toBeDefined();
-            expect(marker.tenant).toBe(TENANT);
-            expect(marker.synced).toEqual([]);
-        } finally {
-            delete tenantConfig().replication;
-        }
-    });
-
-    it("writes none when nobody replicates, when `memory` is excluded, or for a custom collection", async () => {
-        const memory = new MongoAgentMemory({ collection: MEMORY });
-
-        // Nothing configured
-        await memory.save("a", [message("user", "hi")], { rest, tenant: TENANT, resourceId: "u1" });
-        await memory.clear("a", { rest, tenant: TENANT, resourceId: "u1" });
-        expect(await markersFor("u1:a")).toBe(0);
-
-        // Replicated, but `_memories_` is excluded — a tombstone could never be flushed
-        tenantConfig().replication = { ...replicated, exclude: ["memory"] };
-        try {
-            await memory.save("b", [message("user", "hi")], { rest, tenant: TENANT, resourceId: "u1" });
-            await memory.clear("b", { rest, tenant: TENANT, resourceId: "u1" });
-            expect(await markersFor("u1:b")).toBe(0);
-        } finally {
-            delete tenantConfig().replication;
-        }
-
-        // A custom collection is the tenant's business, not the framework's
-        tenantConfig().replication = { ...replicated };
-        try {
-            const custom = new MongoAgentMemory({ collection: `_memories_custom_${crypto.randomUUID().slice(0, 6)}_` });
-            await custom.save("c", [message("user", "hi")], { rest, tenant: TENANT, resourceId: "u1" });
-            await custom.clear("c", { rest, tenant: TENANT, resourceId: "u1" });
-            expect(await markersFor("u1:c")).toBe(0);
-            await rest.db.dropCollection(custom.collection);
-        } finally {
-            delete tenantConfig().replication;
-        }
     });
 });
 

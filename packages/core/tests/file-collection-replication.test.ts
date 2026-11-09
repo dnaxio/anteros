@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { MongoClient } from "mongodb";
 import { useRest } from "../database/rest";
 import { formatConfig, cfg } from "../server/config";
-import { startReplication, stopReplication, replicateTenant } from "../database/replication";
+import { startReplication, stopReplication } from "../database/replication";
 
 const TEST_TENANT = "files-repl";
 const SRC_DB = "mongodb://localhost:27017/_FILES_REPL_SRC";
@@ -13,6 +13,19 @@ let rest: InstanceType<typeof useRest>;
 let sourceClient: MongoClient;
 let destClient: MongoClient;
 
+/** Poll `check` until it holds — a change stream is asynchronous by nature. */
+async function waitFor(check: () => Promise<boolean>, timeout = 8_000, step = 50): Promise<boolean> {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+        if (await check()) return true;
+        await Bun.sleep(step);
+    }
+    return false;
+}
+
+const destDoc = (label: string) => destClient.db().collection(SLUG).findOne({ label });
+const destCount = (label: string) => destClient.db().collection(SLUG).countDocuments({ label });
+
 beforeAll(async () => {
     formatConfig({
         server: { port: 4000 },
@@ -21,10 +34,7 @@ beforeAll(async () => {
             dir: "src",
             database: { uri: SRC_DB },
             replication: {
-                // These cases exercise the scan engine (file collections)
-                mode: "scan",
                 runOnBoot: false,
-                schedule: { interval: "1h" },
                 destinations: [{ id: "backup", uri: DEST_DB }],
             },
         }],
@@ -61,29 +71,28 @@ afterAll(async () => {
     try { await sourceClient.close(); } catch (_) {}
 });
 
-const destDoc = (label: string) => destClient.db().collection(SLUG).findOne({ label });
-
 describe("file collection replication", () => {
     it("replicates file-collection documents", async () => {
         await rest.insertOne(SLUG, { label: "a", _file: { filename: "a.png" } });
-        await replicateTenant(TEST_TENANT);
+        expect(await waitFor(async () => Boolean(await destDoc("a")))).toBe(true);
 
-        const dest = await destDoc("a");
-        expect(dest).toBeDefined();
-        expect((dest as any)._file.filename).toBe("a.png");
+        const dest: any = await destDoc("a");
+        expect(dest._file.filename).toBe("a.png");
     });
 
-    it("propagates deletions via tombstones", async () => {
+    it("propagates deletions from the oplog", async () => {
         const doc: any = await rest.insertOne(SLUG, { label: "del-me" });
-        await replicateTenant(TEST_TENANT);
-        expect(await destDoc("del-me")).toBeDefined();
+        expect(await waitFor(async () => Boolean(await destDoc("del-me")))).toBe(true);
 
+        // The delete bypasses the collection hooks, but the oplog carries it anyway
         await rest.deleteOne(SLUG, doc._id);
-        await replicateTenant(TEST_TENANT);
-        expect(await destDoc("del-me")).toBeNull();
+        expect(await waitFor(async () => (await destCount("del-me")) === 0)).toBe(true);
     });
 
     it("does not replicate a file collection that did not opt in", async () => {
+        // The watched collection list is fixed when the watcher starts: a file
+        // collection added at runtime is only seen by a (re)start
+        await stopReplication();
         (cfg as any).fileCollections.push({
             _tenant_: TEST_TENANT,
             _isFileCollection_: true,
@@ -91,9 +100,10 @@ describe("file collection replication", () => {
             fields: [],
             api: { access: { "*": true } },
         });
+        await startReplication();
 
         await rest.insertOne("private-files", { label: "secret" });
-        await replicateTenant(TEST_TENANT);
+        await Bun.sleep(500); // long enough for an unexpected copy to land
 
         expect(await destClient.db().collection("private-files").findOne({ label: "secret" })).toBeNull();
     });

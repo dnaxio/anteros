@@ -18,11 +18,8 @@ await bootApp({
         database: { uri: Bun.env.RO_SRC ?? "mongodb://localhost:27017/_RO_SRC" },
         replication: {
             enabled: true,
-            // Boot capabilities are under test here, not the replication engine:
-            // the scan mode keeps the assertions deterministic
-            mode: "scan",
+            // Boot capabilities are under test here, not the replication engine
             runOnBoot: true,
-            schedule: { interval: "1h" },
             destinations: [{ id: "backup", uri: Bun.env.RO_DST ?? "mongodb://localhost:27017/_RO_DST" }],
         },
     }],

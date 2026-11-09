@@ -40,7 +40,7 @@ Every read and write recorded — parameters only, secrets redacted, indexed and
 ::
 
 ::prose-card{icon="lucide:git-compare" title="Replication" to="/docs/reference/replication"}
-One-way incremental copies to destination databases, on a schedule. No cluster to operate.
+One-way incremental copies to destination databases, in real time. No cluster to operate.
 ::
 
 ::prose-card{icon="lucide:database-zap" title="Caching & Vars" to="/docs/reference/caches"}

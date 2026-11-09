@@ -1,6 +1,4 @@
 import { getFileCollection } from "../database/file";
-import { getTenant } from "../database/tenant";
-import { writeDeleteMarkers } from "../database/deleteLog";
 import { toBson } from "../utils/func";
 import { useRest } from "../database/rest";
 import { cfg } from "../server/config";
@@ -556,12 +554,6 @@ export async function handleDelete(
     await rest.db.collection(collection).deleteOne({
       _id: (ObjectId.isValid(fileId) ? new ObjectId(fileId) : fileId) as any,
     });
-    // This path bypasses the collection hooks — record a tombstone explicitly so the
-    // deletion propagates when the file collection opted into replication.
-    if (col?.replication?.enabled) {
-      const db = getTenant(tenant_id)?.database?.db;
-      if (db) await writeDeleteMarkers(db, tenant_id, collection, [fileId]);
-    }
     // Audited like any other delete: the id and the stored filename, nothing else.
     // (`internal` is taken from the request context, so an HTTP call is logged as such.)
     await rest.audit.log({

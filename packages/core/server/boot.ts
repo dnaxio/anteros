@@ -12,6 +12,7 @@ import { syncCollections } from '../database/collection'
 import { syncFileCollections } from '../database/file'
 import { syncVars } from '../database/vars'
 import { startReplication, stopReplication } from '../database/replication'
+import { stopAuditQuack } from '../lib/auditQuack'
 import { loadLifecycles, runBeforeBoot, runAfterBoot, runOnDestroy } from '../lib/lifecycle'
 import { workflowStats } from '../lib/workflow'
 
@@ -196,6 +197,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
                 clearInterval(keepAlive);
                 try { await runOnDestroy(signal as 'SIGINT' | 'SIGTERM'); } catch {}
                 try { await stopReplication(); } catch {}
+                try { await stopAuditQuack(); } catch {}
                 for (const tenant of cfg.tenants ?? []) {
                     try { tenant.database?.client?.close(); } catch {}
                 }
@@ -297,6 +299,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
                 try { metricsServer.stop(true); } catch {}
                 try { await runOnDestroy(signal as 'SIGINT' | 'SIGTERM'); } catch {}
                 try { await stopReplication(); } catch {}
+                try { await stopAuditQuack(); } catch {}
                 for (const tenant of cfg.tenants ?? []) {
                     try { tenant.database?.client?.close(); } catch {}
                 }
@@ -402,6 +405,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
             try { server.stop(true); } catch {}
             try { await runOnDestroy(signal as 'SIGINT' | 'SIGTERM'); } catch {}
             try { await stopReplication(); } catch {}
+            try { await stopAuditQuack(); } catch {}
             for (const tenant of cfg.tenants ?? []) {
                 try { tenant.database?.client?.close(); } catch {}
             }

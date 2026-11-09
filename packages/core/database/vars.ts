@@ -7,7 +7,6 @@ import { cfg } from "../server/config";
 import { getTenant } from "./tenant";
 import { logger } from "../utils/logger";
 import { fieldToSchema } from "./schema";
-import { writeDeleteMarkers } from "./deleteLog";
 import { AppError } from "../lib/error";
 import * as func from "../utils/func";
 import type { Field } from "../types/field";
@@ -145,14 +144,6 @@ function createVars(tenantId: string, boundScope?: any): TenantVars {
 
     const defOf = (ns: string) => compiled.get(compiledKey(tenantId, ns));
 
-    /** Write delete tombstones for `_vars_` — only for namespaces that opted into replication. */
-    const markDeleted = async (ns: string, ids: string[]): Promise<void> => {
-        if (!ids.length || !getVarsDefinition(tenantId, ns)?.replication?.enabled) return;
-        const db = getTenant(tenantId)?.database?.db;
-        if (!db) return;
-        await writeDeleteMarkers(db, tenantId, "_vars_", ids);
-    };
-
     /** Resolve the effective scope for a call (explicit option wins over the bound scope). */
     const resolveScope = (ns: string, opts?: VarsOptions) => {
         const raw = opts && "scope" in opts ? opts.scope : boundScope;
@@ -252,9 +243,7 @@ function createVars(tenantId: string, boundScope?: any): TenantVars {
             const scope = resolveScope(ns, opts);
             const id = varId(scope.id, ns, key);
             const res = await col().deleteOne({ _id: id });
-            const removed = (res?.deletedCount ?? 0) > 0;
-            if (removed) await markDeleted(ns, [id]);
-            return removed;
+            return (res?.deletedCount ?? 0) > 0;
         },
 
         async has(ns: string, key: string, opts?: VarsOptions): Promise<boolean> {
@@ -295,10 +284,7 @@ function createVars(tenantId: string, boundScope?: any): TenantVars {
 
         async clear(ns: string, opts?: VarsOptions): Promise<number> {
             const scope = resolveScope(ns, opts);
-            const filter = { ns, scope: scope.value };
-            const docs = await col().find(filter, { projection: { _id: 1 } }).toArray();
-            const res = await col().deleteMany(filter);
-            await markDeleted(ns, docs.map((d: any) => d._id));
+            const res = await col().deleteMany({ ns, scope: scope.value });
             return res?.deletedCount ?? 0;
         },
 

@@ -167,7 +167,7 @@ describe("replication-only boot", () => {
         expect(fs.existsSync(path.join(MARKERS, "script.txt"))).toBe(false);
     });
 
-    it("keeps the process alive (replication timers are unref'd)", async () => {
+    it("keeps the process alive (the change streams hold it open)", async () => {
         await Bun.sleep(300);
         expect(proc.exitCode, `the process exited — output:\n${output}`).toBeNull();
     });
