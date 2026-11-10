@@ -30,8 +30,12 @@ const jwt = {
             .setIssuedAt()
             .setExpirationTime(EXPIRES_IN)
 
-        if (options?.issuer) signer.setIssuer(options.issuer)
-        if (options?.audience) signer.setAudience(options.audience)
+        // The configured issuer / audience are defaults: a token the framework
+        // signs must be one the framework verifies (#52).
+        const issuer = options?.issuer ?? cfg.server.jwt?.issuer
+        const audience = options?.audience ?? cfg.server.jwt?.audience
+        if (issuer) signer.setIssuer(issuer)
+        if (audience) signer.setAudience(audience)
         if (options?.subject) signer.setSubject(options.subject)
 
         const token = await signer.sign(secret);
@@ -43,7 +47,12 @@ const jwt = {
             let SECRET_ = cfg.server.jwt?.secret || Bun.env.JWT_SECRET
             if (!SECRET_) throw new Error('JWT_SECRET is not set');
             const secret = new TextEncoder().encode(SECRET_);
-            const { payload, protectedHeader } = await Jose.jwtVerify(token, secret);
+            const { payload } = await Jose.jwtVerify(token, secret, {
+                // A token without `exp` would never expire (#52)
+                requiredClaims: ['exp'],
+                ...(cfg.server.jwt?.issuer ? { issuer: cfg.server.jwt.issuer } : {}),
+                ...(cfg.server.jwt?.audience ? { audience: cfg.server.jwt.audience } : {}),
+            });
             return {
                 value: payload,
                 error: null,

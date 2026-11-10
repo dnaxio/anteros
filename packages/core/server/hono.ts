@@ -507,6 +507,20 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
         })
     })
 
+    // A token that was **presented** must verify — everywhere (#52). The two session
+    // endpoints are the exception: `login` is how a client replaces an expired token,
+    // and `logout` must work whatever state the token is in.
+    const SESSION_PATH = /\/api\/[^/]+\/collections\/[^/]+\/(?:login|logout)\/?$/;
+    app.use(async (c, next) => {
+        const token = (c as any).get('token') as { provided?: boolean; value?: string | null; expired?: boolean } | undefined;
+        if (!token?.provided || token.value) return next();
+        if (SESSION_PATH.test(c.req.path)) return next();
+        return c.json({
+            message: token.expired ? 'Token expired' : 'Invalid token',
+            code: token.expired ? 'TOKEN_EXPIRED' : 'INVALID_TOKEN',
+        }, 401);
+    });
+
     // Tenant-bound tokens (#35) — a JWT carrying a `tenant` claim only opens that
     // tenant's routes. `requireTenantClaim` rejects claim-less (legacy) tokens once set.
     app.use(async (c, next) => {

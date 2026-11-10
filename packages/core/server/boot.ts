@@ -1,5 +1,6 @@
 
 import { createApp, collectHeaders } from './hono'
+import { saveJwtSecret } from './envFile'
 import { parseBootFlags, resolveCapabilities, conflictingBootFlags, offCapabilities, capabilitiesLabel, FULL_CAPABILITIES } from './flags'
 import type { BootCapabilities } from './flags'
 import type { ServerConfig } from '../types/config'
@@ -234,20 +235,17 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
         if (hasAuth && !jwtSecret) {
             // CSPRNG: crypto.randomBytes (not Math.random — predictable)
             jwtSecret = crypto.randomBytes(48).toString('base64url');
-            try {
-                const envPath = '.env';
-                const exists = await Bun.file(envPath).exists();
-                const content = exists ? await Bun.file(envPath).text() : '';
-                if (!content.includes('JWT_SECRET=')) {
-                    const suffix = content ? '\n' : '';
-                    await Bun.write(envPath, `${content}${suffix}# Auto-generated on boot\nJWT_SECRET=${jwtSecret}\n`);
-                }
-                Bun.env.JWT_SECRET = jwtSecret;
-                console.log('🔐 JWT_SECRET auto-generated and saved to .env'.gray);
-            } catch {
-                Bun.env.JWT_SECRET = jwtSecret;
-                console.log('⚠ JWT_SECRET auto-generated (in-memory only, could not write .env)'.yellow);
-            }
+            let written = false;
+            // Owner-only (0600): a world-readable .env hands the signing key away
+            try { written = await saveJwtSecret(jwtSecret, '.env'); } catch { written = false; }
+            Bun.env.JWT_SECRET = jwtSecret;
+            if (written) console.log('🔐 JWT_SECRET auto-generated and saved to .env (0600)'.gray);
+            else console.log('⚠ JWT_SECRET auto-generated (in-memory only, could not write .env)'.yellow);
+        }
+        // A short HMAC key weakens every signature — say it once, at boot
+        const jwtKeyInUse = cfg.server.jwt?.secret || Bun.env.JWT_SECRET;
+        if (hasAuth && jwtKeyInUse && jwtKeyInUse.length < 32) {
+            console.log('⚠ JWT_SECRET is shorter than 32 characters — use a long random secret (HMAC-SHA256 key)'.yellow);
         }
 
         const PORT = (cfg.server.port || 4000);

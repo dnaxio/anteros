@@ -6,6 +6,7 @@ import { syncTenants } from "../database/tenant";
 import { useRest } from "../database/rest";
 import { AUDIT_COLLECTION } from "../database/audit";
 import { REDACTED, redactPayload, redactText } from "../lib/redact";
+import { jwt } from "../utils/func";
 
 const TENANT = "redact-test";
 const DB = "mongodb://localhost:27017/_AUDIT_REDACT_TEST";
@@ -182,11 +183,12 @@ describe("audit redaction — defaults", () => {
 
     it("redacts the request headers and query string", async () => {
         const since = new Date();
+        const token = await jwt.sign({ sub: "redact" });
         const res = await fetch(`${url}/api/${TENANT}/collections/${SLUG}/find?token=query-secret&page=2`, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
-                Authorization: "Bearer fake.jwt",
+                Authorization: `Bearer ${token}`,
                 "X-API-Key": "api-key-secret",
                 "X-Trace": "keep-me",
             },

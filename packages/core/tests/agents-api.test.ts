@@ -148,7 +148,8 @@ describe("agents HTTP API — access control", () => {
         });
         const body = await res.json() as any;
         expect(res.status).toBe(401);
-        expect(body.code).toBe("AUTH_REQUIRED");
+        // A presented token that does not verify is rejected globally (#52)
+        expect(body.code).toBe("INVALID_TOKEN");
     });
 
     it("allows a public action without a token", async () => {

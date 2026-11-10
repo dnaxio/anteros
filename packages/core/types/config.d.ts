@@ -162,6 +162,13 @@ export type ServerConfig = {
             secret?: string;
             expiresIn?: string;
             /**
+             * Expected `iss` — verified on every token when set, and **signed by
+             * default**, so a token the framework issues is one it verifies.
+             */
+            issuer?: string;
+            /** Expected `aud` — same contract as `issuer` (a string or a list). */
+            audience?: string | string[];
+            /**
              * Reject a token that carries **no tenant claim** (default `false`).
              *
              * Tokens issued by the login action always carry `tenant` (the claim is
