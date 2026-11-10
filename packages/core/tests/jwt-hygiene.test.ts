@@ -178,4 +178,51 @@ describe("JWT secret file", () => {
             rmSync(dir, { recursive: true, force: true });
         }
     });
+
+    it("ignores a comment that mentions `JWT_SECRET=` (#63)", async () => {
+        const dir = mkdtempSync(path.join(tmpdir(), "jwt-env-"));
+        const file = path.join(dir, ".env");
+        try {
+            // A comment is not an assignment — it used to block persistence, and the
+            // generated secret then lived in memory only (every restart logged everyone out)
+            writeFileSync(file, "# set your own: JWT_SECRET=please-change\nAPP_ENV=test\n");
+
+            expect(await saveJwtSecret("d".repeat(64), file)).toBe(true);
+            const content = readFileSync(file, "utf8");
+            expect(content).toContain(`JWT_SECRET=${"d".repeat(64)}`);
+            expect(content).toContain("# set your own: JWT_SECRET=please-change");
+            expect(statSync(file).mode & 0o777).toBe(0o600);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("fills an empty `JWT_SECRET=` in place, without duplicating it (#63)", async () => {
+        const dir = mkdtempSync(path.join(tmpdir(), "jwt-env-"));
+        const file = path.join(dir, ".env");
+        try {
+            writeFileSync(file, "APP_ENV=test\nJWT_SECRET=\nOTHER=1\n");
+
+            expect(await saveJwtSecret("e".repeat(64), file)).toBe(true);
+            const assignments = readFileSync(file, "utf8")
+                .split("\n")
+                .filter((line) => line.startsWith("JWT_SECRET="));
+            expect(assignments).toHaveLength(1);
+            expect(assignments[0]).toBe(`JWT_SECRET=${"e".repeat(64)}`);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("leaves a configured secret alone", async () => {
+        const dir = mkdtempSync(path.join(tmpdir(), "jwt-env-"));
+        const file = path.join(dir, ".env");
+        try {
+            writeFileSync(file, "JWT_SECRET=already-set\n");
+            expect(await saveJwtSecret("f".repeat(64), file)).toBe(false);
+            expect(readFileSync(file, "utf8")).toContain("JWT_SECRET=already-set");
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
 });

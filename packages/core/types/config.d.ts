@@ -27,6 +27,22 @@ export type ServerConfig = {
         /** When true, trusts proxy headers (CF-Connecting-IP / X-Forwarded-For) as the client IP. Default: false. */
         trustProxy?: boolean;
         /**
+         * HTTP transport limits.
+         */
+        http?: {
+            /**
+             * Close a connection that stays inactive for this many **seconds**
+             * (default `30`, `0` disables it, max `255`).
+             *
+             * This is Bun's `idleTimeout`: a stalled client — or a response that can
+             * no longer be delivered — is cut after that delay, so a dead connection
+             * never keeps a slot busy. It bounds the **connection**, not the handler:
+             * a slow query keeps running after its socket is gone. Raise it for a
+             * deliberately slow endpoint, not to hide a slow query.
+             */
+            idleTimeout?: number;
+        };
+        /**
          * Audit trail defaults for every tenant. A tenant declaring its own
          * `tenant.audit` always wins (even `false`).
          */

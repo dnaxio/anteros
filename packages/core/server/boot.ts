@@ -1,6 +1,7 @@
 
 import { createApp, collectHeaders } from './hono'
 import { saveJwtSecret } from './envFile'
+import { resolveHttpIdleTimeout } from './http'
 import { parseBootFlags, resolveCapabilities, conflictingBootFlags, offCapabilities, capabilitiesLabel, FULL_CAPABILITIES } from './flags'
 import type { BootCapabilities } from './flags'
 import type { ServerConfig } from '../types/config'
@@ -250,6 +251,8 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
 
         const PORT = (cfg.server.port || 4000);
         const NAME = cfg.server.name || process.env.APP_NAME || 'SERVER';
+        // Explicit, configurable connection timeout (`0` disables it)
+        const HTTP_IDLE_TIMEOUT = resolveHttpIdleTimeout(cfg.server.http);
         // Widened to `string`: TS narrows `process.env.NODE_ENV` to a literal union
         // ('development' | 'production' | 'test') and drops the 'dev' fallback branch.
         const env: string = process.env.NODE_ENV || Bun.env.NODE_ENV || 'dev';
@@ -272,6 +275,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
             const metricsPort = cfg.server.metricsPort ?? PORT + 1;
             const metricsServer = Bun.serve({
                 port: metricsPort,
+                idleTimeout: HTTP_IDLE_TIMEOUT,
                 fetch: (req) => {
                     if (new URL(req.url).pathname === '/health') {
                         return Response.json({
@@ -336,6 +340,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
         const server = Bun.serve({
             port: PORT,
             reusePort: reusePort || isWorker,
+            idleTimeout: HTTP_IDLE_TIMEOUT,
             fetch: (req, server) => {
                 const url = new URL(req.url);
 
