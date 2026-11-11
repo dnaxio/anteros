@@ -119,7 +119,33 @@
 - Le contexte tenant se propage correctement via `rest` lié au tenant + `requestCtxStorage` ; le cross-tenant exige F-01 (accès direct `cfg`).
 - Pas de hot-reload exposé en HTTP (reload agents/services/scripts = boot/in-process uniquement).
 
-## LOT J — RÉPLICATION & CACHE (TERMINÉ)
+## LOT K — DÉPENDANCES & PACKAGES ANNEXES (TERMINÉ — inventaire)
+
+### Inventaire des dépendances clés (via `bun pm ls --all`)
+| Package | Version | Statut |
+| --- | --- | --- |
+| jose | 6.2.8 | courant |
+| mongodb | 7.5.0 | courant |
+| hono | 4.13.18 | courant |
+| socket.io / engine.io | 4.8.3 / 6.6.11 | courant |
+| @modelcontextprotocol/sdk | 1.32.2 | courant |
+| @duckdb/node-api | **2.0.0-r.1** | **release candidate** (expérimental — documenté SECURITY.md) |
+| ioredis | 6.0.0 | courant |
+| joi | 18.3.2 | courant |
+| onnxruntime-node / sharp (reco) | 1.31.1 / 0.35.5 | natifs |
+
+### Constats
+| ID | Constat | Criticité | Statut |
+| --- | --- | --- | --- |
+| DEP-DUCKDB | `@duckdb/node-api@2.0.0-r.1` — version release candidate / protocole expérimental | LOW | CONFIRMED |
+| DEP-SURFACE | Large surface transitive (express, body-parser, raw-body, qs via Hono node-server/MCP) + binaires natifs | INFO | CONFIRMED |
+
+### Non vérifié
+- **Aucune CVE confirmée** (versions core à jour) ; scan CVE automatisé (`osv-scanner`/`trivy`/`npm audit`) **non exécuté** (outils non installés ; `npm audit` inapplicable : projet Bun sans `package-lock.json`).
+- `gitleaks` (scan de secrets) **non exécuté**.
+
+### Packages annexes
+- `gateway` (reverse proxy), `cli`, `sdk`, `duckdb`, `reco`, `docd` : **package.json + structure inventoriés** ; source non audité en profondeur (voir UNAUDITED-AREAS).
 
 ### Fichiers lus (J)
 - `database/ttl.ts`, `database/decorator.ts`, `database/db.cache.ts`, `utils/cache.ts`, `database/replication.ts` (outline)
