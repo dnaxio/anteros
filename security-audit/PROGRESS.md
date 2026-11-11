@@ -119,7 +119,43 @@
 - Le contexte tenant se propage correctement via `rest` lié au tenant + `requestCtxStorage` ; le cross-tenant exige F-01 (accès direct `cfg`).
 - Pas de hot-reload exposé en HTTP (reload agents/services/scripts = boot/in-process uniquement).
 
-### Remédiation Socket.IO (APPLIQUÉE)
+## LOT J — RÉPLICATION & CACHE (TERMINÉ)
+
+### Fichiers lus (J)
+- `database/ttl.ts`, `database/decorator.ts`, `database/db.cache.ts`, `utils/cache.ts`, `database/replication.ts` (outline)
+
+### Constat
+**Aucun nouveau finding.**
+
+### Contrôles vérifiés (positifs)
+- Cache DB : **namespace par tenant** (`db:{tenant}:{collection}`), clé `sha1(params+options)`, opt-in, invalidation ciblée par `_id`.
+- Réplication : opt-in par collection/destination, filtre `_baseFilter_`, locks distribués, change streams + backfill.
+- `LogSlowQuery` ne logge pas les paramètres de requête (seulement collection/tenant/durée).
+- TTL retention non fatal.
+
+### Risque résiduel (INFO)
+- Cache filesystem : résultats de requêtes (documents) stockés dans `.cache/` non chiffrés (opt-in).
+- Réplication : credentials de destination en config (`replication.destinations[].uri`) — **NOT_VERIFIED** (config).
+
+### État d'avancement
+**Terminés** : A–J (tous les lots core).
+**Restant** : K (packages annexes + **dépendances**).
+
+### Fichiers lus (I)
+- `utils/logger.ts`, `lib/error.ts`, `lib/tracing.ts`, `lib/auditDriver.ts`, `lib/auditResult.ts`, `lib/auditQuack.ts`
+
+### Constat
+| ID | Constat | Criticité | Statut |
+| --- | --- | --- | --- |
+| LOG-REDACT | Logger général sans redaction intégrée ; `request_body` (opt-in) non redacté | LOW | CONFIRMED |
+
+### Contrôles vérifiés (positifs)
+- Redaction d'audit (`redactPayload`) au point unique (`rest.audit`).
+- `summarizeAuditResult` défaut `summary` → **jamais de document** (seulement IDs/compteurs).
+- `AppError` → 500 générique pour non-AppError (pas de fuite de stack).
+- Access log : exclut `authorization`/`cookie`, redacte les query params URI.
+- Logger JSONL avec rotation + `safeStringify` (circular/bigint).
+- `audit.results:'full'` (opt-in) documenté.
 - `types/websocket.d.ts` : ajout `api.access` (`connect`/`*`).
 - `lib/sockets.ts` : `io.use` auth (token + tenant claim), scoping tenant (`socket.data.tenant`), `evaluateAccess` par handler.
 - Typecheck socket : **propre**. Tests infra (`security`, `metrics-cluster`) : **14/14 pass**.
