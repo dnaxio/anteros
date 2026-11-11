@@ -7,6 +7,7 @@ export default define.McpTool({
         msg: v.string().required().description("The message to echo"),
         times: v.number().integer().min(1).max(5).default(1),
     }),
+    api: { access: { call: true } },
     exec: async ({ args }) => {
         // Protocol format: { content: [...] }
         return {

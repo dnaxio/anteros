@@ -4,6 +4,40 @@ import type { Context } from "hono";
 import type { useRest } from "../database/rest";
 import type { TenantAgents } from "./agent";
 import type { Api } from "../lib/api";
+import type { fn } from "../lib/error";
+import type { jwt } from "../utils/func";
+
+/**
+ * Context handed to an `api.access` rule of an MCP tool/resource — the same
+ * contract as collections, vars and agents (secure-by-default: no rule = denied).
+ */
+export type McpAccessContext = {
+    rest: InstanceType<typeof useRest>;
+    error: typeof fn.error;
+    jwt: typeof jwt;
+    token: { value: string | null; decoded: Record<string, unknown> | null; provided: boolean; expired: boolean };
+    tenant: string;
+    /** Tool name (tools/call) */
+    tool?: string;
+    /** Resource name (resources/read) */
+    resource?: string;
+    /** Parsed & validated arguments (tools/call) */
+    args?: Record<string, any>;
+    /** Requested URI (resources/read) */
+    uri?: string;
+};
+
+/** Per-operation access rules for an MCP tool — `'call'` or `'*'`. */
+export type McpToolAccess = {
+    call?: boolean | ((ctx: McpAccessContext) => boolean | Promise<boolean>);
+    '*'?: boolean | ((ctx: McpAccessContext) => boolean | Promise<boolean>);
+};
+
+/** Per-operation access rules for an MCP resource — `'read'` or `'*'`. */
+export type McpResourceAccess = {
+    read?: boolean | ((ctx: McpAccessContext) => boolean | Promise<boolean>);
+    '*'?: boolean | ((ctx: McpAccessContext) => boolean | Promise<boolean>);
+};
 
 /**
  * MCP tool result — the Model Context Protocol `CallToolResult` shape.
@@ -29,6 +63,8 @@ export type McpTool = {
     enabled?: boolean;
     /** Joi schema describing the tool arguments (same language as collections — `v`) */
     inputSchema: Joi.Schema;
+    /** Per-operation access — **no rule = denied** (secure by default). */
+    api?: { access?: McpToolAccess };
     /** Handler executed when the LLM calls the tool (args are Joi-validated).
      * Must return the MCP protocol result shape: `{ content: [{ type, text | data… }] }`. */
     exec: (ctx: {
@@ -75,6 +111,8 @@ export type McpResource = {
     uri: string;
     /** Content type of the resource (default: application/json) */
     mimeType?: string;
+    /** Per-operation access — **no rule = denied** (secure by default). */
+    api?: { access?: McpResourceAccess };
     /** Handler called when the LLM reads the resource */
     read: (ctx: {
         c: Context;

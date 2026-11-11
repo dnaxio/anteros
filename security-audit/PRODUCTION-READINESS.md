@@ -7,7 +7,12 @@
 ### Justification
 Une vulnérabilité **HIGH confirmée et non corrigée** bloque la production :
 
-- **G-MCP-EXPOSE** — `GET/POST /api/:tenant_id/mcp` expose les tools/resources MCP **sans authentification ni autorisation** (`server/mcp.ts:195-207`). Un appelant anonyme peut lister et invoquer les tools MCP d'un tenant avec accès DB complet. CVSS 4.0 ≈ 8.7 (High).
+- **G-MCP-EXPOSE** — `GET/POST /api/:tenant_id/mcp` sans authentification ni autorisation (`server/mcp.ts:195-207`). CVSS 4.0 ≈ 8.7 (High).
+
+### État de la remédiation
+- **Code appliqué + unit-tests passés** (`mcp.test.ts` 6/6) : authentification + tenant-claim + `evaluateAccess` + audit + rate limit.
+- **Validation staging restante** : les 12 scénarios Streamable HTTP (`MCP-SECURITY-TEST-PLAN.md`) + vérification d'audit ne sont pas exécutés (pas de staging/MongoDB autorisé).
+- Le verdict reste **NOT READY** tant que la validation staging n'est pas effectuée.
 
 ### Conditions pour passer à « READY WITH CONDITIONS »
 1. Corriger G-MCP-EXPOSE (authentification + `api.access` sur chaque tool/resource, aligné sur la route Agents).

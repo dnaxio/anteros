@@ -78,11 +78,105 @@
 - Champ crypto (clés, rotation).
 
 ### Prochain lot proposé
-~~Lot G1 (inventaire + triage MCP)~~ → **Lot G2** (Agent Core / prompt / tool-calling / guardrails) — sur validation explicite.
+**Remédiation G-MCP-EXPOSE proposée** (voir `REMEDIATION-G-MCP.md`) → en attente d'autorisation d'application. G2–G6 suspendus.
 
 ---
 
-## LOT G1 — INVENTAIRE AGENTS/MCP + TRIAGE G-MCP-EXPOSE (TERMINÉ)
+## PHASE REMÉDIATION — G-MCP-EXPOSE (APPLIQUÉE, validation en attente)
+
+### Modifications appliquées
+- `types/mcp.d.ts` : ajout `McpAccessContext`, `McpToolAccess`, `McpResourceAccess` + champ `api.access` sur `McpTool`/`McpResource`.
+- `server/mcp.ts` : authN obligatoire + tenant claim + `evaluateAccess` par tool/resource + audit (`rest.audit.log`, args en empreinte) + rate limit par tenant + réponse 404 générique + `c` réel passé à `buildServer`.
+
+### Validation
+- Typecheck : **aucune erreur dans les fichiers modifiés** (`mcp.ts`/`mcp.d.ts`). Erreurs restantes **préexistantes** (field.crypto, api.ts, hono.ts, db-cache.test, hono.test).
+- `mcp.test.ts` : **6/6 pass** (auth 200, 401 anonyme, 401 cross-tenant, refus sans `api.access`, Joi, 404 générique).
+- `agent-mcp.test.ts` : **échoue (préexistant)** — timeout hook dû à l'absence de MongoDB local.
+- Finding G-MCP-EXPOSE : **FIX APPLIED + unit-tests pass** ; validation staging (12 scénarios Streamable HTTP + audit) **encore requise** avant « corrigé ».
+
+### Fichiers modifiés (phase remédiation + tests)
+- `types/mcp.d.ts`, `server/mcp.ts` (correctif)
+- `tests/mcp.test.ts` (adapté : auth + 4 nouveaux cas)
+- `tests/fixtures/mcp-tenant/mcp/tools/{echo,badge}.tool.ts`, `.../resources/{orders.summary,users.id}.resource.ts` (ajout `api.access`)
+- `demo/package.json` (créé — prérequis `bun install`, gitignoré)
+
+---
+
+## LOT G6 — TRANSVERSAL : TENANT, F-01, #17, #18 (TERMINÉ)
+
+### Constats consolidés
+| ID | Constat | Criticité | Statut |
+| --- | --- | --- | --- |
+| F-01 (requalifié) | Pas d'isolation code inter-tenant (process partagé, `cfg` global, JWT_SECRET commun) — **HIGH** (architecture partagée confirmée ; pas de chemin d'intro de code démontré) | HIGH | CONFIRMED |
+| G-CHAIN-RECURSION | Chaînage workflow/script sans contrôle de profondeur/récursivité → DoS | LOW | CONFIRMED |
+
+### #17 (persistance/auto-modification)
+- Un script/workflow (code de confiance) peut écrire sur le filesystem (`lib/`, `scripts/`) et créer de nouveaux fichiers exécutables — **mais** ils ne s'exécutent qu'au prochain boot (aucun hot-reload exposé en HTTP). Subsumé par F-01.
+- Peut modifier `cfg` (in-memory) ou les vars d'un autre tenant via `cfg.tenants`/`new useRest({tenant_id})` — subsumé par F-01.
+
+### #18 (chaînage/propagation)
+- Script→script, workflow→workflow : pas de limite de profondeur/récursion (G-CHAIN-RECURSION).
+- Le contexte tenant se propage correctement via `rest` lié au tenant + `requestCtxStorage` ; le cross-tenant exige F-01 (accès direct `cfg`).
+- Pas de hot-reload exposé en HTTP (reload agents/services/scripts = boot/in-process uniquement).
+
+### État d'avancement lots A–G
+**Terminés** : A (authN), B (config), C (MongoDB/NoSQL), D (fichiers), E (API/CMS), F (scripts/workflows), G1–G6 (agents/MCP/mémoire/providers).
+**Restants** : H (infra : cluster/io/sockets/metrics), I (logging/audit détaillé), J (réplication/cache), K (packages annexes + dépendances).
+
+### Fichiers lus (G5)
+- `lib/providers.ts` (resolveApiKey L130, resolveBaseUrl L147, fetchWithRetry L454-501)
+- `lib/ai.ts` (vide), `lib/eval.ts`, `lib/partialJson.ts`
+
+### Constat
+**Aucun nouveau finding.**
+
+### Contrôles vérifiés (positifs)
+- Clé API : `provider.apiKey` ou env (`OPENAI_API_KEY`/`ANTHROPIC_API_KEY`), **pas de clé par défaut**.
+- **Pas de SSRF** : `baseUrl`/`mcp` sont déclarés côté serveur (config), pas contrôlés par le client.
+- `fetch` avec timeout + retries backoff + `AbortSignal` (appels réseau bornés).
+- Pas de fuite de clé dans les messages d'erreur (seuls `provider.model`/statut).
+- `partialJson`/`eval` : parsing JSON sûr (pas d'`eval`), pas de surface HTTP.
+- Accès DB/FS/réseau des tools = code développeur (F-01) ; args validés (G-TOOL-VALID).
+
+### Fichiers restants (G6)
+- Transverse : AUTH-01, F-01, #17 (persistance/auto-modif), #18 (chaînage), `lib/skills.ts`, `lib/lifecycle.ts`.
+
+### Fichiers lus (G4)
+- `lib/agentMemory.ts` (threadKey L59-63, MongoAgentMemory L298-462, RedisAgentMemory L690-880)
+- `lib/agent.ts` (#memoryCtx L974-985, getMessages L988-992)
+
+### Constat
+| ID | Constat | Criticité | Statut |
+| --- | --- | --- | --- |
+| G-MEM-POISON | Mémoire keyée par `resourceId`/`threadId` fournis par l'appelant, sans contrôle d'appartenance (BOLA) → lecture/écriture cross-utilisateur + empoisonnement | MEDIUM | CONFIRMED |
+
+### Contrôles vérifiés (positifs)
+- Isolation tenant correcte : Mongo = DB du tenant ; Redis = namespace par tenant (`#namespace`).
+- Cap de messages (`maxMessages`), TTL optionnel, gestion gracieuse des entrées corrompues.
+- Processeurs `load`/`save` (peuvent servir de garde-fou : summarize…).
+
+### Risque résiduel
+- `resource`/`thread` **non dérivés du token** : l'application doit les dériver de l'identité authentifiée ; le framework ne l'impose pas.
+
+### Fichiers lus (G2)
+- `lib/agent.ts` (sections : #executeTool L1506-1566, #run L1568-2185, guardrails L435-479, #collectTools L1362-1412)
+- `types/agent.d.ts` (AgentToolContext L406-417, AgentTool L437-478)
+
+### Constats
+| ID | Constat | Criticité | Statut |
+| --- | --- | --- | --- |
+| G-PROMPT-INJ | Prompt injection → tool call non autorisé ; tools exécutés avec `rest` tenant complet ; guardrails/approval opt-in | MEDIUM | CONFIRMED |
+| G-AGENT-TOOL-AUTHZ | Pas d'autorisation par tool au niveau agent (contraste : HTTP `api.access`) | LOW | CONFIRMED |
+| G-TOOL-VALID | Args validés vs `inputSchema` ; sans schéma = objet ouvert (responsabilité tool) | INFO | CONFIRMED |
+
+### Contrôles vérifiés (positifs)
+- Args de tool validés (`validateWithSchema`) avant exécution.
+- Timeout par tool + `AbortSignal` (anti-blocage).
+- Budget run : `maxTokens`/`maxCost`/`maxDuration` + `maxSteps`.
+- Guardrails input/output/tool (opt-in) ; approbation par tool (`approval:true`).
+- Délégation sous-agent : `rest` tenant conservé (pas de cross-tenant).
+- Sortie structurée validée vs schéma + tour de réparation.
+- Tools MCP distants adaptés + validés + timeout 5s.
 
 ### Fichiers lus (G1)
 - `lib/agents.ts`, `lib/mcp.ts`, `lib/mcpClient.ts`, `server/mcp.ts`

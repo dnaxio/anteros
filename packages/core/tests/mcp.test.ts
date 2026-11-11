@@ -3,9 +3,11 @@ import { define, v } from "../index";
 import { cfg } from "../server/config";
 import { syncMcpTools } from "../lib/mcp";
 import { createApp } from "../server/hono";
+import { jwt } from "../utils/func";
 
 const TENANT = "mcp-test";
 const TENANT_DIR = "packages/core/tests/fixtures/mcp-tenant";
+const SECRET = "test-secret-0123456789abcdef0123456789";
 
 // @hono/mcp frames every message as Server-Sent Events (MCP Streamable HTTP spec)
 function parseSSE(text: string): any[] {
@@ -24,9 +26,14 @@ function parseSSE(text: string): any[] {
 }
 
 function resetConfig() {
-    cfg.server = { ...cfg.server, rateLimit: undefined, cors: undefined, ipRestriction: undefined, trustProxy: undefined };
+    cfg.server = { ...cfg.server, rateLimit: undefined, cors: undefined, ipRestriction: undefined, trustProxy: undefined, jwt: undefined };
     cfg.mcpTools = [];
+    cfg.mcpResources = [];
     cfg.tenants = [];
+}
+
+function authHeaders(token: string): Record<string, string> {
+    return { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
 }
 
 beforeEach(() => {
@@ -35,6 +42,7 @@ beforeEach(() => {
     delete process.env.REDIS_HOST;
     delete process.env.REDIS_PORT;
     delete process.env.REDIS_PASSWORD;
+    delete process.env.JWT_SECRET;
 });
 
 describe("define.McpTool", () => {
@@ -63,9 +71,11 @@ describe("syncMcpTools", () => {
 });
 
 describe("MCP protocol (GET/POST /api/:tenant_id/mcp)", () => {
-    it("serves tools/list and tools/call over JSON-RPC", async () => {
+    it("serves tools/list and tools/call over JSON-RPC (authenticated)", async () => {
         cfg.tenants = [{ id: TENANT, dir: TENANT_DIR, database: { uri: "mongodb://localhost:27017/none" } }];
+        cfg.server.jwt = { secret: SECRET, requireTenantClaim: true };
         await syncMcpTools();
+        const token = await jwt.sign({ tenant: TENANT, sub: "test-user" });
 
         const app = createApp();
         const server = Bun.serve({ port: 0, fetch: app.fetch });
@@ -74,7 +84,7 @@ describe("MCP protocol (GET/POST /api/:tenant_id/mcp)", () => {
         // 1. tools/list
         const listRes = await fetch(`${url}/api/${TENANT}/mcp`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: authHeaders(token),
             body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
         });
         expect(listRes.status).toBe(200);
@@ -86,7 +96,7 @@ describe("MCP protocol (GET/POST /api/:tenant_id/mcp)", () => {
         // 1b. resources/list — static resources
         const resListRes = await fetch(`${url}/api/${TENANT}/mcp`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: authHeaders(token),
             body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "resources/list", params: {} }),
         });
         const resList = parseSSE(await resListRes.text())[0];
@@ -96,7 +106,7 @@ describe("MCP protocol (GET/POST /api/:tenant_id/mcp)", () => {
         // 1c. resources/templates/list
         const tmplRes = await fetch(`${url}/api/${TENANT}/mcp`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: authHeaders(token),
             body: JSON.stringify({ jsonrpc: "2.0", id: 10, method: "resources/templates/list", params: {} }),
         });
         const tmplList = parseSSE(await tmplRes.text())[0];
@@ -106,7 +116,7 @@ describe("MCP protocol (GET/POST /api/:tenant_id/mcp)", () => {
         // 1d. resources/read — static URI
         const readRes = await fetch(`${url}/api/${TENANT}/mcp`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: authHeaders(token),
             body: JSON.stringify({ jsonrpc: "2.0", id: 11, method: "resources/read", params: { uri: "orders://summary" } }),
         });
         const read = parseSSE(await readRes.text())[0];
@@ -116,7 +126,7 @@ describe("MCP protocol (GET/POST /api/:tenant_id/mcp)", () => {
         // 1e. resources/read — template URI with params
         const readTplRes = await fetch(`${url}/api/${TENANT}/mcp`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: authHeaders(token),
             body: JSON.stringify({ jsonrpc: "2.0", id: 12, method: "resources/read", params: { uri: "users://abc123" } }),
         });
         const readTpl = parseSSE(await readTplRes.text())[0];
@@ -125,7 +135,7 @@ describe("MCP protocol (GET/POST /api/:tenant_id/mcp)", () => {
         // 1f. resources/read — unknown URI → error
         const readBadRes = await fetch(`${url}/api/${TENANT}/mcp`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: authHeaders(token),
             body: JSON.stringify({ jsonrpc: "2.0", id: 13, method: "resources/read", params: { uri: "nope://x" } }),
         });
         const readBad = parseSSE(await readBadRes.text())[0];
@@ -134,7 +144,7 @@ describe("MCP protocol (GET/POST /api/:tenant_id/mcp)", () => {
         // 2. tools/call (valid args + Joi defaults)
         const callRes = await fetch(`${url}/api/${TENANT}/mcp`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: authHeaders(token),
             body: JSON.stringify({
                 jsonrpc: "2.0", id: 2, method: "tools/call",
                 params: { name: "echo", arguments: { msg: "hello mcp" } },
@@ -150,7 +160,7 @@ describe("MCP protocol (GET/POST /api/:tenant_id/mcp)", () => {
         // 2b. protocol content blocks pass through unchanged (image block)
         const badgeRes = await fetch(`${url}/api/${TENANT}/mcp`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: authHeaders(token),
             body: JSON.stringify({
                 jsonrpc: "2.0", id: 3, method: "tools/call",
                 params: { name: "badge", arguments: {} },
@@ -160,10 +170,10 @@ describe("MCP protocol (GET/POST /api/:tenant_id/mcp)", () => {
         expect(badge?.result?.content?.[0]?.type).toBe("image");
         expect(badge?.result?.content?.[0]?.mimeType).toBe("image/png");
 
-        // 2b. invalid args → isError (Joi validation)
+        // 2c. invalid args → isError (Joi validation)
         const badRes = await fetch(`${url}/api/${TENANT}/mcp`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: authHeaders(token),
             body: JSON.stringify({
                 jsonrpc: "2.0", id: 3, method: "tools/call",
                 params: { name: "echo", arguments: { msg: 123 } },
@@ -173,13 +183,86 @@ describe("MCP protocol (GET/POST /api/:tenant_id/mcp)", () => {
         expect(bad?.result?.isError).toBe(true);
         expect(bad?.result?.content?.[0]?.text ?? "").toContain("Invalid arguments");
 
-        // 3. unknown tenant → 404
+        // 3. unknown tenant → 404 (generic, no tenant echo)
+        const ghostToken = await jwt.sign({ tenant: "ghost", sub: "test-user" });
         const notFound = await fetch(`${url}/api/ghost/mcp`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: authHeaders(ghostToken),
             body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list", params: {} }),
         });
         expect(notFound.status).toBe(404);
+        expect(await notFound.text()).not.toContain("ghost");
+
+        server.stop(true);
+    });
+
+    it("rejects unauthenticated MCP requests", async () => {
+        cfg.tenants = [{ id: TENANT, dir: TENANT_DIR, database: { uri: "mongodb://localhost:27017/none" } }];
+        cfg.server.jwt = { secret: SECRET, requireTenantClaim: true };
+        await syncMcpTools();
+
+        const app = createApp();
+        const server = Bun.serve({ port: 0, fetch: app.fetch });
+        const url = server.url.href.replace(/\/$/, "");
+
+        const res = await fetch(`${url}/api/${TENANT}/mcp`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+        });
+        expect(res.status).toBe(401);
+
+        server.stop(true);
+    });
+
+    it("rejects a token that does not belong to the tenant", async () => {
+        cfg.tenants = [{ id: TENANT, dir: TENANT_DIR, database: { uri: "mongodb://localhost:27017/none" } }];
+        cfg.server.jwt = { secret: SECRET, requireTenantClaim: true };
+        await syncMcpTools();
+        const token = await jwt.sign({ tenant: "other-tenant", sub: "test-user" });
+
+        const app = createApp();
+        const server = Bun.serve({ port: 0, fetch: app.fetch });
+        const url = server.url.href.replace(/\/$/, "");
+
+        const res = await fetch(`${url}/api/${TENANT}/mcp`, {
+            method: "POST",
+            headers: authHeaders(token),
+            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+        });
+        expect(res.status).toBe(401);
+
+        server.stop(true);
+    });
+
+    it("rejects tools/call when the tool has no api.access (no rule = denied)", async () => {
+        cfg.tenants = [{ id: TENANT, dir: TENANT_DIR, database: { uri: "mongodb://localhost:27017/none" } }];
+        cfg.server.jwt = { secret: SECRET, requireTenantClaim: true };
+        cfg.mcpTools = [{
+            name: "secret-tool",
+            description: "has no access rule",
+            inputSchema: v.object({}),
+            _tenant_: TENANT,
+            exec: async () => ({ content: [{ type: "text", text: "should not run" }] }),
+        } as any];
+        cfg.mcpResources = [];
+        const token = await jwt.sign({ tenant: TENANT, sub: "test-user" });
+
+        const app = createApp();
+        const server = Bun.serve({ port: 0, fetch: app.fetch });
+        const url = server.url.href.replace(/\/$/, "");
+
+        const res = await fetch(`${url}/api/${TENANT}/mcp`, {
+            method: "POST",
+            headers: authHeaders(token),
+            body: JSON.stringify({
+                jsonrpc: "2.0", id: 1, method: "tools/call",
+                params: { name: "secret-tool", arguments: {} },
+            }),
+        });
+        const msg = parseSSE(await res.text())[0];
+        expect(msg?.result?.isError).toBe(true);
+        expect(msg?.result?.content?.[0]?.text).toBe("Access denied");
 
         server.stop(true);
     });

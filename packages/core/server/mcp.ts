@@ -15,6 +15,8 @@ import { useRest } from "../database/rest";
 import { createAgents } from "../lib/agents";
 import { createApi } from "../lib/api";
 import { logger } from "../utils/logger";
+import { evaluateAccess } from "./access";
+import { rateLimit } from "./security";
 import type { McpTool, McpResource } from "../types/mcp";
 import type { HonoVariables } from "./env";
 import { joiToJsonSchema } from "../lib/jsonSchema";
@@ -52,9 +54,18 @@ function matchUri(uri: string, resources: McpResource[]): { resource: McpResourc
     return null;
 }
 
+/** Fingerprint of an argument payload — audited, never the raw value. */
+function fingerprint(value: unknown): string {
+    try {
+        return new Bun.CryptoHasher("sha256").update(JSON.stringify(value) ?? "").digest("hex");
+    } catch {
+        return "unserializable";
+    }
+}
+
 // ─── MCP server (one fresh instance per request — stateless) ─────────────
 
-function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[]): Server {
+function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[], c: Context<{ Variables: HonoVariables }>): Server {
     const server = new Server(
         { name: 'anteros-mcp', version: cfg.version ?? '1.0.0' },
         { capabilities: { tools: {}, resources: {} } }
@@ -85,7 +96,7 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
         const raw = req.params.arguments ?? {};
         const { error, value } = tool.inputSchema.validate(raw, { allowUnknown: false });
         if (error) {
-            logger.file('warn', 'MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, args: raw, error: 'invalid arguments', duration: ms(start) });
+            logger.file('warn', 'MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, argsFingerprint: fingerprint(raw), error: 'invalid arguments', duration: ms(start) });
             return {
                 content: [{ type: 'text' as const, text: `Invalid arguments: ${error.message}` }],
                 isError: true,
@@ -94,20 +105,56 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
 
         const rest = new useRest({ tenant_id: tenantId });
         try {
+            // Independent authorization per tool — no rule = denied (secure by default).
+            await evaluateAccess(tool.api?.access as any, 'call', rest, `mcp:${tool.name}`, c, {
+                tenant: tenantId,
+                tool: tool.name,
+                args: value,
+            });
+        } catch (err: any) {
+            logger.file('warn', 'MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, argsFingerprint: fingerprint(value), error: 'access denied', duration: ms(start) });
+            await rest.audit.log({
+                action: 'mcp.tools/call',
+                collection: tool.name,
+                input: { tenant: tenantId, tool: tool.name, argsFingerprint: fingerprint(value) },
+                error: { message: 'Access denied', code: err?.code || 'ACCESS_DENIED' },
+                duration: ms(start),
+            }).catch(() => {});
+            return {
+                content: [{ type: 'text' as const, text: 'Access denied' }],
+                isError: true,
+            };
+        }
+
+        try {
             const result = await tool.exec({
-                c: undefined as any,
+                c,
                 rest,
                 args: value,
                 agents: createAgents(tenantId, rest),
                 api: createApi(rest),
             });
             const isError = !!(result as any)?.isError;
-            logger[isError ? 'warn' : 'info']('MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, args: value, isError, duration: ms(start) });
+            logger[isError ? 'warn' : 'info']('MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, argsFingerprint: fingerprint(value), isError, duration: ms(start) });
+            await rest.audit.log({
+                action: 'mcp.tools/call',
+                collection: tool.name,
+                input: { tenant: tenantId, tool: tool.name, argsFingerprint: fingerprint(value) },
+                result: { isError },
+                duration: ms(start),
+            }).catch(() => {});
             if (result && Array.isArray(result.content)) return result;
             const text = typeof result === 'string' ? result : JSON.stringify(result);
             return { content: [{ type: 'text' as const, text }] };
         } catch (err: any) {
-            logger.file('warn', 'MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, args: value, error: err?.message ?? 'unknown', duration: ms(start) });
+            logger.file('warn', 'MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, argsFingerprint: fingerprint(value), error: err?.message ?? 'unknown', duration: ms(start) });
+            await rest.audit.log({
+                action: 'mcp.tools/call',
+                collection: tool.name,
+                input: { tenant: tenantId, tool: tool.name, argsFingerprint: fingerprint(value) },
+                error: { message: err?.message ?? 'unknown', code: 'MCP_TOOL_ERROR' },
+                duration: ms(start),
+            }).catch(() => {});
             return {
                 content: [{ type: 'text' as const, text: `Error: ${err?.message ?? 'unknown'}` }],
                 isError: true,
@@ -154,8 +201,27 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
 
         const rest = new useRest({ tenant_id: tenantId });
         try {
+            // Independent authorization per resource — no rule = denied.
+            await evaluateAccess(matched.resource.api?.access as any, 'read', rest, `mcp:${matched.resource.name}`, c, {
+                tenant: tenantId,
+                resource: matched.resource.name,
+                uri,
+            });
+        } catch (err: any) {
+            logger.file('warn', 'MCP resources/read', { method: 'resources/read', tenant: tenantId, uri, resource: matched.resource.name, error: 'access denied', duration: ms(start) });
+            await rest.audit.log({
+                action: 'mcp.resources/read',
+                collection: matched.resource.name,
+                input: { tenant: tenantId, resource: matched.resource.name, uri },
+                error: { message: 'Access denied', code: err?.code || 'ACCESS_DENIED' },
+                duration: ms(start),
+            }).catch(() => {});
+            throw new McpError(ErrorCode.InvalidRequest, 'Access denied');
+        }
+
+        try {
             const result = await matched.resource.read({
-                c: undefined as any,
+                c,
                 rest,
                 agents: createAgents(tenantId, rest),
                 api: createApi(rest),
@@ -163,9 +229,23 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
                 uri,
             });
             logger.file('MCP resources/read', { method: 'resources/read', tenant: tenantId, uri, resource: matched.resource.name, params: matched.params, duration: ms(start) });
+            await rest.audit.log({
+                action: 'mcp.resources/read',
+                collection: matched.resource.name,
+                input: { tenant: tenantId, resource: matched.resource.name, uri },
+                result: { ok: true },
+                duration: ms(start),
+            }).catch(() => {});
             return result;
         } catch (err: any) {
             logger.file('warn', 'MCP resources/read', { method: 'resources/read', tenant: tenantId, uri, error: err?.message ?? 'unknown', duration: ms(start) });
+            await rest.audit.log({
+                action: 'mcp.resources/read',
+                collection: matched.resource.name,
+                input: { tenant: tenantId, resource: matched.resource.name, uri },
+                error: { message: err?.message ?? 'unknown', code: 'MCP_RESOURCE_ERROR' },
+                duration: ms(start),
+            }).catch(() => {});
             throw new McpError(ErrorCode.InternalError, `Failed to read resource: ${err?.message ?? 'unknown'}`);
         }
     });
@@ -177,6 +257,10 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
  * Expose each tenant's MCP tools & resources over the Model Context Protocol
  * at `GET/POST /api/:tenant_id/mcp` (Streamable HTTP transport — works with
  * Claude, Cursor, VS Code, and any MCP client).
+ *
+ * Security: every MCP operation requires a verified, tenant-bound token. Each
+ * `tools/call` / `resources/read` is additionally gated by its own `api.access`
+ * (no rule = denied). See G-MCP-EXPOSE.
  */
 export function initializeMcp(app: Hono<{ Variables: HonoVariables }>) {
     const toolsByTenant = new Map<string, McpTool[]>();
@@ -192,15 +276,45 @@ export function initializeMcp(app: Hono<{ Variables: HonoVariables }>) {
         resourcesByTenant.set(resource._tenant_ ?? '', list);
     }
 
+    // Per-tenant rate limit, in addition to the global/IP limit (server/hono.ts).
+    // Keyed by the authenticated tenant claim (fallback: client IP).
+    app.use(patterns.mcp, rateLimit({
+        windowMs: 60_000,
+        max: 300,
+        keyGenerator: (c) => {
+            const token = (c as any).get('token') as { decoded?: Record<string, unknown> } | undefined;
+            const tenant = token?.decoded?.['tenant'] ?? token?.decoded?.['_tenant_'] ?? token?.decoded?.['tenant_id']
+                ?? (c as any).get('clientIp') ?? 'unknown';
+            return `rn:rl:mcp:${String(tenant)}`;
+        },
+    }));
+
     app.all(patterns.mcp, async (c: Context<{ Variables: HonoVariables }>) => {
         const tenantId = c.req.param('tenant_id') ?? '';
-        const tools = toolsByTenant.get(tenantId) ?? [];
-        const resources = resourcesByTenant.get(tenantId) ?? [];
-        if (!tools.length && !resources.length) {
-            return c.json({ error: `No MCP tools or resources for tenant '${tenantId}'` }, 404);
+
+        // 1. Reject anonymous, invalid or expired tokens (same contract as /_dnax/config).
+        const token = c.get('token') as { decoded: Record<string, unknown> | null; expired?: boolean; provided?: boolean } | undefined;
+        if (!token?.decoded || token?.expired || !token?.provided) {
+            return c.json({ message: 'Authentication required', code: 'AUTH_REQUIRED' }, 401);
         }
 
-        const server = buildServer(tenantId, tools, resources);
+        // 2. Tenant isolation: the authenticated tenant must match the URL tenant.
+        const claim = token.decoded['tenant'] ?? token.decoded['_tenant_'] ?? token.decoded['tenant_id'];
+        if (claim !== undefined && String(claim) !== tenantId) {
+            return c.json({ message: 'Token does not belong to this tenant', code: 'TENANT_MISMATCH' }, 401);
+        }
+        if (cfg.server.jwt?.requireTenantClaim === true && claim === undefined) {
+            return c.json({ message: 'Tenant claim required', code: 'TENANT_CLAIM_REQUIRED' }, 401);
+        }
+
+        const tools = toolsByTenant.get(tenantId) ?? [];
+        const resources = resourcesByTenant.get(tenantId) ?? [];
+        // G-MCP-ENUM: generic response — never echo the tenant id or reveal configuration.
+        if (!tools.length && !resources.length) {
+            return c.json({ error: 'Not found' }, 404);
+        }
+
+        const server = buildServer(tenantId, tools, resources, c);
         const transport = new StreamableHTTPTransport();
         await server.connect(transport);
         return transport.handleRequest(c);
