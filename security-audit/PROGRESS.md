@@ -78,7 +78,89 @@
 - Champ crypto (clés, rotation).
 
 ### Prochain lot proposé
-~~Lot D~~ → **Lot E** — API/CMS & routes internes : `lib/api.ts`, `lib/routes.ts`, `lib/endpoints.ts`, `lib/middleware.ts`, `lib/define.ts`, `lib/services.ts` + endpoint `_dnax/config`.
+~~Lot G1 (inventaire + triage MCP)~~ → **Lot G2** (Agent Core / prompt / tool-calling / guardrails) — sur validation explicite.
+
+---
+
+## LOT G1 — INVENTAIRE AGENTS/MCP + TRIAGE G-MCP-EXPOSE (TERMINÉ)
+
+### Fichiers lus (G1)
+- `lib/agents.ts`, `lib/mcp.ts`, `lib/mcpClient.ts`, `server/mcp.ts`
+- `server/agents.ts` (L364-412), `lib/agent.ts` (outline), `lib/agentMemory.ts` (outline), `lib/providers.ts` (outline)
+
+### 🚨 HIGH confirmé
+- **G-MCP-EXPOSE** — MCP sans authN/authZ (`server/mcp.ts:195-207`). CVSS 8.7 (High).
+- G-MCP-ENUM (LOW), G-MCP-AUDIT (LOW) — findings liés.
+
+### Identité d'exécution MCP (GAP 1)
+- `rest` lié au tenant (URL), **anonyme**, MongoDB = connexion tenant (**NOT_VERIFIED**), `internal:false` (audit), processus partagé (accès `process.env`/`cfg` global → F-01).
+
+### Validation args MCP (GAP 3)
+- `tool.inputSchema.validate(raw, {allowUnknown:false})` (Joi) avant `tool.exec` → validation présente. G-MCP-INJECT **non retenu** comme finding framework (la sûreté reste à la charge du code du tool).
+
+### Livrables
+- `findings/G-MCP-EXPOSE.md`, `findings/G-MCP-ENUM.md`, `findings/G-MCP-AUDIT.md`
+- `MCP-EXECUTION-IDENTITY.md`, `TOOL-PERMISSION-MATRIX.md`
+- `VULNERABILITY-REPORT.md`, `PRODUCTION-READINESS.md` (NOT READY), `PROGRESS.md` mis à jour.
+
+### En attente
+- G2–G6 suspendus (validation utilisateur requise).
+
+---
+
+## ÉTAPE 4c — SCRIPTS/WORKFLOWS & EXÉCUTION DE CODE (Lot F — TERMINÉ)
+
+### Fichiers lus (Lot F)
+- `lib/define.ts`, `lib/load.ts`, `lib/scripts.ts`, `lib/scriptWorker.ts`, `lib/workflow.ts`
+- `database/workflow.ts` (sections invoke/executeSteps/run), `database/vars.ts` (outline)
+- Recherche `eval`/`new Function`/`vm` → **aucun résultat** dans le core.
+
+### Constats
+| ID | Constat | Criticité | Statut |
+| --- | --- | --- | --- |
+| F-01 | Pas d'isolation tenant au niveau code : process partagé, `cfg` global (tous les `database.uri`), `process.env` partagé (JWT_SECRET HS256 commun) | MEDIUM | CONFIRMED |
+| F-02 | `runHeavyScript` passe `process.env` complet au sous-processus | LOW | CONFIRMED |
+| F-03 | Scripts/services/actions/hooks/workflows en `internal:true` + accès DB complet (par conception) | INFO | CONFIRMED |
+| F-04 | Scripts non-heavy sans timeout/limite CPU/mémoire | LOW | CONFIRMED |
+
+### Contrôles vérifiés (positifs)
+- **Aucun RCE client** : pas d'`eval`/`new Function`/`vm` ; handlers = références de fonctions déclarées.
+- Workflows : `validateWorkflowContext`, timeout + retries/backoff + AbortController, verrou distribué + saga.
+- Heavy scripts : subprocess, timeout hard (kill), config tenant via stdin (pas de fuite `ps`).
+- `runAction`/`runService` vérifient `Object.hasOwn` avant invocation.
+
+### Livrables
+- `SCRIPT-EXECUTION-SECURITY.md`, `UNAUDITED-AREAS.md` créés ; `VULNERABILITY-REPORT.md`, `PROGRESS.md` mis à jour.
+
+---
+
+## ÉTAPE 4b — API/CMS & ROUTES INTERNES (Lot E — TERMINÉ)
+
+### Fichiers lus (Lot E)
+- `lib/api.ts`, `lib/routes.ts`, `lib/endpoints.ts`, `lib/middleware.ts`, `lib/services.ts`
+- `server/api.ts` (L745-795 service, L659-745 vars, L860-989 files/config)
+- `database/mongodbadapter.ts` (L1157-1216 runAction/runService)
+
+### Constats
+| ID | Constat | Criticité | Statut |
+| --- | --- | --- | --- |
+| E-01 | `_dnax/config` expose le schéma (collections/champs/relations/services) à tout token valide, sans rôle admin | LOW | CONFIRMED |
+| AUTH-01 (repris) | `_dnax/config` cross-tenant possible via token sans claim `tenant` (défaut `requireTenantClaim:false`) | MEDIUM | CONFIRMED |
+
+### Contrôles vérifiés (positifs)
+- Services : `evaluateAccess(service.api.access, action)` — 401 si pas de règle (secure-by-default).
+- Vars : ns déclaré via `define.Vars` + `evaluateAccess` ; audit **jamais** `value`/`meta` (secrets).
+- Actions custom collection : `evaluateAccess(col.api.access, action)` avant `runAction`.
+- `_dnax/config` : token vérifié requis, `safePublicConfig()` (pas de secrets), tenant-claim appliqué.
+- Custom routes : warning si shadow d'une famille framework (`isReservedFamily`).
+- Multi-tenant : services/routes/vars résolvent `_tenant_` et conservent le `rest` lié au tenant.
+
+### Zones non vérifiées (lots suivants)
+- `agents` / `mcp` / `socket.io` (Lot G/J) — accès et isolation à confirmer.
+- `lib/define.ts`, `lib/load.ts`, `lib/scripts.ts`, `lib/workflow.ts` (Lot F).
+
+### Livrables créés/mis à jour
+- `ENDPOINT-INVENTORY.md`, `INTERNAL-ENDPOINTS-ANALYSIS.md`, `VULNERABILITY-REPORT.md` (registre), `PROGRESS.md`.
 
 ---
 
