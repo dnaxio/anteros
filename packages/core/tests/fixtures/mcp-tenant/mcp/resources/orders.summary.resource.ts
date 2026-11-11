@@ -5,6 +5,7 @@ export default define.McpResource({
     name: "orders-summary",
     description: "Summary of orders",
     uri: "orders://summary",
+    api: { access: { read: true } },
     read: async ({ params }) => {
         return {
             contents: [{

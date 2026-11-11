@@ -6,6 +6,7 @@ export default define.McpResource({
     description: "Fetch a user by id",
     uri: "users://{id}",
     mimeType: "application/json",
+    api: { access: { read: true } },
     read: async ({ params, uri }) => {
         return {
             contents: [{

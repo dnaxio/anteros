@@ -4,6 +4,7 @@ export default define.McpTool({
     name: "badge",
     description: "Returns an image content block (protocol passthrough)",
     inputSchema: v.object({}),
+    api: { access: { call: true } },
     exec: async () => {
         return {
             content: [{
