@@ -119,9 +119,15 @@
 - Le contexte tenant se propage correctement via `rest` lié au tenant + `requestCtxStorage` ; le cross-tenant exige F-01 (accès direct `cfg`).
 - Pas de hot-reload exposé en HTTP (reload agents/services/scripts = boot/in-process uniquement).
 
+### Remédiation Socket.IO (APPLIQUÉE)
+- `types/websocket.d.ts` : ajout `api.access` (`connect`/`*`).
+- `lib/sockets.ts` : `io.use` auth (token + tenant claim), scoping tenant (`socket.data.tenant`), `evaluateAccess` par handler.
+- Typecheck socket : **propre**. Tests infra (`security`, `metrics-cluster`) : **14/14 pass**.
+- `REMEDIATION-G-SOCKET.md` créé.
+
 ### État d'avancement lots A–G
-**Terminés** : A (authN), B (config), C (MongoDB/NoSQL), D (fichiers), E (API/CMS), F (scripts/workflows), G1–G6 (agents/MCP/mémoire/providers).
-**Restants** : H (infra : cluster/io/sockets/metrics), I (logging/audit détaillé), J (réplication/cache), K (packages annexes + dépendances).
+**Terminés** : A, B, C, D, E, F, G1–G6, remédiation MCP + Socket.
+**Restants** : I (logging/audit détaillé), J (réplication/cache), K (packages annexes + dépendances).
 
 ### Fichiers lus (G5)
 - `lib/providers.ts` (resolveApiKey L130, resolveBaseUrl L147, fetchWithRetry L454-501)
