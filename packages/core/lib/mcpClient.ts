@@ -1,7 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { logger } from "../utils/logger";
-import type { AgentTool } from "../types/agent";
+import type { AgentMcpServer, AgentTool } from "../types/agent";
 
 /**
  * The **MCP client** — the other direction of the protocol the framework serves.
@@ -29,17 +29,43 @@ const clients = new Map<string, Client>();
 /** Resolved tools per server, and the in-flight promise of one still connecting. */
 const servers = new Map<string, { tools: AgentTool[] } | { pending: Promise<AgentTool[]> }>();
 
-/** `['https://a/mcp']` or `{ docs: 'https://a/mcp' }` → what to connect to. */
-function serverList(declared: string[] | Record<string, string> | undefined): Array<{ name: string; url: string }> {
+type ResolvedServer = { name: string; url: string; headers?: Record<string, string> };
+
+/** `{ url, headers? }` — the form a token-protected server needs. */
+function isServerObject(value: unknown): value is AgentMcpServer {
+    return typeof value === "object" && value !== null && typeof (value as AgentMcpServer).url === "string";
+}
+
+function serverOf(name: string, value: string | AgentMcpServer): ResolvedServer[] {
+    if (typeof value === "string") {
+        const url = value.trim();
+        return url ? [{ name, url }] : [];
+    }
+    if (!isServerObject(value) || !value.url?.trim()) return [];
+    const url = value.url.trim();
+    return [{ name, url, ...(value.headers ? { headers: value.headers } : {}) }];
+}
+
+/**
+ * `['https://a/mcp']`, `{ docs: 'https://a/mcp' }`, or objects carrying `headers` —
+ * what to connect to. The header form is what a token-protected server (ours included)
+ * needs: `{ docs: { url, headers: { Authorization: 'Bearer …' } } }`.
+ */
+function serverList(
+    declared: string[] | Record<string, string | AgentMcpServer> | AgentMcpServer[] | undefined,
+): ResolvedServer[] {
     if (!declared) return [];
     if (Array.isArray(declared)) {
-        return declared
-            .filter((url) => typeof url === "string" && url.trim())
-            .map((url) => ({ name: String(url).trim(), url: String(url).trim() }));
+        return declared.flatMap((entry) =>
+            typeof entry === "string" ? serverOf(entry.trim(), entry) : serverOf(entry.url ?? "", entry),
+        );
     }
-    return Object.entries(declared)
-        .filter(([, url]) => typeof url === "string" && url.trim())
-        .map(([name, url]) => ({ name, url: String(url).trim() }));
+    return Object.entries(declared).flatMap(([name, value]) => serverOf(name, value));
+}
+
+/** A client is memoized per URL **and** per header set — two tokens, two clients. */
+function serverKey(url: string, headers?: Record<string, string>): string {
+    return headers && Object.keys(headers).length ? `${url}\0${JSON.stringify(headers)}` : url;
 }
 
 /** Give up on a promise after `ms` — an unreachable server must not hold a run. */
@@ -58,14 +84,21 @@ async function bounded<T>(work: Promise<T>, ms: number, label: string): Promise<
 }
 
 /** Connect, list, and adapt — one server's worth of work. */
-async function loadTools(name: string, url: string): Promise<AgentTool[]> {
+async function loadTools(
+    name: string,
+    url: string,
+    headers?: Record<string, string>,
+): Promise<{ tools: AgentTool[]; client: Client }> {
     const client = new Client({ name: CLIENT_NAME, version: CLIENT_VERSION }, { capabilities: {} });
-    await bounded(client.connect(new StreamableHTTPClientTransport(new URL(url))), MCP_TIMEOUT_MS, `MCP server '${name}'`);
+    const transport = new StreamableHTTPClientTransport(
+        new URL(url),
+        headers && Object.keys(headers).length ? { requestInit: { headers } } : undefined,
+    );
+    await bounded(client.connect(transport), MCP_TIMEOUT_MS, `MCP server '${name}'`);
 
     const listed = await bounded(client.listTools(), MCP_TIMEOUT_MS, `MCP server '${name}'`);
-    clients.set(url, client);
 
-    return (listed?.tools ?? []).map((tool: any) => ({
+    const tools = (listed?.tools ?? []).map((tool: any) => ({
         id: tool.name,
         description: tool.description ?? `Remote MCP tool '${tool.name}'.`,
         // The protocol carries a plain JSON Schema, which `validateWithSchema` reads
@@ -77,6 +110,8 @@ async function loadTools(name: string, url: string): Promise<AgentTool[]> {
             return result;
         },
     })) as AgentTool[];
+
+    return { tools, client };
 }
 
 /**
@@ -84,25 +119,29 @@ async function loadTools(name: string, url: string): Promise<AgentTool[]> {
  * reported and contributes nothing (the agent keeps its own tools); the next run
  * tries again — nothing is cached but a success.
  */
-async function mcpToolsFor(declared: string[] | Record<string, string> | undefined): Promise<AgentTool[]> {
+async function mcpToolsFor(
+    declared: string[] | Record<string, string | AgentMcpServer> | AgentMcpServer[] | undefined,
+): Promise<AgentTool[]> {
     const out: AgentTool[] = [];
 
-    for (const { name, url } of serverList(declared)) {
-        let entry = servers.get(url);
+    for (const { name, url, headers } of serverList(declared)) {
+        const key = serverKey(url, headers);
+        let entry = servers.get(key);
         if (!entry) {
-            const pending = loadTools(name, url)
-                .then((tools) => {
-                    servers.set(url, { tools });
+            const pending = loadTools(name, url, headers)
+                .then(({ tools, client }) => {
+                    clients.set(key, client);
+                    servers.set(key, { tools });
                     logger.file("info", "agent mcp: server connected", { server: name, url, tools: tools.length });
                     return tools;
                 })
                 .catch((err: any) => {
-                    servers.delete(url); // a failure is not memoized: the next run retries
+                    servers.delete(key); // a failure is not memoized: the next run retries
                     logger.file("warn", "agent mcp: server unavailable", { server: name, url, error: err?.message });
                     return [] as AgentTool[];
                 });
             entry = { pending };
-            servers.set(url, entry);
+            servers.set(key, entry);
         }
 
         out.push(...("tools" in entry ? entry.tools : await entry.pending));

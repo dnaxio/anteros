@@ -19,6 +19,7 @@ import type { McpTool, McpResource } from "../types/mcp";
 import type { HonoVariables } from "./env";
 import { joiToJsonSchema } from "../lib/jsonSchema";
 import { patterns } from "../lib/endpoints";
+import { evaluateAccess } from "./access";
 
 // The Joi → JSON Schema converter is shared with the agent runtime — a tool
 // must look identical whether it is exposed over MCP or to a model.
@@ -54,7 +55,39 @@ function matchUri(uri: string, resources: McpResource[]): { resource: McpResourc
 
 // ─── MCP server (one fresh instance per request — stateless) ─────────────
 
-function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[]): Server {
+/** JSON-RPC code of a refused tool call / resource read (server-defined range). */
+const ACCESS_DENIED = -32001;
+
+/**
+ * Evaluate a tool's / resource's `api.access` rule, when it declares one.
+ *
+ * No block → the endpoint's own authentication is the gate (any authenticated caller
+ * of the tenant). A block is **deny-by-default**, like every other `api.access` in the
+ * framework: a rule for another operation, or an empty block, refuses this one.
+ */
+async function assertMcpAccess(
+    access: Record<string, boolean | ((ctx: any) => boolean | Promise<boolean>) | undefined> | undefined,
+    operation: "call" | "read",
+    label: string,
+    tenantId: string,
+    rest: InstanceType<typeof useRest>,
+    c: Context<{ Variables: HonoVariables }>,
+    extra: Record<string, any>,
+): Promise<void> {
+    if (!access) return;
+    try {
+        await evaluateAccess(access as any, operation, rest, label, c, { tenant: tenantId, ...extra });
+    } catch (error: any) {
+        throw new McpError(ACCESS_DENIED, error?.message ?? "Access denied");
+    }
+}
+
+function buildServer(
+    tenantId: string,
+    tools: McpTool[],
+    resources: McpResource[],
+    c: Context<{ Variables: HonoVariables }>,
+): Server {
     const server = new Server(
         { name: 'anteros-mcp', version: cfg.version ?? '1.0.0' },
         { capabilities: { tools: {}, resources: {} } }
@@ -82,7 +115,16 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
             throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${req.params.name}`);
         }
 
+        const rest = new useRest({ tenant_id: tenantId, internal: false });
+
+        // Access first: a refused caller must not be able to probe the schema
+        // (`api.access` on the tool, when declared — denied by default, like everywhere)
         const raw = req.params.arguments ?? {};
+        await assertMcpAccess(tool.api?.access, 'call', `mcp:${tool.name}`, tenantId, rest, c, {
+            tool: tool.name,
+            args: raw,
+        });
+
         const { error, value } = tool.inputSchema.validate(raw, { allowUnknown: false });
         if (error) {
             logger.file('warn', 'MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, args: raw, error: 'invalid arguments', duration: ms(start) });
@@ -92,10 +134,9 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
             };
         }
 
-        const rest = new useRest({ tenant_id: tenantId });
         try {
             const result = await tool.exec({
-                c: undefined as any,
+                c,
                 rest,
                 args: value,
                 agents: createAgents(tenantId, rest),
@@ -152,10 +193,15 @@ function buildServer(tenantId: string, tools: McpTool[], resources: McpResource[
             throw new McpError(ErrorCode.InvalidParams, `Unknown resource URI: ${uri}`);
         }
 
-        const rest = new useRest({ tenant_id: tenantId });
+        const rest = new useRest({ tenant_id: tenantId, internal: false });
+        await assertMcpAccess(matched.resource.api?.access, 'read', `mcp:${matched.resource.name}`, tenantId, rest, c, {
+            resource: matched.resource.name,
+            uri,
+        });
+
         try {
             const result = await matched.resource.read({
-                c: undefined as any,
+                c,
                 rest,
                 agents: createAgents(tenantId, rest),
                 api: createApi(rest),
@@ -193,6 +239,20 @@ export function initializeMcp(app: Hono<{ Variables: HonoVariables }>) {
     }
 
     app.all(patterns.mcp, async (c: Context<{ Variables: HonoVariables }>) => {
+        // Authentication (#28): a verified, non-expired token is required on every MCP
+        // request unless `server.mcp.auth` is explicitly `false`. An invalid or expired
+        // token never gets here — the global middleware rejects it (#52). Checked before
+        // the tenant lookup, so an anonymous caller cannot probe tenant existence.
+        if (cfg.server.mcp?.auth !== false) {
+            const token = (c as any).get('token') as { value?: string | null; provided?: boolean; expired?: boolean } | undefined;
+            if (!token?.provided || !token.value) {
+                return c.json({
+                    message: token?.expired ? 'Token expired' : 'Authentication required',
+                    code: token?.expired ? 'TOKEN_EXPIRED' : 'AUTH_REQUIRED',
+                }, 401);
+            }
+        }
+
         const tenantId = c.req.param('tenant_id') ?? '';
         const tools = toolsByTenant.get(tenantId) ?? [];
         const resources = resourcesByTenant.get(tenantId) ?? [];
@@ -200,7 +260,7 @@ export function initializeMcp(app: Hono<{ Variables: HonoVariables }>) {
             return c.json({ error: `No MCP tools or resources for tenant '${tenantId}'` }, 404);
         }
 
-        const server = buildServer(tenantId, tools, resources);
+        const server = buildServer(tenantId, tools, resources, c);
         const transport = new StreamableHTTPTransport();
         await server.connect(transport);
         return transport.handleRequest(c);

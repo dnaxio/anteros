@@ -108,6 +108,21 @@ export type ServerConfig = {
             results?: 'none' | 'summary' | 'full';
         };
         /**
+         * MCP endpoint (`GET|POST /api/:tenant_id/mcp`).
+         */
+        mcp?: {
+            /**
+             * Require a verified, non-expired `Authorization: Bearer` token on every
+             * MCP request (default `true`). An invalid or expired token is rejected
+             * globally, whatever this says.
+             *
+             * `false` restores the historical anonymous endpoint — only for a network
+             * that already guards the port (a private mesh, a local dev box). Requests
+             * made through it carry no identity, so no `api.access` rule can decide.
+             */
+            auth?: boolean;
+        };
+        /**
          * Workflow defaults for every tenant — a tenant declaring its own
          * `tenant.workflows` always wins.
          */

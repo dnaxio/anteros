@@ -1320,6 +1320,13 @@ export type AgentSkill = {
  * An agent definition — `{tenant.dir}/agents/**\/*.agent.ts`, declared with
  * `define.Agent({ … })`.
  */
+/** A remote MCP server — its URL and the headers every request carries. */
+export type AgentMcpServer = {
+    url: string;
+    /** Extra headers, e.g. `{ Authorization: 'Bearer <jwt>' }`. */
+    headers?: Record<string, string>;
+};
+
 export type AgentConfig = {
     _isAgent_?: boolean;
     /** Injected by the loader — the tenant this definition belongs to. */
@@ -1385,10 +1392,14 @@ export type AgentConfig = {
      * Remote **MCP servers** whose tools this agent may use: `['https://host/mcp']`
      * or `{ docs: 'https://docs/mcp' }` (the name is for the logs).
      *
+     * A server that requires a token takes its headers:
+     * `{ docs: { url: 'https://host/mcp', headers: { Authorization: 'Bearer …' } } }`
+     * — the framework's own MCP endpoint needs one unless `server.mcp.auth` is off.
+     *
      * Connected once, at first use. A remote tool keeps its name; a tool the agent
      * declares itself wins over a remote one of the same name.
      */
-    mcp?: string[] | Record<string, string>;
+    mcp?: string[] | Record<string, string | AgentMcpServer> | AgentMcpServer[];
     /** Default tool choice for every run (default `'auto'`). */
     toolChoice?: AgentToolChoice;
     /** Default reasoning for every run (default off) — overridable per call. */

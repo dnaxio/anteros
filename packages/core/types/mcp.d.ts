@@ -16,6 +16,14 @@ export type McpToolResult = {
 };
 
 /**
+ * `api.access` map of an MCP tool or resource — same semantics as a collection.
+ * `'*'` covers every operation, `'call'` a tool, `'read'` a resource.
+ */
+export type McpAccess = {
+    [operation: string]: boolean | ((ctx: any) => boolean | Promise<boolean>) | undefined;
+};
+
+/**
  * MCP tool definition — auto-loaded from `{tenant.dir}/ai/mcp/tools/**\/*.tool.ts`.
  * Served over the MCP protocol at `GET/POST /api/:tenant_id/mcp` (Streamable HTTP).
  */
@@ -29,6 +37,18 @@ export type McpTool = {
     enabled?: boolean;
     /** Joi schema describing the tool arguments (same language as collections — `v`) */
     inputSchema: Joi.Schema;
+    /**
+     * Access rules for **calling** this tool. A rule is evaluated with `'call'`
+     * (`'*'` covers it), and a **declared block is deny-by-default** — like every
+     * other `api.access` in the framework. A function rule requires a verified token
+     * (which `server.mcp.auth` already asks for). Omitting the block leaves the tool
+     * available to any authenticated caller of the tenant.
+     *
+     * ```ts
+     * api: { access: { call: ({ token }) => token.decoded?.role === 'admin' } }
+     * ```
+     */
+    api?: { access?: McpAccess };
     /** Handler executed when the LLM calls the tool (args are Joi-validated).
      * Must return the MCP protocol result shape: `{ content: [{ type, text | data… }] }`. */
     exec: (ctx: {
@@ -75,6 +95,12 @@ export type McpResource = {
     uri: string;
     /** Content type of the resource (default: application/json) */
     mimeType?: string;
+    /**
+     * Access rules for **reading** this resource — evaluated with `'read'` (`'*'`
+     * covers it). A declared block is deny-by-default; a function rule requires a
+     * verified token. Omitted → any authenticated caller of the tenant.
+     */
+    api?: { access?: McpAccess };
     /** Handler called when the LLM reads the resource */
     read: (ctx: {
         c: Context;

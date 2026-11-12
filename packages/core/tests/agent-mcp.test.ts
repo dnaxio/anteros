@@ -11,8 +11,9 @@ import { Agent, define, v } from "../index";
 import { cfg, formatConfig } from "../server/config";
 import { syncTenants } from "../database/tenant";
 import { syncMcpTools } from "../lib/mcp";
-import { closeMcpClients } from "../lib/mcpClient";
+import { closeMcpClients, mcpToolsFor } from "../lib/mcpClient";
 import { createApp } from "../server/hono";
+import { jwt } from "../utils/func";
 import { at, fakeProvider, openaiText, openaiTool, request, type Fake } from "./fixtures/fake-provider";
 
 const TENANT = "mcp-client";
@@ -20,13 +21,16 @@ const DIR = "packages/core/tests/fixtures/mcp-tenant";
 
 let server: any;
 let mcpUrl: string;
+/** The endpoint now requires a token (#28) — the client sends it as a header. */
+let token = "";
+const SECRET = "agent-mcp-test-secret-0123456789abcdef";
 const servers: Fake[] = [];
 
 const track = (fake: Fake): Fake => (servers.push(fake), fake);
 
 beforeAll(async () => {
     formatConfig({
-        server: { port: 4000 },
+        server: { port: 4000, jwt: { secret: SECRET } },
         tenants: [{ id: TENANT, dir: DIR, database: { uri: "mongodb://localhost:27017/none" } }],
     });
     await syncTenants();
@@ -34,6 +38,7 @@ beforeAll(async () => {
 
     server = Bun.serve({ port: 0, fetch: createApp().fetch });
     mcpUrl = `${server.url.href.replace(/\/$/, "")}/api/${TENANT}/mcp`;
+    token = await jwt.sign({ sub: "agent-mcp", tenant: TENANT });
 });
 
 afterAll(async () => {
@@ -49,10 +54,22 @@ function makeAgent(provider: Fake, overrides: Record<string, any> = {}) {
         description: "A test agent.",
         instructions: "You are a test agent.",
         provider: { model: "test-model", apiKey: "test-key", baseUrl: provider.url, options: { retries: 0 } },
-        mcp: [mcpUrl],
+        mcp: [{ url: mcpUrl, headers: { Authorization: `Bearer ${token}` } }],
         ...overrides,
     } as any);
 }
+
+describe("agent mcp — authentication", () => {
+    it("loads nothing from a server that refuses the token", async () => {
+        // No header → the MCP endpoint answers 401 AUTH_REQUIRED (#28)
+        expect(await mcpToolsFor([mcpUrl])).toEqual([]);
+    });
+
+    it("loads the tools when the header carries a valid token", async () => {
+        const tools = await mcpToolsFor([{ url: mcpUrl, headers: { Authorization: `Bearer ${token}` } }]);
+        expect(tools.map((tool) => tool.id).sort()).toEqual(["badge", "echo"]);
+    });
+});
 
 describe("agent mcp — a remote server's tools", () => {
     it("lists them as tools, calls one, and feeds the result back", async () => {
