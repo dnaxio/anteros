@@ -8,22 +8,36 @@ export interface RecoImage {
 }
 
 /**
- * Anything the engine can read: a path, encoded bytes (Buffer included), a Blob
- * (`Bun.file()` included), a base64 string or data URL, an explicit `{ base64 }`, or an
- * image already decoded by `loadImage()`.
+ * Anything the engine can read: encoded bytes (Buffer included), a Blob
+ * (`Bun.file()` included), a base64 string or data URL, an explicit `{ base64 }`,
+ * an explicit `{ path }`, or an image already decoded by `loadImage()`.
  *
- * A string is a **filesystem path** — never pass an untrusted string here (use bytes or
- * base64 instead), it would be an arbitrary-file-read primitive.
+ * A **bare string** is base64 or a `data:` URL — never a filesystem path, unless the
+ * engine was created with `allowPath: true`. Reading a local file is therefore always
+ * a deliberate act (`{ path }`), so passing an untrusted string cannot become an
+ * arbitrary-file-read primitive.
  */
-export type ImageInput = string | Uint8Array | Blob | Base64Image | RecoImage;
+export type ImageInput = string | Uint8Array | Blob | Base64Image | PathImage | RecoImage;
 
 export interface LoadImageOptions {
     /**
      * Reject an image whose `width * height` exceeds this, before allocating pixels.
-     * Defaults to Bun's own limit (~268 MP). Lower it for untrusted input: a 32 KiB PNG
-     * can decode to hundreds of megabytes.
+     * Defaults to sharp's own limit (~268 MP). Lower it for untrusted input: a 32 KiB
+     * PNG can decode to hundreds of megabytes.
      */
     readonly maxPixels?: number;
+    /**
+     * Let a **bare string** be read as a filesystem path when it names an existing file
+     * (default `false`). Meant for trusted, local input: an untrusted string plus this
+     * flag is an arbitrary-file-read primitive. `{ path }` always reads a file.
+     */
+    readonly allowPath?: boolean;
+}
+
+/** An explicit local path — the only way to read a file, and never inferred. */
+export interface PathImage {
+    /** A filesystem path, resolved by the caller. */
+    readonly path: string;
 }
 
 /** An explicit base64 payload — no ambiguity with a file path. */
@@ -80,8 +94,13 @@ export interface RecoEngineOptions {
     readonly maxFaces?: number;
     /** Aligned face edge fed to the recognizer. Default 112. */
     readonly faceSize?: number;
-    /** Reject images above this many pixels before decoding. Defaults to Bun's limit (~268 MP). */
+    /** Reject images above this many pixels before decoding. Defaults to sharp's limit (~268 MP). */
     readonly maxPixels?: number;
+    /**
+     * Let a bare string be read as a filesystem path (default `false`). Keep it off when
+     * the input comes from a request: `{ path }` is the explicit form.
+     */
+    readonly allowPath?: boolean;
     /**
      * Download the buffalo_l pack when `det_10g.onnx` / `w600k_r50.onnx` are missing.
      * Default `true` — one download per modelDir, then never again. Only applies to the
@@ -119,6 +138,7 @@ export interface ResolvedRecoEngineOptions {
     readonly maxFaces: number;
     readonly faceSize: number;
     readonly maxPixels?: number;
+    readonly allowPath: boolean;
     readonly autoDownload: boolean;
     readonly modelUrl: string;
     readonly downloadTimeoutMs: number;

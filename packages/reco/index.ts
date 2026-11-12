@@ -19,7 +19,7 @@ export {
     modelsPresent,
 } from "./lib/models";
 export type { DownloadModelsOptions, ModelDownloadProgress } from "./lib/models";
-export { isBase64Image, isRecoImage, loadImage, resizeImage } from "./lib/image";
+export { isBase64Image, isPathImage, isRecoImage, loadImage, resizeImage } from "./lib/image";
 export { ARC_DST, alignFace, similarityTransform, toRecognitionTensor } from "./lib/geometry";
 export type { SimilarityTransform } from "./lib/geometry";
 export {
@@ -43,6 +43,7 @@ export type {
     ImageInput,
     LoadImageOptions,
     MatchResult,
+    PathImage,
     RecoEngineOptions,
     RecoImage,
     RecoPoint,

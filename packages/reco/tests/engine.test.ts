@@ -82,9 +82,15 @@ integration("with the buffalo_l weights", () => {
 
     const withPhoto = testImage && existsSync(testImage) ? test : test.skip;
 
+    test("refuses a bare path — a string is base64, not a file", async () => {
+        // No filesystem access: the string never reaches `existsSync` / sharp
+        expect(await codeOf(engine.detect("/etc/hosts"))).toBe("RECO_IMAGE_INVALID");
+        expect(await codeOf(engine.getDescriptor("/etc/hosts"))).toBe("RECO_IMAGE_INVALID");
+    });
+
     withPhoto("detects a real face, embeds it, and compares it to itself", async () => {
         const photo = testImage!;
-        const faces = await engine.recognize(photo);
+        const faces = await engine.recognize({ path: photo });
         expect(faces.length).toBeGreaterThan(0);
 
         const face = faces[0]!;
@@ -96,14 +102,14 @@ integration("with the buffalo_l weights", () => {
         const norm = Math.hypot(...face.embedding);
         expect(norm).toBeCloseTo(1, 5);
 
-        expect(await engine.compare(photo, photo)).toBeCloseTo(1, 5);
+        expect(await engine.compare({ path: photo }, { path: photo })).toBeCloseTo(1, 5);
         expect(cosineSimilarity(face.embedding, face.embedding)).toBeCloseTo(1, 6);
     });
 
     withPhoto("returns 512-d descriptors from a path, base64 and a data URL", async () => {
         const photo = testImage!;
 
-        const descriptors = await engine.getDescriptors(photo, { maxFaces: 2 });
+        const descriptors = await engine.getDescriptors({ path: photo }, { maxFaces: 2 });
         expect(descriptors.length).toBe(2);
         for (const descriptor of descriptors) {
             expect(descriptor).toBeInstanceOf(Float32Array);
@@ -111,7 +117,7 @@ integration("with the buffalo_l weights", () => {
             expect(Math.hypot(...descriptor)).toBeCloseTo(1, 5);
         }
 
-        expect((await engine.getDescriptor(photo))?.length).toBe(512);
+        expect((await engine.getDescriptor({ path: photo }))?.length).toBe(512);
 
         const base64 = Buffer.from(await Bun.file(photo).bytes()).toString("base64");
         expect((await engine.getDescriptors(`data:image/jpeg;base64,${base64}`, { maxFaces: 1 })).length).toBe(1);
@@ -122,7 +128,7 @@ integration("with the buffalo_l weights", () => {
     const withAligned = alignedImage && existsSync(alignedImage) ? test : test.skip;
 
     withAligned("embeds an already aligned square crop", async () => {
-        const embedding = await engine.embedAligned(alignedImage!);
+        const embedding = await engine.embedAligned({ path: alignedImage! });
         expect(embedding.length).toBe(512);
         expect(Math.hypot(...embedding)).toBeCloseTo(1, 5);
     });

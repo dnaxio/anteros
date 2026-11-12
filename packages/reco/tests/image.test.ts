@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { isRecoError, loadImage, resizeImage } from "../index";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { isRecoError, isPathImage, loadImage, resizeImage } from "../index";
 import { JPEG_EXIF, PNG_16BIT, PNG_GRAY, PNG_RGB, PNG_RGBA } from "./fixtures";
 
 describe("loadImage", () => {
@@ -90,6 +93,37 @@ describe("loadImage", () => {
         } catch (error) {
             expect(isRecoError(error)).toBe(true);
             if (isRecoError(error)) expect(error.code).toBe("RECO_IMAGE_INVALID");
+        }
+    });
+
+    test("refuses a bare string that names a file — a string is base64, not a path", async () => {
+        // `/etc/hosts` exists, but a bare string is never a path: the message is ours,
+        // which proves the file was never opened.
+        try {
+            await loadImage("/etc/hosts");
+            throw new Error("expected a failure");
+        } catch (error) {
+            expect(isRecoError(error)).toBe(true);
+            if (isRecoError(error)) {
+                expect(error.code).toBe("RECO_IMAGE_INVALID");
+                expect(error.message).toContain("{ path }");
+            }
+        }
+    });
+
+    test("reads a file only through `{ path }`, or with `allowPath: true`", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "reco-image-"));
+        const file = join(dir, "tiny.png");
+        try {
+            writeFileSync(file, Buffer.from(PNG_RGB, "base64"));
+
+            expect(isPathImage({ path: file })).toBe(true);
+            expect((await loadImage({ path: file })).width).toBe(10);
+
+            // Legacy opt-in: a bare string may be a path again
+            expect((await loadImage(file, { allowPath: true })).width).toBe(10);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
         }
     });
 

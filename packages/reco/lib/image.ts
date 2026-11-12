@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import sharp from "sharp";
 import { RecoError } from "./errors";
-import type { Base64Image, ImageInput, LoadImageOptions, RecoImage } from "../types/reco";
+import type { Base64Image, ImageInput, LoadImageOptions, PathImage, RecoImage } from "../types/reco";
 
 const BASE64_ONLY = /^[A-Za-z0-9+/]+={0,2}$/;
 const NOT_IN_BASE64 = /[.\\]/;
@@ -24,6 +24,12 @@ export function isRecoImage(input: ImageInput): input is RecoImage {
 export function isBase64Image(input: ImageInput): input is Base64Image {
     if (typeof input !== "object" || input === null || input instanceof Uint8Array) return false;
     return typeof (input as Base64Image).base64 === "string";
+}
+
+/** An explicit `{ path }` — the only signal that a local file may be read. */
+export function isPathImage(input: ImageInput): input is PathImage {
+    if (typeof input !== "object" || input === null || input instanceof Uint8Array) return false;
+    return typeof (input as PathImage).path === "string";
 }
 
 function assertRecoImage(image: RecoImage): void {
@@ -51,11 +57,14 @@ export async function loadImage(input: ImageInput, options: LoadImageOptions = {
         assertRecoImage(input);
         return input;
     }
+    if (isPathImage(input)) {
+        return decode(input.path, options);
+    }
     if (isBase64Image(input)) {
         return decode(base64Bytes(input.base64), options);
     }
     if (typeof input === "string") {
-        return decode(resolveString(input), options);
+        return decode(resolveString(input, options.allowPath ?? false), options);
     }
     if (input instanceof Uint8Array) {
         return decode(input, options);
@@ -113,12 +122,26 @@ function toUint8(data: Buffer, pixels: number): Uint8Array {
     );
 }
 
-function resolveString(input: string): string | Uint8Array {
+/**
+ * A bare string is a `data:` URL or base64 — **never a path** unless `allowPath` is on.
+ * That is the difference between "convenient" and "arbitrary file read": a string coming
+ * from a request can no longer name a file on the server.
+ */
+function resolveString(input: string, allowPath: boolean): string | Uint8Array {
     const value = input.trim();
     if (value.startsWith("data:")) return base64Bytes(value);
-    if (existsSync(value)) return value;
+
+    if (allowPath) {
+        if (existsSync(value)) return value;
+        if (looksLikeBase64(value)) return base64Bytes(value);
+        return value; // let sharp report the unreadable path
+    }
+
     if (looksLikeBase64(value)) return base64Bytes(value);
-    return value;
+    throw new RecoError(
+        "RECO_IMAGE_INVALID",
+        "A bare string is base64 or a data URL — pass { path } (or create the engine with allowPath: true) for a local file",
+    );
 }
 
 function looksLikeBase64(value: string): boolean {

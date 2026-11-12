@@ -7,7 +7,7 @@ pack, running locally through ONNX Runtime.
 - **`w600k_r50`** turns an aligned face into a **512-dimension unit embedding**
 - `detect`, `embed`, `recognize`, `getDescriptors`, `getDescriptor`, `embedAligned`, `compare`,
   `cosineSimilarity`, `findBestMatch`
-- Paths, bytes, **base64 strings**, **data URLs** and `{ base64 }` are all accepted
+- Bytes, **base64 strings**, **data URLs**, `{ base64 }` and an explicit `{ path }` are all accepted
 - No API key, no network at inference: two `.onnx` files and two portable native dependencies
 
 > ⚠️ **The weights are non-commercial.** InsightFace's code is MIT, but the `buffalo_l` models are released
@@ -85,8 +85,9 @@ const faces = await engine.detect(image, { threshold: 0.6, maxFaces: 5 });
 const embedding = await engine.embed(image, faces[0]);
 ```
 
-Every method accepts a path, encoded bytes, a `Blob` (`Bun.file()` included), a base64 string, a `data:`
-URL, an explicit `{ base64 }`, or an image already decoded by `loadImage()`.
+Every method accepts encoded bytes, a `Blob` (`Bun.file()` included), a base64 string, a `data:`
+URL, an explicit `{ base64 }`, an explicit `{ path }`, or an image already decoded by `loadImage()`.
+A **bare string is base64 or a `data:` URL — never a path** (see the safety note below).
 
 Already have an aligned square crop? `embedAligned(crop)` skips the detector. A non-square crop is refused.
 
@@ -94,10 +95,10 @@ Already have an aligned square crop? `embedAligned(crop)` skips the detector. A 
 
 ```ts
 // Every detected face, best score first: 512-d unit vectors.
-const descriptors = await engine.getDescriptors("./team.jpg");
+const descriptors = await engine.getDescriptors({ path: "./team.jpg" });
 
 // The best face only, or null when there is none.
-const best = await engine.getDescriptor("./alice.jpg");
+const best = await engine.getDescriptor({ path: "./alice.jpg" });
 
 // Base64 works the same way.
 const fromDataUrl = await engine.getDescriptors(`data:image/jpeg;base64,${payload}`);
@@ -118,7 +119,8 @@ const bare = await engine.getDescriptors(payload);
 | `nmsThreshold`   | `0.4`                      | IoU above which boxes are merged.                              |
 | `maxFaces`       | `0` (all)                  | Keep the best N faces.                                         |
 | `faceSize`       | `112`                      | Aligned crop edge (`w600k_r50` wants 112).                     |
-| `maxPixels`      | Bun's ~268 MP              | Refuse a larger image before decoding (untrusted input).       |
+| `maxPixels`      | sharp's ~268 MP            | Refuse a larger image before decoding (untrusted input).       |
+| `allowPath`      | `false`                    | Let a **bare string** name a file (legacy; trusted input only). |
 | `autoDownload`   | `true`                     | Fetch buffalo_l when the two default models are missing.       |
 | `modelUrl`       | buffalo_l release          | Archive used by `autoDownload`.                                |
 | `downloadTimeoutMs` | `600000`                | Abort the download after this many milliseconds.               |
@@ -141,8 +143,11 @@ Every failure is a `RecoError` with a stable code: `RECO_MODEL_NOT_FOUND`, `RECO
 - One face is embedded at a time on the CPU. Lower `detSize` or cap `maxFaces` to trade accuracy for speed.
 - An embedding is biometric personal data (special category under the GDPR): collect it lawfully, keep it
   only as long as needed, encrypt it at rest.
-- **A string is a filesystem path.** Never pass an untrusted string to the engine — use bytes, a `Blob` or
-  base64. For untrusted images, lower `maxPixels` (defaults to Bun's ~268 MP).
+- **A bare string is never a path.** A string is base64 or a `data:` URL; reading a local file is an
+  explicit `{ path }`, and the engine refuses anything else (`RECO_IMAGE_INVALID`) **before touching the
+  filesystem**. A query parameter or an uploaded filename therefore cannot become an arbitrary-file-read
+  primitive. `allowPath: true` restores the legacy "a bare string may name a file" behaviour for trusted,
+  local input. For untrusted images, also lower `maxPixels` (defaults to sharp's ~268 MP).
 - `sharp` and `onnxruntime-node` are native dependencies, both with prebuilt binaries. `bun add` may report
   a blocked postinstall for ONNX Runtime; the binary shipped in the package is enough — no trust step.
 - Images are decoded by `sharp`: EXIF applied, colour converted to sRGB, 16-bit downscaled. `maxPixels`

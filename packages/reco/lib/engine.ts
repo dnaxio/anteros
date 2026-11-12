@@ -74,6 +74,7 @@ export class RecoEngine {
             maxFaces: nonNegativeInteger(options.maxFaces, "maxFaces", 0),
             faceSize: positiveInteger(options.faceSize, "faceSize", DEFAULT_FACE_SIZE),
             maxPixels: optionalPositiveInteger(options.maxPixels, "maxPixels"),
+            allowPath: options.allowPath ?? false,
             autoDownload: options.autoDownload ?? true,
             modelUrl: options.modelUrl ?? DEFAULT_MODEL_URL,
             downloadTimeoutMs: positiveInteger(
@@ -217,7 +218,7 @@ export class RecoEngine {
     }
 
     private load(input: ImageInput): Promise<RecoImage> {
-        return loadImage(input, { maxPixels: this.resolved.maxPixels });
+        return loadImage(input, { maxPixels: this.resolved.maxPixels, allowPath: this.resolved.allowPath });
     }
 
     private async detectIn(image: RecoImage, options: DetectOptions): Promise<FaceDetection[]> {
