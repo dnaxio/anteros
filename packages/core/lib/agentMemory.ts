@@ -16,6 +16,7 @@ import type {
     AgentSemanticRecallOptions,
     AgentThread,
     CustomAgentMemoryOptions,
+    DuckdbAgentMemoryOptions,
     MongoAgentMemoryOptions,
     RedisAgentMemoryOptions,
     RedisClientLike,
@@ -26,7 +27,7 @@ import type { Agent } from "./agent";
  * Conversation stores — `agents.memory`.
  *
  * An agent with a `memory` reads its thread before a run and writes the updated
- * conversation after it. Three implementations ship with the framework:
+ * conversation after it. Four implementations ship with the framework:
  *
  * - **`agents.memory.InMemory`** — a `Map` in the process. Fine for a demo, a
  *   script or a single-process server; useless across processes.
@@ -50,15 +51,33 @@ const DEFAULT_LIST_LIMIT = 20;
 const TITLE_MAX = 80;
 
 /**
+ * Reject the one character that makes the scoped key ambiguous (#58).
+ *
+ * A scoped thread is stored under `${resourceId}:${threadId}`; a `:` inside either
+ * part lets two distinct pairs produce the same key, and one conversation would be
+ * read, overwritten or cleared by another. Emails, UUIDs, dots and slashes stay
+ * valid — only the separator is reserved.
+ */
+function assertKeyPart(value: string, label: "thread" | "resource"): void {
+    if (!value.includes(":")) return;
+    throw new AppError(
+        `A ${label} id cannot contain ':' — it is the scope separator of a thread key`,
+        { status: 400, code: "AGENT_MEMORY_KEY_INVALID" },
+    );
+}
+
+/**
  * The document key of a thread.
  *
  * With `scoped` (default) the caller identity prefixes the id, so two callers
  * using the same `threadId` never share a conversation. A missing `resourceId`
- * falls back to the bare id.
+ * falls back to the bare id — no separator, so no ambiguity.
  */
 function threadKey(threadId: string, ctx?: AgentMemoryContext, scoped = true): string {
     const resourceId = ctx?.resourceId;
     if (!scoped || !resourceId) return threadId;
+    assertKeyPart(resourceId, "resource");
+    assertKeyPart(threadId, "thread");
     return `${resourceId}:${threadId}`;
 }
 
@@ -241,6 +260,7 @@ export class InMemoryAgentMemory implements AgentMemory {
     }
 
     list(ctx?: AgentMemoryContext & { limit?: number }): AgentThread[] {
+        if (this.#scoped && ctx?.resourceId) assertKeyPart(ctx.resourceId, "resource");
         const prefix = this.#scoped && ctx?.resourceId ? `${ctx.resourceId}:` : "";
         return [...this.#threads.entries()]
             .filter(([key]) => (prefix ? key.startsWith(prefix) : true))
@@ -442,6 +462,7 @@ export class MongoAgentMemory implements AgentMemory {
         await this.#ensure(db);
 
         const scoped = this.#options.scoped ?? true;
+        if (scoped && ctx?.resourceId) assertKeyPart(ctx.resourceId, "resource");
         const filter = scoped && ctx?.resourceId ? { resourceId: ctx.resourceId } : {};
 
         const docs: any[] = await db.collection(this.collection)
@@ -739,7 +760,9 @@ export class RedisAgentMemory implements AgentMemory {
     }
 
     #resourceKey(ctx?: AgentMemoryContext): string {
-        return `${this.prefix}:${this.#namespace(ctx)}:resource:${ctx?.resourceId ?? "-"}`;
+        const resourceId = ctx?.resourceId ?? "-";
+        assertKeyPart(resourceId, "resource");
+        return `${this.prefix}:${this.#namespace(ctx)}:resource:${resourceId}`;
     }
 
     #stateKey(key: string, ctx?: AgentMemoryContext): string {
@@ -876,5 +899,237 @@ export class RedisAgentMemory implements AgentMemory {
         if (this.#options.client || !client) return;
         this.#client = undefined;
         try { await client.quit?.(); } catch { /* already gone */ }
+    }
+}
+
+/**
+ * A **DuckDB** thread store — a local `.duckdb` file, or a remote Quack server,
+ * through `@anteros/duckdb` (imported lazily: the native engine is not loaded by a
+ * process that never opens this store).
+ *
+ * Two tables are created on first use: `<table>` for the threads and
+ * `<table>__state` for the working memory. The whole thread lives in a `data` JSON
+ * column, so its shape can evolve without a migration; `updated_at` is an **epoch in
+ * milliseconds** (DuckDB 2.0 refuses a bound `Date` on a `TIMESTAMP` parameter).
+ */
+export class DuckdbAgentMemory implements AgentMemory {
+    #options: DuckdbAgentMemoryOptions & { table: string; url: string };
+    #scoped: boolean;
+    #maxMessages: number;
+    #ttlMs: number | null;
+    #stateTable: string;
+    #db: any = null;
+    #ready: Promise<any> | null = null;
+    #lastPurge = 0;
+
+    constructor(options: DuckdbAgentMemoryOptions) {
+        const table = String(options?.table ?? "").trim();
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) {
+            throw new AppError(
+                "agents.memory.duckdb needs a `table` — a plain identifier like `agent_threads`",
+                { status: 500, code: "AGENT_MEMORY_TABLE_INVALID" },
+            );
+        }
+
+        const url = String(options.url ?? options.dbPath ?? "").trim().replace(/^quack:\/\//i, "quack:");
+        if (!url) {
+            throw new AppError(
+                "agents.memory.duckdb needs a `url` (quack:host:port) or a `dbPath`",
+                { status: 500, code: "AGENT_MEMORY_URL_REQUIRED" },
+            );
+        }
+
+        let ttlMs: number | null = null;
+        if (options.ttl !== undefined && options.ttl !== false) {
+            const parsed = parseDuration(options.ttl);
+            if (parsed === null) {
+                throw new AppError(
+                    `Invalid agents.memory.duckdb ttl '${options.ttl}' — expected a duration like '30d'`,
+                    { status: 500, code: "AGENT_MEMORY_TTL_INVALID" },
+                );
+            }
+            ttlMs = parsed;
+        }
+
+        this.#options = { ...options, table, url };
+        this.#scoped = options.scoped ?? true;
+        this.#maxMessages = Math.max(1, options.maxMessages ?? DEFAULT_MAX_MESSAGES);
+        this.#ttlMs = ttlMs;
+        this.#stateTable = `${table}__state`;
+    }
+
+    /** The underlying instance, opened on first use (tests, diagnostics). */
+    async db(): Promise<any> {
+        return this.#open();
+    }
+
+    #open(): Promise<any> {
+        if (this.#db) return Promise.resolve(this.#db);
+        if (this.#ready) return this.#ready;
+
+        this.#ready = (async () => {
+            const { DuckdbQuackInstance } = await import("@anteros/duckdb");
+            const url = this.#options.url;
+            const remote = /^quack:/i.test(url);
+            const db = new DuckdbQuackInstance(remote
+                ? { url, ...(this.#options.token ? { token: this.#options.token } : {}) }
+                : { dbPath: url });
+
+            // A statement **without** values is shipped to the Quack server as text,
+            // which leaves the client's attached-catalog cache without the new
+            // table: the next prepared read (a statement with values, run by the
+            // client engine) would claim it does not exist. An empty `values` array
+            // routes the DDL through the client engine — the attached catalog is its
+            // default — so the cache learns the table along with the server.
+            const create = (sql: string) => (remote ? db.exec(sql, []) : db.exec(sql));
+
+            await create(
+                `CREATE TABLE IF NOT EXISTS "${this.#options.table}" ` +
+                `(id VARCHAR PRIMARY KEY, resource_id VARCHAR, data JSON, updated_at BIGINT)`,
+            );
+            await create(
+                `CREATE TABLE IF NOT EXISTS "${this.#stateTable}" ` +
+                `(id VARCHAR PRIMARY KEY, value JSON, updated_at BIGINT)`,
+            );
+
+            this.#db = db;
+            return db;
+        })().catch((error) => {
+            this.#ready = null; // a transient failure is retried on the next call
+            throw error;
+        });
+
+        return this.#ready;
+    }
+
+    async get(threadId: string, ctx?: AgentMemoryContext): Promise<AgentMessage[]> {
+        const db = await this.#open();
+        const key = threadKey(threadId, ctx, this.#scoped);
+        const { rows } = await db.exec(`SELECT data FROM "${this.#options.table}" WHERE id = $1`, [key]);
+        if (!rows.length) return [];
+        try {
+            const doc = JSON.parse(String(rows[0].data));
+            return Array.isArray(doc?.messages) ? (doc.messages as AgentMessage[]) : [];
+        } catch {
+            return [];
+        }
+    }
+
+    async save(threadId: string, messages: AgentMessage[], ctx?: AgentMemoryContext): Promise<void> {
+        const db = await this.#open();
+        const key = threadKey(threadId, ctx, this.#scoped);
+        const trimmed = trimMessages(messages, this.#maxMessages);
+        const resourceId = this.#scoped ? ctx?.resourceId ?? null : null;
+        const now = Date.now();
+
+        // One read to keep `createdAt` and `title` — the upsert cannot preserve them
+        const previous = await db.exec(`SELECT data FROM "${this.#options.table}" WHERE id = $1`, [key]);
+        let doc: any = {};
+        try { doc = previous.rows[0] ? JSON.parse(String(previous.rows[0].data)) : {}; } catch { doc = {}; }
+
+        const next = {
+            threadId,
+            resourceId: resourceId ?? undefined,
+            agentId: ctx?.agentId ?? doc.agentId ?? undefined,
+            title: doc.title ?? threadTitle(trimmed) ?? undefined,
+            messages: trimmed,
+            createdAt: doc.createdAt ?? new Date(now).toISOString(),
+            updatedAt: new Date(now).toISOString(),
+        };
+
+        await db.exec(
+            `INSERT INTO "${this.#options.table}" (id, resource_id, data, updated_at) VALUES ($1, $2, $3, $4) ` +
+            `ON CONFLICT (id) DO UPDATE SET resource_id = EXCLUDED.resource_id, data = EXCLUDED.data, updated_at = EXCLUDED.updated_at`,
+            [key, resourceId, JSON.stringify(next), now],
+        );
+
+        await this.#maybePurge(db, now);
+    }
+
+    async clear(threadId: string, ctx?: AgentMemoryContext): Promise<void> {
+        const db = await this.#open();
+        const key = threadKey(threadId, ctx, this.#scoped);
+        await db.exec(`DELETE FROM "${this.#options.table}" WHERE id = $1`, [key]);
+    }
+
+    async getState(key: string, ctx?: AgentMemoryContext): Promise<AgentMemoryState | undefined> {
+        const db = await this.#open();
+        const { rows } = await db.exec(`SELECT value FROM "${this.#stateTable}" WHERE id = $1`, [key]);
+        if (!rows.length) return undefined;
+        try {
+            const parsed = JSON.parse(String(rows[0].value));
+            return { value: parsed?.value, updatedAt: parsed?.updatedAt ? new Date(parsed.updatedAt) : undefined };
+        } catch {
+            return undefined;
+        }
+    }
+
+    async setState(key: string, value: AgentMemoryState, ctx?: AgentMemoryContext): Promise<void> {
+        const db = await this.#open();
+        const now = Date.now();
+        const payload = JSON.stringify({
+            value: value.value,
+            updatedAt: (value.updatedAt ?? new Date(now)).toISOString(),
+        });
+        await db.exec(
+            `INSERT INTO "${this.#stateTable}" (id, value, updated_at) VALUES ($1, $2, $3) ` +
+            `ON CONFLICT (id) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`,
+            [key, payload, now],
+        );
+        await this.#maybePurge(db, now);
+    }
+
+    async clearState(key: string, ctx?: AgentMemoryContext): Promise<void> {
+        const db = await this.#open();
+        await db.exec(`DELETE FROM "${this.#stateTable}" WHERE id = $1`, [key]);
+    }
+
+    async list(ctx?: AgentMemoryContext & { limit?: number }): Promise<AgentThread[]> {
+        const db = await this.#open();
+        const table = this.#options.table;
+        const scoped = this.#scoped && ctx?.resourceId;
+        if (scoped) assertKeyPart(ctx!.resourceId!, "resource");
+
+        const limit = Math.max(1, Math.min(1000, Math.floor(ctx?.limit ?? DEFAULT_LIST_LIMIT)));
+        const { rows } = scoped
+            ? await db.exec(
+                `SELECT id, data, updated_at FROM "${table}" WHERE resource_id = $1 ORDER BY updated_at DESC LIMIT ${limit}`,
+                [ctx!.resourceId],
+            )
+            : await db.exec(`SELECT id, data, updated_at FROM "${table}" ORDER BY updated_at DESC LIMIT ${limit}`);
+
+        const threads: AgentThread[] = [];
+        for (const row of rows as any[]) {
+            try {
+                const doc = JSON.parse(String(row.data));
+                threads.push({
+                    threadId: String(doc.threadId ?? row.id),
+                    resourceId: doc.resourceId,
+                    title: doc.title,
+                    messages: Array.isArray(doc.messages) ? doc.messages.length : 0,
+                    createdAt: doc.createdAt ? new Date(doc.createdAt) : undefined,
+                    updatedAt: doc.updatedAt ? new Date(doc.updatedAt) : new Date(Number(row.updated_at)),
+                });
+            } catch { /* a broken row is skipped, never fatal */ }
+        }
+        return threads;
+    }
+
+    /** Retention without a timer: prune on write, at most once an hour. */
+    async #maybePurge(db: any, now: number): Promise<void> {
+        if (this.#ttlMs === null) return;
+        if (now - this.#lastPurge < 60 * 60 * 1000) return;
+        this.#lastPurge = now;
+        const cutoff = now - this.#ttlMs;
+        await db.exec(`DELETE FROM "${this.#options.table}" WHERE updated_at < $1`, [cutoff]).catch(() => {});
+        await db.exec(`DELETE FROM "${this.#stateTable}" WHERE updated_at < $1`, [cutoff]).catch(() => {});
+    }
+
+    /** Close the instance (a store is otherwise lazy: nothing is opened until a run). */
+    async close(): Promise<void> {
+        const db = this.#db;
+        this.#db = null;
+        this.#ready = null;
+        if (db) { try { await db.close(); } catch { /* already gone */ } }
     }
 }

@@ -26,6 +26,7 @@ import { loadSockets } from '../lib/sockets'
 import { syncWorkflows } from '../lib/workflow'
 import { syncMcpTools } from '../lib/mcp'
 import { syncAgents, agentsStats } from '../lib/agents'
+import { syncTasks, startTasks, stopTasks } from '../lib/task'
 import { loadTenantsMiddlewares } from '../lib/middleware'
 import crypto from 'node:crypto';
 import os from 'node:os';
@@ -164,6 +165,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
             await syncWorkflows();
             await syncMcpTools(); // load MCP tools per tenant (mcp/**/*.tool.ts)
             await syncAgents(); // load agents per tenant (agents/**/*.agent.ts)
+            await syncTasks(); // load scheduled tasks per tenant (tasks/**/*.task.ts)
             await loadTenantsMiddlewares();
             await loadRoutes(); // load routes
         }
@@ -175,6 +177,11 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
         } else {
             logger.file('Replication engine disabled', { serverMode: cfg.server.mode });
         }
+
+        // Scheduled tasks: arm `Bun.cron` for every enabled row (after beforeBoot,
+        // so a hook may have seeded/disabled a row itself). A worker arms them too:
+        // the `_tasks_` lock makes a fire run once across the whole cluster.
+        if (caps.api) await startTasks();
         //******************************* */
 
         // Uncaught errors → log file (MongoDB-style), then exit
@@ -197,6 +204,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
             const shutdownReplicationOnly = async (signal: string) => {
                 console.log(`\n${signal} received — stopping replication…`.gray);
                 clearInterval(keepAlive);
+                try { await stopTasks(); } catch {}
                 try { await runOnDestroy(signal as 'SIGINT' | 'SIGTERM'); } catch {}
                 try { await stopReplication(); } catch {}
                 try { await stopAuditQuack(); } catch {}
@@ -299,6 +307,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
                 console.log(`\n${signal} received — shutting down workers…`.gray);
                 try { master.shutdown(); } catch {}
                 try { metricsServer.stop(true); } catch {}
+                try { await stopTasks(); } catch {}
                 try { await runOnDestroy(signal as 'SIGINT' | 'SIGTERM'); } catch {}
                 try { await stopReplication(); } catch {}
                 try { await stopAuditQuack(); } catch {}
@@ -406,6 +415,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
         const shutdownServer = async (signal: string) => {
             console.log(`\n${signal} received — shutting down…`.gray);
             try { server.stop(true); } catch {}
+            try { await stopTasks(); } catch {}
             try { await runOnDestroy(signal as 'SIGINT' | 'SIGTERM'); } catch {}
             try { await stopReplication(); } catch {}
             try { await stopAuditQuack(); } catch {}

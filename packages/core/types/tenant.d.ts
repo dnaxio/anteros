@@ -56,6 +56,21 @@ export type Tenant = {
          */
         retention?: string | false;
     };
+    /**
+     * Scheduled tasks (`{tenant.dir}/tasks/**\/*.task.ts`) — the durable rows live
+     * in `_tasks_` and are armed with `Bun.cron`.
+     */
+    tasks?: {
+        /** Turn the scheduler off for this tenant (default `true`). */
+        enabled?: boolean;
+        /** Collection holding the task rows (default `_tasks_`). */
+        collection?: string;
+        /**
+         * Re-arm on a row change through a MongoDB change stream (default `true`).
+         * `false` keeps the boot state until the next restart.
+         */
+        watch?: boolean;
+    };
     routes?: {
         prefix?: string;
     },

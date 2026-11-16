@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs/promises";
 import { cfg } from "../server/config";
 import { Agent } from "./agent";
-import { InMemoryAgentMemory, MongoAgentMemory, RedisAgentMemory, customAgentMemory, semanticRecall, summarize } from "./agentMemory";
+import { DuckdbAgentMemory, InMemoryAgentMemory, MongoAgentMemory, RedisAgentMemory, customAgentMemory, semanticRecall, summarize } from "./agentMemory";
 import { importDefinition } from "./load";
 import { resolveSkills } from "./skills";
 import { closeMcpClients } from "./mcpClient";
@@ -240,6 +240,8 @@ const agents = {
         InMemory: InMemoryAgentMemory,
         Mongo: MongoAgentMemory,
         Redis: RedisAgentMemory,
+        // A DuckDB table — a local `.duckdb` file or a remote Quack server.
+        duckdb: DuckdbAgentMemory,
         // Your own storage — scoping and the message cap are applied for you.
         custom: customAgentMemory,
         // A `load`/`save` processor, not a store: recalls past messages by meaning
@@ -258,4 +260,4 @@ function agentMemoryCollections(tenantId: string): string[] {
         .map((memory) => memory.collection);
 }
 
-export { syncAgents, createAgents, agentsStats, agents, agentMemoryCollections, InMemoryAgentMemory, MongoAgentMemory, RedisAgentMemory };
+export { syncAgents, createAgents, agentsStats, agents, agentMemoryCollections, InMemoryAgentMemory, MongoAgentMemory, RedisAgentMemory, DuckdbAgentMemory };

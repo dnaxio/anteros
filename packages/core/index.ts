@@ -18,7 +18,9 @@ import {ObjectId} from "mongodb"
 // BentoCache-based caching (memory L1 + filesystem/Redis L2)
 import { useMemoryCache, useFilesystemCache, useRedisCache } from "./utils/cache";
 import { logger } from "./utils/logger";
+import { builtinToolsFor, BUILTIN_TOOL_NAMES } from "./lib/builtinTools";
 import { startReplication, stopReplication, replicationNow, getReplicationState, resetReplication, seedReplication } from "./database/replication";
+import { tasks } from "./lib/task";
 const cache = {
     useMemoryCache,
     useFilesystemCache,
@@ -46,11 +48,13 @@ export {
     cache,
     replication,
     logger,
+    tasks,
     Agent,
     agents,
     evaluateAgent,
     endpoints,
-
+    builtinToolsFor,
+    BUILTIN_TOOL_NAMES,
 }
 
 export type {
@@ -62,6 +66,8 @@ export type {
     AgentRunStore,
     AgentSemanticRecallOptions,
     AgentTraceEvent,
+    BuiltinToolName,
+    BuiltinToolsOptions,
 } from "./types/agent";
 
 export type {
@@ -70,3 +76,13 @@ export type {
     AgentEvalGrader,
     AgentEvalReport,
 } from "./lib/eval";
+
+export type {
+    TaskConfig,
+    TaskDocument,
+    TaskInfo,
+    TaskRunContext,
+    TaskRunResult,
+    TaskTrigger,
+    TaskUpdate,
+} from "./types/task";

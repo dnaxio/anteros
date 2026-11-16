@@ -397,11 +397,11 @@ describe("working memory — Anthropic", () => {
 
 describe("working memory — the registry exposes nothing new by accident", () => {
     it("lists exactly the store and processor factories", () => {
-        // Stores: InMemory, Mongo, Redis, custom (your own handlers).
+        // Stores: InMemory, Mongo, Redis, duckdb (a DuckDB table), custom (your own handlers).
         // Processors: `semanticRecall` (your embeddings + vector index) and
         // `summarize` (your model + prompt) — they shape the prompt, they store nothing.
         expect(Object.keys(agents.memory).sort()).toEqual([
-            "InMemory", "Mongo", "Redis", "custom", "semanticRecall", "summarize",
+            "InMemory", "Mongo", "Redis", "custom", "duckdb", "semanticRecall", "summarize",
         ]);
     });
 });

@@ -9,6 +9,7 @@ import type { FileCollection } from "./file";
 import type { McpTool, McpResource } from "./mcp";
 import type { VarDefinition } from "./vars";
 import type { AgentDefinition } from "./agent";
+import type { TaskConfig } from "./task";
 import type { AuditFileConfig } from "../lib/audit";
 import type { AuditQuackConfig } from "../lib/auditQuack";
 import type { AuditDriver } from "../lib/auditDriver";
@@ -24,8 +25,16 @@ export type ServerConfig = {
         workers?: number;
         /** Master supervision port exposing aggregated /health (default: port + 1) */
         metricsPort?: number;
-        /** When true, trusts proxy headers (CF-Connecting-IP / X-Forwarded-For) as the client IP. Default: false. */
-        trustProxy?: boolean;
+        /**
+         * Trust the proxy headers in front of the app (default: `false` — the socket
+         * address is the client). `true` = **one** trusted hop; an object sets the hop
+         * count and whether Cloudflare's `CF-Connecting-IP` is trusted.
+         *
+         * `X-Forwarded-For` is read right to left and only the last `hops` entries are
+         * trusted: a forged prefix cannot change the client IP, so it cannot mint a new
+         * rate-limit bucket nor a new audit IP. `ipRestriction` uses the same address.
+         */
+        trustProxy?: boolean | { hops?: number; cloudflare?: boolean };
         /**
          * HTTP transport limits.
          */
@@ -121,6 +130,16 @@ export type ServerConfig = {
              * made through it carry no identity, so no `api.access` rule can decide.
              */
             auth?: boolean;
+            /**
+             * Origins a **browser** may call the endpoint from (default: no check). A
+             * request carrying an `Origin` absent from this list is refused with
+             * `403 ORIGIN_NOT_ALLOWED`; a request without `Origin` (curl, a desktop MCP
+             * client) is not a browser and is left to `auth`. `['*']` allows any origin.
+             *
+             * This is what blunts DNS rebinding — an attacker page whose hostname
+             * resolves to the server's address is still another origin.
+             */
+            allowedOrigins?: string[];
         };
         /**
          * Workflow defaults for every tenant — a tenant declaring its own
@@ -316,6 +335,8 @@ export type Config = ServerConfig & {
     mcpResources?: McpResource[]
     vars?: VarDefinition[]
     agents?: AgentDefinition[]
+    /** Tasks declared by `syncTasks()` — the loader publishes them here. */
+    tasks?: TaskConfig[]
     /** Mongo collections used as agent memory — published by `syncAgents()` (see the Memory page). */
     agentMemories?: Array<{ _tenant_: string; collection: string }>
 }

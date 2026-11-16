@@ -1,10 +1,12 @@
 import { AppError, fn } from "./error";
+import { logger } from "../utils/logger";
 import { DEFAULT_REDACT_KEYS, isSensitiveKey, redactKeys } from "./redact";
 import { toJsonSchema, validateWithSchema } from "./jsonSchema";
 import { InMemoryAgentMemory, trimMessages } from "./agentMemory";
 import { forMemory, resolveAttachments } from "./attachment";
 import { normalizeMessages, serializeToolResult, toolResultMedia } from "./messages";
 import { mcpToolsFor } from "./mcpClient";
+import { builtinToolsFor } from "./builtinTools";
 import { parsePartialJson } from "./partialJson";
 import { skillsBlock } from "./skills";
 import { trace } from "./tracing";
@@ -1365,16 +1367,31 @@ class Agent {
 
         const tools = new Map(this.#tools);
 
+        // The built-in tools — off by default. A tool the agent declares itself wins
+        // over one of them, and `tools: false` / an allow-list filters them like any
+        // other entry in this map.
+        for (const tool of builtinToolsFor(this.#config.builtinTools, this.#config.builtinToolsOptions)) {
+            const name = tool.id;
+            if (name && !tools.has(name)) tools.set(name, tool);
+        }
+
         // The other agents this one may delegate to
         for (const [name, tool] of subAgentTools(this.#config.agents, this.#rest, this._tenant_, delegation)) {
             if (!tools.has(name)) tools.set(name, tool);
         }
 
         // The remote MCP servers — connected on the first run that needs them, and
-        // memoized per server. A tool the agent declares itself wins over a remote one.
+        // memoized per server. A tool the agent declares itself wins over a remote one,
+        // and the framework's own tool name is **reserved**: a remote server must not be
+        // able to receive the working memory in its place (#59).
         for (const tool of await mcpToolsFor(this.#config.mcp)) {
             const name = tool.id ?? tool.name;
-            if (name && !tools.has(name)) tools.set(name, tool);
+            if (!name) continue;
+            if (name === WORKING_MEMORY_TOOL) {
+                logger.file("warn", "agent mcp: reserved tool name ignored", { tool: name });
+                continue;
+            }
+            if (!tools.has(name)) tools.set(name, tool);
         }
 
         // `tools: ['forecast', 'echo']` — only these (an unknown name is ignored:

@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { isIP } from "node:net";
 import { cors } from "hono/cors"
 import { compress } from 'hono/compress'
 import { ipRestriction } from "hono/ip-restriction"
@@ -191,6 +192,49 @@ function getRedisRateLimitStore(): RateLimitStore | null {
     return redisRateLimitStore;
 }
 
+/** Strip brackets / port and refuse anything that is not a literal IP. */
+function normalizeIp(value?: string | null): string | null {
+    if (!value) return null;
+    let ip = value.trim();
+    if (ip.startsWith("[")) {
+        const end = ip.indexOf("]");
+        ip = end > 0 ? ip.slice(1, end) : ip;
+    } else if (/^\d{1,3}(?:\.\d{1,3}){3}:\d+$/.test(ip)) {
+        ip = ip.slice(0, ip.lastIndexOf(":"));
+    }
+    return isIP(ip) ? ip : null;
+}
+
+/**
+ * The client address, resolved from the **trusted** proxy chain (#53).
+ *
+ * `X-Forwarded-For` is read right to left: each proxy appends the address it saw, so
+ * with `hops` proxies the client is the entry `hops` from the end. Anything further
+ * left is caller-supplied and ignored — rotating a forged prefix cannot mint a new
+ * rate-limit bucket or a new audit IP. `CF-Connecting-IP` is only read when
+ * `cloudflare` is set, because any client can send that header too.
+ */
+function resolveClientIp(c: Context, socketIp?: string): string {
+    const fallback = socketIp || "unknown";
+    const trust = cfg.server.trustProxy;
+    if (!trust) return fallback;
+
+    const options = trust === true ? {} : trust;
+    const hops = Math.max(1, Math.min(16, Math.floor(options.hops ?? 1)));
+
+    if (options.cloudflare) {
+        const cf = normalizeIp(c.req.header("CF-Connecting-IP"));
+        if (cf) return cf;
+    }
+
+    const chain = (c.req.header("X-Forwarded-For") ?? "")
+        .split(",")
+        .map((entry) => normalizeIp(entry))
+        .filter((entry): entry is string => Boolean(entry));
+
+    return chain[chain.length - hops] ?? fallback;
+}
+
 function createApp(): Hono<{ Variables: HonoVariables }> {
     const app = new Hono<{ Variables: HonoVariables }>();
     const allowHeaders = [
@@ -281,9 +325,7 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
     app.use(async (c, next) => {
         const connInfo = safeGetConnInfo(c);
         c.set('connInfo', connInfo);
-        c.set('clientIp', cfg.server.trustProxy
-            ? c.req.header('CF-Connecting-IP') ?? c.req.header('X-Forwarded-For') ?? connInfo.remote.address ?? 'unknown'
-            : connInfo.remote.address ?? 'unknown');
+        c.set('clientIp', resolveClientIp(c, connInfo.remote.address));
         await next();
     });
 
@@ -361,6 +403,19 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
     const cachedGetConnInfo: GetConnInfo = (c) =>
         (c as Context<{ Variables: HonoVariables }>).get('connInfo') ?? safeGetConnInfo(c);
 
+    // `ipRestriction` must see the same resolved address as the rate limiter (#53):
+    // behind a proxy, an allow/deny list would otherwise apply to the proxy itself
+    const resolvedConnInfo: GetConnInfo = (c) => {
+        const info = cachedGetConnInfo(c);
+        const ip = (c as any).get('clientIp');
+        if (typeof ip !== 'string' || !ip || ip === 'unknown') return info;
+        // Drop `addressType`: it described the **socket**, and Hono must infer the type
+        // of the resolved address (a v6-mapped socket fronting an IPv4 client would
+        // otherwise be compared as IPv6 and every request would be denied)
+        const { addressType, ...remote } = info.remote ?? {};
+        return { remote: { ...remote, address: ip } };
+    };
+
 
 
     app.use(cors({
@@ -374,7 +429,7 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
     app.use(compress());
 
     // ip restriction
-    app.use(ipRestriction(cachedGetConnInfo, {
+    app.use(ipRestriction(resolvedConnInfo, {
         denyList: cfg.server?.ipRestriction?.denyList || [],
         allowList: cfg.server?.ipRestriction?.allowList || [],
     }))
@@ -569,5 +624,7 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
 
 
 export {
-    createApp
+    createApp,
+    // Exported for the tests that pin the proxy-chain resolution (#53)
+    resolveClientIp,
 }

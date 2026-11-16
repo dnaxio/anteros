@@ -58,6 +58,8 @@ On boot, the server syncs tenants, loads collections (`*.model.ts`), registers r
 | `v` | **Joi** (re-export), for schemas in models |
 | `cache` | Native caching: `useMemoryCache`, `useFilesystemCache`, `useRedisCache` (Bun.Redis) |
 | `utils` | Internal utilities exposed by the package |
+| `builtinToolsFor` · `BUILTIN_TOOL_NAMES` | The built-in agent tools (`read_file`, `shell`, `spawn`…), outside an agent |
+| `tasks` | The scheduled-task registry: `list`, `get`, `update`, `run`, `ids`, `stats` |
 
 ## Folder layout (per tenant)
 
@@ -70,6 +72,7 @@ Paths are relative to `tenant.dir` (e.g. `v1/` when `id` and `dir` are `v1`):
 | `collections/**/*.model.ts` | Collection models (`define.Collection({ ... })`) |
 | `routes/**/*.route.ts` | Custom HTTP routes (`define.Route({ ... })`), requires `tenant.routes.prefix` |
 | `scripts/**/*.run.ts` | Startup scripts (`define.Script({ ... })`) |
+| `tasks/**/*.task.ts` | Scheduled tasks (`define.Task({ ... })`), armed with `Bun.cron` |
 
 ## Generic HTTP API
 
@@ -210,6 +213,64 @@ Common options when calling `app.boot`:
 - `server.cors` — origins, credentials, headers, and methods
 - `server.ipRestriction` — allow/deny lists (Hono)
 - `server.jwt` — secret and token lifetime
+
+## Agents — built-in tools
+
+Agents can opt into **eleven built-in tools**, all **disabled by default**: `read_file`, `write_file`,
+`edit_file`, `ls`, `grep`, `shell`, `bun`, `spawn`, `image`, `archive_file`, `browser_control`.
+
+```ts
+export default define.Agent({
+  /* … */
+  builtinTools: ["read_file", "grep", "shell"], // or `true` for all eleven
+  builtinToolsOptions: { root: process.cwd() },  // the workspace
+});
+```
+
+- **File tools** (`read_file`, `write_file`, `edit_file`, `ls`, `grep`, `image`, `archive_file`) are confined
+  to `builtinToolsOptions.root` — a `..` escape, an absolute path outside, or a symlink leading outside is refused
+  with `BUILTIN_TOOL_PATH_ESCAPE`.
+- **`shell`, `bun` and `spawn` are not sandboxed**: they run with the process's own permissions, with the root
+  as their `cwd`. Enable them only for an agent meant to act on the machine.
+- Every process call has a deadline (`timeoutMs`, default 30 s) and capped output; `read_file` caps at
+  `maxReadBytes`; `grep` skips files over 1 MB.
+- A declared tool wins over a built-in of the same id; `tools: false` or an allow-list filters them.
+
+`browser_control` uses `Bun.WebView` (WebKit on macOS, or `backend: "chrome"`), `image` uses `Bun.Image`, and
+`archive_file` uses `Bun.Archive` (tar / tar.gz — not zip). Bun 1.4.4+ is required for those three.
+
+Full reference — every tool, argument, default, limit and error code — in the documentation's **Built-in tools** page.
+
+## Tasks
+
+A tenant schedules work in `{tenant.dir}/tasks/**/*.task.ts`:
+
+```ts
+export default define.Task({
+  id: "weekly-report",
+  schedule: "0 10 * * MON",     // every Monday at 10:00
+  timezone: "Africa/Abidjan",
+  run: async ({ rest, api, logger }) => { /* … */ },
+});
+```
+
+The first boot creates a `_tasks_` row per task **only when missing**; the row (`schedule`, `timezone`,
+`enabled`, `lastRunAt`, `nextRunAt`…) wins over the code and survives a restart. `tasks.update(tenantId, id,
+{ enabled: false })` — or a direct edit of the collection — is applied by a **change stream**, no restart.
+Every run takes an atomic `lockedUntil` lock, so a cluster runs a fire once, not once per worker;
+`catchUp: 'once'` replays a missed occurrence at boot.
+
+```ts
+import { tasks } from "@anteros/core";
+
+await tasks.list("v1");
+await tasks.update("v1", "weekly-report", { schedule: "0 8 * * TUE" });
+await tasks.run("v1", "weekly-report");
+await tasks.remove("v1", "weekly-report");   // durable: disarmed, hidden from list(), not recreated at boot
+await tasks.restore("v1", "weekly-report");  // undo it
+```
+
+Full reference: the documentation's **Tasks** page (`/docs/reference/tasks`).
 
 ## Socket.io
 

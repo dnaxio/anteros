@@ -695,3 +695,44 @@ describe("agents.memory.Redis", () => {
         expect((await agent.listThreads({ resource: "u1" })).map((t) => t.threadId)).toEqual(["c1"]);
     });
 });
+
+// ─── Thread key injection (#58) ──────────────────────────────────────────
+
+describe("thread key — the scope separator is reserved (#58)", () => {
+    const ctx = (resourceId: string) => ({ rest, tenant: TENANT, resourceId });
+
+    function expectKeyInvalid(fn: () => unknown): void {
+        try {
+            fn();
+            throw new Error("expected a failure");
+        } catch (error: any) {
+            expect(error?.code).toBe("AGENT_MEMORY_KEY_INVALID");
+            expect(error?.status).toBe(400);
+        }
+    }
+
+    it("refuses ':' in the thread id", async () => {
+        expectKeyInvalid(() => new InMemoryAgentMemory().save("a:b", [message("user", "hi")], { rest, resourceId: "u" }));
+        await expect(new MongoAgentMemory({ collection: MEMORY }).save("a:b", [message("user", "hi")], ctx("u")))
+            .rejects.toMatchObject({ code: "AGENT_MEMORY_KEY_INVALID", status: 400 });
+    });
+
+    it("refuses ':' in the resource id — including on `list`", async () => {
+        await expect(new MongoAgentMemory({ collection: MEMORY }).save("t", [message("user", "hi")], ctx("u:1")))
+            .rejects.toMatchObject({ code: "AGENT_MEMORY_KEY_INVALID" });
+        expectKeyInvalid(() => new InMemoryAgentMemory().list({ rest, resourceId: "u:1" }));
+    });
+
+    it("refuses both pairs that used to collide", async () => {
+        // `${resource}:${thread}` made ("u:1", "x") and ("u", "1:x") the same key
+        const mongo = new MongoAgentMemory({ collection: MEMORY });
+        await expect(mongo.save("x", [], ctx("u:1"))).rejects.toMatchObject({ code: "AGENT_MEMORY_KEY_INVALID" });
+        await expect(mongo.save("1:x", [], ctx("u"))).rejects.toMatchObject({ code: "AGENT_MEMORY_KEY_INVALID" });
+    });
+
+    it("still accepts an email-like resource — only ':' is reserved", async () => {
+        const mongo = new MongoAgentMemory({ collection: MEMORY });
+        await mongo.save("chat-1", [message("user", "hi")], ctx("user@example.com"));
+        expect((await mongo.get("chat-1", ctx("user@example.com"))).length).toBe(1);
+    });
+});

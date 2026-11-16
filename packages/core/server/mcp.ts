@@ -58,6 +58,42 @@ function matchUri(uri: string, resources: McpResource[]): { resource: McpResourc
 /** JSON-RPC code of a refused tool call / resource read (server-defined range). */
 const ACCESS_DENIED = -32001;
 
+/** Longest top-level string kept in `operation.input` — a document is not an argument. */
+const AUDIT_ARG_MAX = 500;
+
+/** Cap top-level long strings; the audit choke point redacts secrets afterwards. */
+function auditArgs(args: Record<string, any>): Record<string, any> {
+    const out: Record<string, any> = {};
+    for (const [key, value] of Object.entries(args ?? {})) {
+        out[key] = typeof value === "string" && value.length > AUDIT_ARG_MAX
+            ? `${value.slice(0, AUDIT_ARG_MAX)}… (${value.length} chars)`
+            : value;
+    }
+    return out;
+}
+
+/**
+ * One `_audit_` entry per MCP operation (#28) — the same trail as the HTTP API, so
+ * "who called `refund` yesterday" is answerable. Best-effort: a missing database or a
+ * failed insert never fails the tool call itself.
+ */
+async function auditMcp(
+    rest: InstanceType<typeof useRest>,
+    action: "mcp.tools/call" | "mcp.resources/read",
+    collection: string,
+    input: Record<string, any>,
+    startedAt: number,
+    error?: { message: string; code: string },
+): Promise<void> {
+    await rest.audit.log({
+        action,
+        collection,
+        input,
+        duration: Math.round(performance.now() - startedAt),
+        ...(error ? { error } : {}),
+    }).catch(() => {});
+}
+
 /**
  * Evaluate a tool's / resource's `api.access` rule, when it declares one.
  *
@@ -116,14 +152,23 @@ function buildServer(
         }
 
         const rest = new useRest({ tenant_id: tenantId, internal: false });
+        const collection = `_mcp_:${tool.name}`;
+        const raw = req.params.arguments ?? {};
 
         // Access first: a refused caller must not be able to probe the schema
         // (`api.access` on the tool, when declared — denied by default, like everywhere)
-        const raw = req.params.arguments ?? {};
-        await assertMcpAccess(tool.api?.access, 'call', `mcp:${tool.name}`, tenantId, rest, c, {
-            tool: tool.name,
-            args: raw,
-        });
+        try {
+            await assertMcpAccess(tool.api?.access, 'call', `mcp:${tool.name}`, tenantId, rest, c, {
+                tool: tool.name,
+                args: raw,
+            });
+        } catch (error: any) {
+            await auditMcp(rest, "mcp.tools/call", collection, { args: auditArgs(raw) }, start, {
+                message: error?.message ?? "Access denied",
+                code: "ACCESS_DENIED",
+            });
+            throw error;
+        }
 
         const { error, value } = tool.inputSchema.validate(raw, { allowUnknown: false });
         if (error) {
@@ -144,11 +189,19 @@ function buildServer(
             });
             const isError = !!(result as any)?.isError;
             logger[isError ? 'warn' : 'info']('MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, args: value, isError, duration: ms(start) });
+            await auditMcp(
+                rest, "mcp.tools/call", collection, { args: auditArgs(value) }, start,
+                isError ? { message: "the tool reported an error", code: "MCP_TOOL_ERROR" } : undefined,
+            );
             if (result && Array.isArray(result.content)) return result;
             const text = typeof result === 'string' ? result : JSON.stringify(result);
             return { content: [{ type: 'text' as const, text }] };
         } catch (err: any) {
             logger.file('warn', 'MCP tools/call', { method: 'tools/call', tenant: tenantId, tool: req.params.name, args: value, error: err?.message ?? 'unknown', duration: ms(start) });
+            await auditMcp(rest, "mcp.tools/call", collection, { args: auditArgs(value) }, start, {
+                message: err?.message ?? "unknown",
+                code: err?.code ?? "MCP_TOOL_ERROR",
+            });
             return {
                 content: [{ type: 'text' as const, text: `Error: ${err?.message ?? 'unknown'}` }],
                 isError: true,
@@ -194,10 +247,21 @@ function buildServer(
         }
 
         const rest = new useRest({ tenant_id: tenantId, internal: false });
-        await assertMcpAccess(matched.resource.api?.access, 'read', `mcp:${matched.resource.name}`, tenantId, rest, c, {
-            resource: matched.resource.name,
-            uri,
-        });
+        const collection = `_mcp_:${matched.resource.name}`;
+        const input = { uri, params: matched.params };
+
+        try {
+            await assertMcpAccess(matched.resource.api?.access, 'read', `mcp:${matched.resource.name}`, tenantId, rest, c, {
+                resource: matched.resource.name,
+                uri,
+            });
+        } catch (error: any) {
+            await auditMcp(rest, "mcp.resources/read", collection, input, start, {
+                message: error?.message ?? "Access denied",
+                code: "ACCESS_DENIED",
+            });
+            throw error;
+        }
 
         try {
             const result = await matched.resource.read({
@@ -209,9 +273,14 @@ function buildServer(
                 uri,
             });
             logger.file('MCP resources/read', { method: 'resources/read', tenant: tenantId, uri, resource: matched.resource.name, params: matched.params, duration: ms(start) });
+            await auditMcp(rest, "mcp.resources/read", collection, input, start);
             return result;
         } catch (err: any) {
             logger.file('warn', 'MCP resources/read', { method: 'resources/read', tenant: tenantId, uri, error: err?.message ?? 'unknown', duration: ms(start) });
+            await auditMcp(rest, "mcp.resources/read", collection, input, start, {
+                message: err?.message ?? "unknown",
+                code: err?.code ?? "MCP_RESOURCE_ERROR",
+            });
             throw new McpError(ErrorCode.InternalError, `Failed to read resource: ${err?.message ?? 'unknown'}`);
         }
     });
@@ -239,6 +308,17 @@ export function initializeMcp(app: Hono<{ Variables: HonoVariables }>) {
     }
 
     app.all(patterns.mcp, async (c: Context<{ Variables: HonoVariables }>) => {
+        // Origin allowlist (#28): a page on another origin must not be able to drive the
+        // endpoint (DNS rebinding). A request without `Origin` — every non-browser MCP
+        // client — is left to the token check below.
+        const allowedOrigins = cfg.server.mcp?.allowedOrigins;
+        if (allowedOrigins?.length && !allowedOrigins.includes("*")) {
+            const origin = c.req.header("Origin");
+            if (origin && !allowedOrigins.includes(origin)) {
+                return c.json({ message: "Origin not allowed", code: "ORIGIN_NOT_ALLOWED" }, 403);
+            }
+        }
+
         // Authentication (#28): a verified, non-expired token is required on every MCP
         // request unless `server.mcp.auth` is explicitly `false`. An invalid or expired
         // token never gets here — the global middleware rejects it (#52). Checked before

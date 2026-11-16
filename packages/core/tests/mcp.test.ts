@@ -4,10 +4,12 @@ import { cfg } from "../server/config";
 import { syncMcpTools } from "../lib/mcp";
 import { createApp } from "../server/hono";
 import { jwt } from "../utils/func";
+import { MongoClient } from "mongodb";
 
 const TENANT = "mcp-test";
 const TENANT_DIR = "packages/core/tests/fixtures/mcp-tenant";
 const SECRET = "mcp-auth-test-secret-0123456789abcdef";
+const AUDIT_DB = "mongodb://localhost:27017/_MCP_AUDIT_TEST";
 
 /** A token bound to `tenant` (the tenant-binding middleware compares the claim). */
 const token = (tenant = TENANT) => jwt.sign({ sub: "mcp-test", tenant });
@@ -271,6 +273,65 @@ describe("MCP authentication (#28)", () => {
                 { Authorization: `Bearer ${await token()}` },
             );
             expect(parseSSE(await allowed.text())[0]?.result?.content?.[0]?.type).toBe("image");
+        } finally { server.stop(true); }
+    });
+
+    it("writes one `_audit_` entry per tool call, denials included", async () => {
+        const client = new MongoClient(AUDIT_DB);
+        await client.connect();
+        cfg.tenants = [{ id: TENANT, dir: TENANT_DIR, database: { uri: AUDIT_DB } }];
+        const tenant: any = cfg.tenants[0];
+        tenant.database.client = client;
+        tenant.database.db = client.db();
+        await syncMcpTools();
+
+        const { server, url } = await serve();
+        try {
+            const auth = { Authorization: `Bearer ${await token()}` };
+
+            // Allowed call → success entry, args as validated (Joi defaults applied)
+            await rpc(url, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "echo", arguments: { msg: "audited" } } }, auth);
+
+            const audit = client.db().collection("_audit_");
+            const ok: any = await audit.findOne({ "operation.action": "mcp.tools/call", "operation.status": "success" });
+            expect(ok).toBeDefined();
+            expect(ok.operation.collection).toBe("_mcp_:echo");
+            expect(ok.operation.input.args).toEqual({ msg: "audited", times: 1 });
+            expect(ok.internal).toBe(false);
+            expect(typeof ok.operation.duration).toBe("number");
+
+            // Refused call → error entry with the code, and no tool output
+            cfg.mcpTools!.find((t) => t.name === "echo")!.api = { access: { call: () => false } };
+            await rpc(url, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "echo", arguments: { msg: "nope" } } }, auth);
+
+            const denied: any = await audit.findOne({ "operation.action": "mcp.tools/call", "operation.status": "error" });
+            expect(denied).toBeDefined();
+            expect(denied.operation.error.code).toBe("ACCESS_DENIED");
+            expect(denied.operation.result).toBeNull();
+        } finally {
+            server.stop(true);
+            await client.db().dropDatabase().catch(() => {});
+            await client.close().catch(() => {});
+        }
+    }, 30_000);
+
+    it("refuses a browser origin that is not allowlisted", async () => {
+        await load();
+        cfg.server = { ...cfg.server, mcp: { allowedOrigins: ["https://app.example.com"] } };
+        const { server, url } = await serve();
+        try {
+            const auth = { Authorization: `Bearer ${await token()}` };
+            const list = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
+
+            const denied = await rpc(url, list, { ...auth, Origin: "https://evil.test" });
+            expect(denied.status).toBe(403);
+            expect(((await denied.json()) as any).code).toBe("ORIGIN_NOT_ALLOWED");
+
+            const allowed = await rpc(url, { ...list, id: 2 }, { ...auth, Origin: "https://app.example.com" });
+            expect(allowed.status).toBe(200);
+
+            // No Origin header — curl, a desktop MCP client: not a browser, the token decides
+            expect((await rpc(url, { ...list, id: 3 }, auth)).status).toBe(200);
         } finally { server.stop(true); }
     });
 

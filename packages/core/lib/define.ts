@@ -160,6 +160,7 @@ function Middleware(config: GlobalMiddlewareConfig): GlobalMiddlewareConfig {
 
 import type { WorkflowDefinition } from "../types/workflow";
 import type { AgentConfig, AgentTool, AgentToolDefinition } from "../types/agent";
+import type { TaskConfig } from "../types/task";
 
 export function Workflow<TData = any>(workflow: WorkflowDefinition<TData>): WorkflowDefinition<TData> {
     return {
@@ -211,6 +212,33 @@ function Tool(tool: AgentToolDefinition<any>): AgentToolDefinition<any> {
     }
 }
 
+/**
+ * Declares a scheduled task — `{tenant.dir}/tasks/**\/*.task.ts`.
+ *
+ * `id` and `schedule` are **required**; the handler receives the tenant's own
+ * `rest`, `api` and `agents`. The `_tasks_` row may override the schedule and
+ * disable the task without a deploy.
+ *
+ * @example
+ * ```ts
+ * export default define.Task({
+ *   id: 'weekly-report',
+ *   schedule: '0 10 * * MON',
+ *   timezone: 'Africa/Abidjan',
+ *   run: async ({ rest, logger }) => {
+ *     logger.info('report ready');
+ *   },
+ * })
+ * ```
+ */
+function Task(task: TaskConfig): TaskConfig {
+    return {
+        ...task,
+        enabled: task.enabled ?? true,
+        _isTask_: true,
+    }
+}
+
 
 
 export const define = {
@@ -233,4 +261,5 @@ export const define = {
   Vars,
   Agent,
   Tool,
+  Task,
 }

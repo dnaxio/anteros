@@ -538,6 +538,29 @@ export type AgentMemoryState = {
 };
 
 /**
+ * Options of `agents.memory.duckdb()` — a DuckDB table, local or on a Quack server.
+ *
+ * The store owns two tables: `table` (one row per thread: `id`, `resource_id`,
+ * `data` JSON, `updated_at`) and `<table>__state` (the working memory). They are
+ * created on first use, so a local file can be empty when the agent boots.
+ */
+export type DuckdbAgentMemoryOptions = AgentMemoryOptions & {
+    /** Table holding the threads (a plain identifier — created if missing). */
+    table: string;
+    /** A Quack server (`quack:host:port`), or a local `.duckdb` file path. */
+    url?: string;
+    /** Alias of `url` for a local file (`dbPath`). */
+    dbPath?: string;
+    /** Shared secret of the Quack server (`DUCKDB_QUACK_TOKEN` is read by the client). */
+    token?: string;
+    /**
+     * Retention — a duration (`'30d'`). Rows older than the window are deleted
+     * **on write**, at most once an hour (no background timer).
+     */
+    ttl?: string | false;
+};
+
+/**
  * A memory processor — the extension point of a store, at the two moments a
  * memory matters:
  *
@@ -1320,6 +1343,45 @@ export type AgentSkill = {
  * An agent definition — `{tenant.dir}/agents/**\/*.agent.ts`, declared with
  * `define.Agent({ … })`.
  */
+/** Names of the built-in tools an agent may opt into (`builtinTools`). */
+export type BuiltinToolName =
+    | "bun"
+    | "shell"
+    | "read_file"
+    | "write_file"
+    | "edit_file"
+    | "grep"
+    | "ls"
+    | "image"
+    | "spawn"
+    | "browser_control"
+    | "archive_file";
+
+/**
+ * Options of the built-in tools.
+ *
+ * `root` is the workspace: every path the file tools accept is resolved inside it
+ * (a `..` escape, an absolute path outside, or a symlink leading outside is refused).
+ * `shell`, `bun` and `spawn` only use it as their `cwd` — a command is not confined.
+ */
+export type BuiltinToolsOptions = {
+    /** Workspace root (default: `process.cwd()`). */
+    root?: string;
+    /** Largest file `read_file` accepts, in bytes (default 500 000). */
+    maxReadBytes?: number;
+    /** Default deadline of `shell` / `bun` / `spawn`, in milliseconds (default 30 000). */
+    timeoutMs?: number;
+    /** Largest captured output per stream, in bytes (default 200 000). */
+    maxOutputBytes?: number;
+    /** Viewport and backend of `browser_control` (Bun.WebView). */
+    browser?: {
+        /** `'webkit'` (macOS, default) or `'chrome'` (cross-platform). */
+        backend?: "webkit" | "chrome";
+        width?: number;
+        height?: number;
+    };
+};
+
 /** A remote MCP server — its URL and the headers every request carries. */
 export type AgentMcpServer = {
     url: string;
@@ -1400,6 +1462,19 @@ export type AgentConfig = {
      * declares itself wins over a remote one of the same name.
      */
     mcp?: string[] | Record<string, string | AgentMcpServer> | AgentMcpServer[];
+    /**
+     * **Built-in tools**, off by default: `true` enables all of them, an array picks
+     * a subset (`['read_file', 'grep', 'ls']`).
+     *
+     * They are powerful — `shell`, `bun` and `spawn` run code with the process's own
+     * permissions, and the file tools write the workspace — so enable them for a
+     * coding agent, not for a support bot. A tool the agent declares itself wins over
+     * a built-in of the same id, and `tools: false` / an allow-list removes them like
+     * any other tool.
+     */
+    builtinTools?: boolean | BuiltinToolName[];
+    /** Options of the built-in tools — workspace root, timeouts, browser size. */
+    builtinToolsOptions?: BuiltinToolsOptions;
     /** Default tool choice for every run (default `'auto'`). */
     toolChoice?: AgentToolChoice;
     /** Default reasoning for every run (default off) — overridable per call. */
