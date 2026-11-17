@@ -9,6 +9,7 @@ import type { FileCollection } from "./file";
 import type { McpTool, McpResource } from "./mcp";
 import type { VarDefinition } from "./vars";
 import type { AgentDefinition } from "./agent";
+import type { WebSocketHandler } from "./websocket";
 import type { TaskConfig } from "./task";
 import type { AuditFileConfig } from "../lib/audit";
 import type { AuditQuackConfig } from "../lib/auditQuack";
@@ -184,6 +185,27 @@ export type ServerConfig = {
             allowList?: IPRestrictionRule[];
         }
         /**
+         * The **Socket.IO** path (`/socket.io/`) — served by the Bun engine
+         * *before* Hono, so the API middlewares do not run there (#60).
+         *
+         * The engine path reuses this server's `cors` and `ipRestriction`; what is
+         * left is authentication, and it is the app's job: `authorize` is a
+         * Socket.IO handshake middleware (`io.use`), called once per connection,
+         * before any tenant handler runs.
+         */
+        sockets?: {
+            /**
+             * Accept or refuse a handshake. Receives the token the client presented
+             * (`auth.token`, `Authorization: Bearer`, or `?token=`), its verified
+             * payload (when valid) and the raw handshake data. Return `false` (or
+             * throw) and the client gets a `connect_error`.
+             *
+             * Without it, the transport is **unauthenticated**: the tenant socket
+             * handlers receive every connection, and each must authenticate itself.
+             */
+            authorize?: (ctx: SocketAuthContext) => boolean | Promise<boolean>;
+        }
+        /**
          * Security headers (Hono `secureHeaders`).
          *
          * `crossOriginResourcePolicy` sets `Cross-Origin-Resource-Policy` on the
@@ -324,6 +346,27 @@ export type ServerConfig = {
     tenants: Tenant[];
 }
 
+/**
+ * Handshake data a `server.sockets.authorize` hook receives (#60).
+ *
+ * The token is what the client presented — `auth.token` (the Socket.IO payload),
+ * an `Authorization: Bearer` header, or `?token=`. `decoded` is the verified
+ * payload when it is valid, `null` otherwise; `expired` tells the two apart.
+ */
+export type SocketAuthContext = {
+    /** Socket id, as Socket.IO assigns it. */
+    id: string;
+    token: string | null;
+    decoded: Record<string, unknown> | null;
+    expired: boolean;
+    /** The `auth` payload sent by the client (`io(url, { auth: { token } })`). */
+    auth: Record<string, any>;
+    headers: Record<string, string | string[] | undefined>;
+    query: Record<string, any>;
+    /** The address of the handshake, as the engine sees it. */
+    address: string | null;
+};
+
 export type Config = ServerConfig & {
     version?: string;
     collections?: Collection[]
@@ -337,6 +380,8 @@ export type Config = ServerConfig & {
     agents?: AgentDefinition[]
     /** Tasks declared by `syncTasks()` — the loader publishes them here. */
     tasks?: TaskConfig[]
+    /** Socket handlers declared by `syncSockets()` — the loader publishes them here. */
+    sockets?: WebSocketHandler[]
     /** Mongo collections used as agent memory — published by `syncAgents()` (see the Memory page). */
     agentMemories?: Array<{ _tenant_: string; collection: string }>
 }

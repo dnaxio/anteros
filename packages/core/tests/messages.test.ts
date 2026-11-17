@@ -218,10 +218,12 @@ describe("normalizeMessages — tool parts", () => {
         expect(messages.map((message) => message.role)).toEqual(["user", "tool", "tool"]);
         expect(messages[0].content).toEqual([{ type: "text", text: "and?" }]);
         expect(messages[1]).toEqual({
-            role: "tool", toolCallId: "call_1", name: "forecast", content: '{"celsius":21}',
+            role: "tool", toolCallId: "call_1", name: "forecast",
+            content: '<tool_output tool="forecast" untrusted="true">\n{"celsius":21}\n</tool_output>',
         });
         expect(messages[2]).toEqual({
-            role: "tool", toolCallId: "call_2", name: "boom", content: "Error: timeout", isError: true,
+            role: "tool", toolCallId: "call_2", name: "boom",
+            content: '<tool_output tool="boom" untrusted="true">\nError: timeout\n</tool_output>', isError: true,
         });
     });
 
@@ -235,8 +237,8 @@ describe("normalizeMessages — tool parts", () => {
         }] as any) as any[];
 
         expect(messages).toEqual([
-            { role: "tool", toolCallId: "a", name: "tool", content: "one" },
-            { role: "tool", toolCallId: "b", name: "tool", content: "two" },
+            { role: "tool", toolCallId: "a", name: "tool", content: '<tool_output tool="tool" untrusted="true">\none\n</tool_output>' },
+            { role: "tool", toolCallId: "b", name: "tool", content: '<tool_output tool="tool" untrusted="true">\ntwo\n</tool_output>' },
         ]);
     });
 
@@ -310,5 +312,27 @@ describe("normalizeMessages — developer role and names", () => {
         const thinking = [{ type: "thinking", thinking: "…", signature: "sig" }];
         const [message] = await normalizeMessages([{ role: "assistant", content: "done", thinking }] as any) as any[];
         expect(message.thinking).toEqual(thinking);
+    });
+});
+
+describe("serializeToolResult — provenance (#57)", () => {
+    it("marks a successful result as untrusted data", async () => {
+        const { serializeToolResult } = await import("../lib/messages");
+        expect(serializeToolResult({ id: "1", name: "forecast", args: {}, result: { celsius: 21 }, durationMs: 0 }))
+            .toBe('<tool_output tool="forecast" untrusted="true">\n{"celsius":21}\n</tool_output>');
+    });
+
+    it("keeps the error code inside the block", async () => {
+        const { serializeToolResult } = await import("../lib/messages");
+        expect(serializeToolResult({
+            id: "1", name: "pay", args: {}, error: "declined", errorCode: "PAY_DECLINED", durationMs: 0,
+        })).toBe('<tool_output tool="pay" untrusted="true">\nError [PAY_DECLINED]: declined\n</tool_output>');
+    });
+
+    it("escapes a hostile tool name so it cannot break the tag", async () => {
+        const { serializeToolResult } = await import("../lib/messages");
+        expect(serializeToolResult({
+            id: "1", name: 'x"><script>', args: {}, result: "hi", durationMs: 0,
+        })).toContain('tool="x&quot;&gt;&lt;script&gt;"');
     });
 });

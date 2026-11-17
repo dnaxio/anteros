@@ -168,7 +168,8 @@ describe("a failing run", () => {
         // call resumes from there instead of starting over
         const stored = await memory.get("t1");
         expect(stored.map((message) => message.role)).toEqual(["user", "assistant", "tool"]);
-        expect(stored[2]!.content).toBe("ok");
+        expect(stored[2]!.content)
+            .toBe('<tool_output tool="boom" untrusted="true">\nok\n</tool_output>');
     });
 });
 

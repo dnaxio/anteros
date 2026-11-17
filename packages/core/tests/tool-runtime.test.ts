@@ -74,7 +74,8 @@ describe("tool errors carry a code", () => {
         const result = await agent.generate("go");
 
         expect(at(result.toolResults, 0).errorCode).toBe("ORDER_NOT_FOUND");
-        expect(request(provider, 1).body.messages[3].content).toBe("Error [ORDER_NOT_FOUND]: No order 'A-1'");
+        expect(request(provider, 1).body.messages[3].content)
+            .toBe('<tool_output tool="order" untrusted="true">\nError [ORDER_NOT_FOUND]: No order \'A-1\'\n</tool_output>');
         expect(result.toolStats).toMatchObject({ calls: 1, errors: 1, byCode: { ORDER_NOT_FOUND: 1 }, timeouts: 0 });
     });
 
@@ -126,7 +127,10 @@ describe("tool media results", () => {
             .find((block: any) => block.type === "tool_result");
 
         expect(toolResult.content).toEqual([
-            { type: "text", text: "Here is the chart" },
+            {
+                type: "text",
+                text: '<tool_output tool="chart" untrusted="true">\nHere is the chart\n</tool_output>',
+            },
             { type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } },
         ]);
     });
@@ -138,7 +142,8 @@ describe("tool media results", () => {
         const agent = makeAgent({ chart: chart() }, { baseUrl: provider.url });
         await agent.generate("go");
 
-        expect(request(provider, 1).body.messages[3].content).toBe("Here is the chart\n[image: image/png]");
+        expect(request(provider, 1).body.messages[3].content)
+            .toBe('<tool_output tool="chart" untrusted="true">\nHere is the chart\n</tool_output>\n[image: image/png]');
     });
 });
 

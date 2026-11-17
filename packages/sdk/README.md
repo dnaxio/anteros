@@ -176,6 +176,68 @@ const report = await api.service("email").run("send", { to: "user@example.com" }
 const legacy = await api.runService("email", "send", { to: "user@example.com" });
 ```
 
+### Sockets (WebSocket)
+
+`client.socket(namespace?, options?)` opens a **Socket.IO** connection to the same server, with the
+tenant and token in the handshake — the portable path (`auth`), which the server's
+`server.sockets.authorize` hook reads.
+
+```ts
+const socket = api.socket();          // the default namespace
+const chat = api.socket("/chat");     // another namespace
+
+socket.onConnect(() => console.log("connected", socket.id));
+socket.on("message", (msg) => console.log(msg));
+socket.emit("join", { room: "support" });
+const total = await socket.emitWithAck<number>("sum", 1, 2);
+socket.disconnect();
+```
+
+Rooms are re-joined on **every** connection (`rooms` / `joinEvent`), and a typed event map gives
+autocompletion:
+
+```ts
+type Events = { message: (m: { text: string }) => void };
+
+const socket = api.socket<Events>("/chat", {
+  rooms: ["room-42"],          // re-emitted on connect and on every reconnection
+  joinEvent: "room:join",      // default
+  waitForTimeoutMs: 5_000,     // default deadline of waitFor()
+});
+```
+
+| Method | What it does |
+| --- | --- |
+| `connect()` / `open()` | Open the connection (auto-connected by default) |
+| `disconnect()` / `close()` | Close it — no reconnection |
+| `reconnect()` | Drop and reopen with the current `auth` (token refresh) |
+| `reconnectWithHeaders(headers)` | Rebuild the transport with new handshake headers, keeping the tracked listeners |
+| `setAuth(patch)` / `setToken(token)` | Merge handshake claims / set `auth.token`; a live socket reconnects |
+| `setRooms(rooms, joinEvent?)` | Replace the rooms and join them now |
+| `on` / `once` / `off` | Listen to a server event |
+| `onConnect` / `onDisconnect` / `onConnectError` | The connection events |
+| `onAny` / `prependAny` / `offAny` | Every incoming event |
+| `onAnyOutgoing` / `offAnyOutgoing` | Every outgoing event |
+| `emit(event, ...args)` | Send — an ack callback goes last |
+| `emitWithAck<T>(event, ...args)` | Send and await the acknowledgement |
+| `send(...args)` | The `message` event |
+| `timeout(ms)` / `volatile` / `compress(flag)` | An emitting view with a deadline / drop-if-not-ready / compression |
+| `waitFor<T>(event, ms?)` | One-shot event as a promise (`SOCKET_TIMEOUT`) |
+| `listeners` / `listenerCount` / `hasListeners` / `removeAllListeners(event?)` | Introspection |
+| `io` | The reconnection manager (`reconnection`, `open()`, `on/off`, `raw`) |
+| `raw` / `id` / `url` / `connected` / `disconnected` / `active` / `auth` / `rooms` | The connection itself |
+
+`options` is Socket.IO's (`transports`, `reconnection`, `autoConnect`, `path`, `query`…) plus
+`auth` (merged over `{ tenant, token }`), `headers` (merged over the client's), `timeoutMs`
+(the default ack deadline), `waitForTimeoutMs`, `rooms` and `joinEvent`.
+
+- **The sockets follow the client token.** `login()`, `setToken()` and `clearToken()` update every
+  socket the client created and reconnect the live ones — the next handshake carries the new token.
+- `auth` is returned as a **copy**; mutate it through `setAuth`/`setToken`.
+- **Multiplexing**: two `socket()` calls on different namespaces of the same client share one
+  Engine.IO connection (Socket.IO's default). Pass `forceNew: true` to isolate them.
+- The socket does **not** follow a `setHeader()` made after its creation — use `reconnectWithHeaders()`.
+
 ### Configuration
 
 ```ts

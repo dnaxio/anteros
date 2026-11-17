@@ -1,6 +1,9 @@
 import { Agent } from "./agents";
 import { Vars } from "./vars";
+import { AnterosSocket } from "./socket";
+import type { SocketEvents } from "./socket";
 import { cleanDeep } from "../utils";
+import type { SdkSocketOptions } from "../types/socket";
 import type {
     AnterosError,
     ApiAction,
@@ -53,6 +56,8 @@ class Client {
     protected defaultParams: RestClientOptions["defaultParams"];
     /** Listeners, by event — see `on('error')`. */
     #listeners = new Map<SdkEvent, Set<SdkListener>>();
+    /** Sockets this client created — `setToken()` refreshes them all. */
+    #sockets = new Set<AnterosSocket<any, any>>();
 
     constructor(options: RestClientOptions) {
         this.#server = options.server.replace(/\/+$/, "");
@@ -124,17 +129,19 @@ class Client {
         }
     }
 
-    protected setToken(token: string | undefined) {
+    setToken(token: string | undefined) {
         if (!token) {
             this.#token = undefined;
             delete this.#headers.Authorization;
             this.#writeStoredToken(undefined);
-            return;
+        } else {
+            this.#token = token;
+            this.#headers.Authorization = `Bearer ${token}`;
+            this.#writeStoredToken(token);
         }
-
-        this.#token = token;
-        this.#headers.Authorization = `Bearer ${token}`;
-        this.#writeStoredToken(token);
+        // Every socket this client created follows — a live one reconnects with
+        // the new handshake, so `login()` is enough to refresh the session
+        for (const socket of this.#sockets) socket.setToken(token);
     }
 
     /** A signal combining the caller's abort with the configured timeout. */
@@ -440,6 +447,44 @@ class Client {
         return new Vars((action, body, options) =>
             this.postJson<any>(this.buildVarsUrl(action, options?.query), body, options ?? {}),
         );
+    }
+
+    /**
+     * A **Socket.IO** connection to this server — the same URL, tenant and token as
+     * the HTTP client.
+     *
+     * ```ts
+     * const socket = api.socket();          // the default namespace
+     * const chat = api.socket('/chat');     // another namespace
+     *
+     * socket.onConnect(() => console.log('connected', socket.id));
+     * socket.on('message', (msg) => console.log(msg));
+     * socket.emit('join', { room: 'support' });
+     * const total = await socket.emitWithAck<number>('sum', 1, 2);
+     * socket.disconnect();
+     * ```
+     *
+     * The handshake carries `auth: { tenant, token }` — what `server.sockets.authorize`
+     * reads — and the client's headers. The socket does **not** follow a later
+     * `login()`; call `socket.setToken(token)` to refresh a live connection.
+     */
+    socket<
+        ListenEvents extends SocketEvents = SocketEvents,
+        EmitEvents extends SocketEvents = ListenEvents,
+    >(namespace = "/", options: SdkSocketOptions = {}): AnterosSocket<ListenEvents, EmitEvents> {
+        const path = namespace.startsWith("/") ? namespace : `/${namespace}`;
+        const url = path === "/" ? this.#server : `${this.#server}${path}`;
+        const socket = new AnterosSocket<ListenEvents, EmitEvents>(url, {
+            ...options,
+            auth: {
+                tenant: this.#tenant,
+                ...(this.#token ? { token: this.#token } : {}),
+                ...(options.auth ?? {}),
+            },
+            headers: { ...this.#headers, ...(options.headers ?? {}) },
+        });
+        this.#sockets.add(socket);
+        return socket;
     }
 
     /**

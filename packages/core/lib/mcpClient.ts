@@ -23,6 +23,16 @@ const CLIENT_VERSION = "1.0.0";
 
 /** A remote server has to answer `initialize` + `tools/list` within this. */
 const MCP_TIMEOUT_MS = 5_000;
+/**
+ * One `callTool` gets its own, wider deadline (a tool does real work). Read at
+ * call time so a deployment — or a test — can tune it without a reload.
+ */
+const MCP_CALL_TIMEOUT_DEFAULT_MS = 30_000;
+
+function callTimeoutMs(): number {
+    const raw = Number(Bun.env?.ANTEROS_MCP_CALL_TIMEOUT_MS ?? process.env?.ANTEROS_MCP_CALL_TIMEOUT_MS);
+    return Number.isFinite(raw) && raw > 0 ? raw : MCP_CALL_TIMEOUT_DEFAULT_MS;
+}
 
 /** Live clients, by URL — closed by `closeMcpClients()` (a reload, a shutdown). */
 const clients = new Map<string, Client>();
@@ -85,33 +95,64 @@ async function bounded<T>(work: Promise<T>, ms: number, label: string): Promise<
 
 /** Connect, list, and adapt — one server's worth of work. */
 async function loadTools(
+    key: string,
     name: string,
     url: string,
     headers?: Record<string, string>,
 ): Promise<{ tools: AgentTool[]; client: Client }> {
     const client = new Client({ name: CLIENT_NAME, version: CLIENT_VERSION }, { capabilities: {} });
+    // Registered **before** connecting: a shutdown while `initialize` hangs must
+    // still be able to close it (`closeMcpClients`)
+    clients.set(key, client);
     const transport = new StreamableHTTPClientTransport(
         new URL(url),
         headers && Object.keys(headers).length ? { requestInit: { headers } } : undefined,
     );
-    await bounded(client.connect(transport), MCP_TIMEOUT_MS, `MCP server '${name}'`);
 
-    const listed = await bounded(client.listTools(), MCP_TIMEOUT_MS, `MCP server '${name}'`);
+    try {
+        await bounded(client.connect(transport), MCP_TIMEOUT_MS, `MCP server '${name}'`);
 
-    const tools = (listed?.tools ?? []).map((tool: any) => ({
-        id: tool.name,
-        description: tool.description ?? `Remote MCP tool '${tool.name}'.`,
-        // The protocol carries a plain JSON Schema, which `validateWithSchema` reads
-        inputSchema: tool.inputSchema ?? { type: "object", properties: {} },
-        execute: async (args: any) => {
-            const result: any = await client.callTool({ name: tool.name, arguments: args ?? {} });
-            // `serializeToolResult` already flattens MCP `{ content: [...] }`
-            if (result?.isError) throw new Error(result?.content?.[0]?.text ?? `Remote tool '${tool.name}' failed`);
-            return result;
-        },
-    })) as AgentTool[];
+        const listed = await bounded(client.listTools(), MCP_TIMEOUT_MS, `MCP server '${name}'`);
 
-    return { tools, client };
+        const tools = (listed?.tools ?? []).map((tool: any) => ({
+            id: tool.name,
+            description: tool.description ?? `Remote MCP tool '${tool.name}'.`,
+            // The protocol carries a plain JSON Schema, which `validateWithSchema` reads
+            inputSchema: tool.inputSchema ?? { type: "object", properties: {} },
+            execute: async (args: any) => {
+                let result: any;
+                try {
+                    // Same shape as `connect`/`listTools`: a server that never
+                    // answers must not hold the run forever
+                    result = await bounded(
+                        client.callTool({ name: tool.name, arguments: args ?? {} }),
+                        callTimeoutMs(),
+                        `MCP tool '${tool.name}'`,
+                    );
+                } catch (err: any) {
+                    // A timed-out server is likely wedged: close it and drop the
+                    // memo, so the next run reconnects instead of queueing on a
+                    // dead socket (a non-timeout failure keeps the client)
+                    if (/did not answer within/.test(err?.message ?? "")) {
+                        clients.delete(key);
+                        servers.delete(key);
+                        try { await client.close(); } catch { /* already gone */ }
+                    }
+                    throw err;
+                }
+                // `serializeToolResult` already flattens MCP `{ content: [...] }`
+                if (result?.isError) throw new Error(result?.content?.[0]?.text ?? `Remote tool '${tool.name}' failed`);
+                return result;
+            },
+        })) as AgentTool[];
+
+        return { tools, client };
+    } catch (err) {
+        // A failed connect must not leak the socket
+        try { await client.close(); } catch { /* already gone */ }
+        clients.delete(key);
+        throw err;
+    }
 }
 
 /**
@@ -128,9 +169,8 @@ async function mcpToolsFor(
         const key = serverKey(url, headers);
         let entry = servers.get(key);
         if (!entry) {
-            const pending = loadTools(name, url, headers)
-                .then(({ tools, client }) => {
-                    clients.set(key, client);
+            const pending = loadTools(key, name, url, headers)
+                .then(({ tools }) => {
                     servers.set(key, { tools });
                     logger.file("info", "agent mcp: server connected", { server: name, url, tools: tools.length });
                     return tools;
@@ -159,9 +199,16 @@ async function closeMcpClients(): Promise<void> {
     servers.clear();
 }
 
+/** Diagnostics (tests, a status endpoint): live clients and memoized servers. */
+function mcpClientStats(): { clients: number; servers: number } {
+    return { clients: clients.size, servers: servers.size };
+}
+
 export {
     MCP_TIMEOUT_MS,
+    MCP_CALL_TIMEOUT_DEFAULT_MS,
     closeMcpClients,
+    mcpClientStats,
     mcpToolsFor,
     serverList,
 };

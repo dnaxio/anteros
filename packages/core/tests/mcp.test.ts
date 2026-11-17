@@ -70,8 +70,8 @@ describe("syncMcpTools", () => {
     it("loads tools + resources from mcp/tools and mcp/resources", async () => {
         cfg.tenants = [{ id: TENANT, dir: TENANT_DIR, database: { uri: "mongodb://localhost:27017/none" } }];
         await syncMcpTools();
-        expect(cfg.mcpTools?.length).toBe(2);
-        expect(cfg.mcpTools?.map((t) => t.name).sort()).toEqual(["badge", "echo"]);
+        expect(cfg.mcpTools?.length).toBe(3);
+        expect(cfg.mcpTools?.map((t) => t.name).sort()).toEqual(["badge", "echo", "hang"]);
         expect(cfg.mcpResources?.length).toBe(2);
         expect(cfg.mcpResources?.map((r) => r.uri).sort()).toEqual(["orders://summary", "users://{id}"]);
         expect(cfg.mcpTools?.[0]?._tenant_).toBe(TENANT);

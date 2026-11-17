@@ -1,5 +1,4 @@
 import { Hono, type Context } from "hono";
-import { isIP } from "node:net";
 import { cors } from "hono/cors"
 import { compress } from 'hono/compress'
 import { ipRestriction } from "hono/ip-restriction"
@@ -10,6 +9,8 @@ import { getConnInfo } from "hono/bun"
 import type { ConnInfo, GetConnInfo } from "hono/conninfo"
 import { Redis } from "ioredis"
 import { cfg } from "./config"
+import { corsOptions } from "./cors"
+import { resolveClientIp as resolveClientIpFrom } from "./clientIp"
 import { rateLimit, createRedisStore, createMemoryStore, type RateLimitStore } from "./security"
 import { initializeRoutes } from "./routes";
 import { patterns } from "../lib/endpoints";
@@ -22,6 +23,7 @@ import { jwt } from "../utils/func";
 import { DEFAULT_REDACT_KEYS, isSensitiveKey, redactKeys } from "../lib/redact";
 import { AppError } from "../lib/error";
 import { getMetrics } from "./metrics";
+import { socketStats } from "../lib/sockets";
 import { logger } from "../utils/logger";
 import type { HonoVariables } from "./env";
 
@@ -193,99 +195,14 @@ function getRedisRateLimitStore(): RateLimitStore | null {
 }
 
 /** Strip brackets / port and refuse anything that is not a literal IP. */
-function normalizeIp(value?: string | null): string | null {
-    if (!value) return null;
-    let ip = value.trim();
-    if (ip.startsWith("[")) {
-        const end = ip.indexOf("]");
-        ip = end > 0 ? ip.slice(1, end) : ip;
-    } else if (/^\d{1,3}(?:\.\d{1,3}){3}:\d+$/.test(ip)) {
-        ip = ip.slice(0, ip.lastIndexOf(":"));
-    }
-    return isIP(ip) ? ip : null;
-}
-
-/**
- * The client address, resolved from the **trusted** proxy chain (#53).
- *
- * `X-Forwarded-For` is read right to left: each proxy appends the address it saw, so
- * with `hops` proxies the client is the entry `hops` from the end. Anything further
- * left is caller-supplied and ignored — rotating a forged prefix cannot mint a new
- * rate-limit bucket or a new audit IP. `CF-Connecting-IP` is only read when
- * `cloudflare` is set, because any client can send that header too.
- */
 function resolveClientIp(c: Context, socketIp?: string): string {
-    const fallback = socketIp || "unknown";
-    const trust = cfg.server.trustProxy;
-    if (!trust) return fallback;
-
-    const options = trust === true ? {} : trust;
-    const hops = Math.max(1, Math.min(16, Math.floor(options.hops ?? 1)));
-
-    if (options.cloudflare) {
-        const cf = normalizeIp(c.req.header("CF-Connecting-IP"));
-        if (cf) return cf;
-    }
-
-    const chain = (c.req.header("X-Forwarded-For") ?? "")
-        .split(",")
-        .map((entry) => normalizeIp(entry))
-        .filter((entry): entry is string => Boolean(entry));
-
-    return chain[chain.length - hops] ?? fallback;
+    return resolveClientIpFrom(c.req.raw.headers, socketIp);
 }
 
 function createApp(): Hono<{ Variables: HonoVariables }> {
     const app = new Hono<{ Variables: HonoVariables }>();
-    const allowHeaders = [
-        "Tenant-Id",
-        "Content-Type",
-        "Authorization",
-        "Accept",
-        "Origin",
-        "X-Requested-With",
-        "Access-Control-Request-Method",
-        "Access-Control-Request-Headers",
-        "CF-Connecting-IP",
-        "True-Client-IP",
-        "X-Forwarded-For",
-        "Cookie",
-        "X-Forwarded-Host",
-        ...(cfg.server.cors?.allowHeaders as string[] || []),
-    ]
-    const allowMethods = [
-        "GET",
-        "POST",
-        "PUT",
-        "DELETE",
-        "OPTIONS",
-        "PATCH",
-        "HEAD",
-        ...(cfg.server.cors?.allowMethods as string[] || []),
-    ]
-    // cors — origin accepts string | string[] | function (see ServerConfig type)
-    const corsConfig = cfg.server.cors?.origin;
-    const corsCredentials = cfg.server.cors?.credentials ?? false;
-
-    // Detect a wildcard in any supported form without breaking on string/function origins
-    const hasWildcardOrigin =
-        corsConfig === '*' ||
-        (Array.isArray(corsConfig) && corsConfig.includes('*'));
-
-    if (corsCredentials && (!corsConfig || hasWildcardOrigin)) {
-        throw new Error(
-            'CORS misconfiguration: credentials: true is incompatible with origin: *. '
-            + 'Set explicit origins in cfg.server.cors.origin.'
-        );
-    }
-
-    // Config function form: (ctx: { origin, c }) => string | string[]
-    // Hono expects: (origin, c) => string | Promise<string | null | undefined> | null | undefined
-    type CorsOriginOption = NonNullable<Parameters<typeof cors>[0]>['origin'];
-    const corsOrigin =
-        typeof corsConfig === 'function'
-            ? ((origin: string, c: Context) => corsConfig({ origin, c })) as unknown as CorsOriginOption
-            : corsConfig;
+    // One CORS policy for every HTTP surface (the API and the socket engine path)
+    const policy = corsOptions();
 
     // Global error handler — maps AppError thrown by user routes, global
     // middlewares and useRest to their proper status/code/message.
@@ -418,12 +335,7 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
 
 
 
-    app.use(cors({
-        origin: corsOrigin || ['*'],
-        credentials: corsCredentials,
-        allowMethods: allowMethods,
-        allowHeaders: allowHeaders,
-    }));
+    app.use(cors(policy));
 
     // compress
     app.use(compress());
@@ -478,6 +390,7 @@ function createApp(): Hono<{ Variables: HonoVariables }> {
     app.get('/health', (c) => {
         return c.json({
             ...getMetrics(),
+            sockets: socketStats(),
             ip: c.get('clientIp') ?? 'unknown',
         });
     });

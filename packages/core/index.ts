@@ -21,6 +21,7 @@ import { logger } from "./utils/logger";
 import { builtinToolsFor, BUILTIN_TOOL_NAMES } from "./lib/builtinTools";
 import { startReplication, stopReplication, replicationNow, getReplicationState, resetReplication, seedReplication } from "./database/replication";
 import { tasks } from "./lib/task";
+import { sockets } from "./lib/sockets";
 const cache = {
     useMemoryCache,
     useFilesystemCache,
@@ -49,6 +50,7 @@ export {
     replication,
     logger,
     tasks,
+    sockets,
     Agent,
     agents,
     evaluateAgent,
@@ -86,3 +88,5 @@ export type {
     TaskTrigger,
     TaskUpdate,
 } from "./types/task";
+
+export type { WebSocketContext, WebSocketHandler } from "./types/websocket";

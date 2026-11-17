@@ -20,9 +20,10 @@ import { workflowStats } from '../lib/workflow'
 
 import { loadRoutes } from '../lib/routes'
 import { runScripts } from '../lib/scripts'
-import { io, engineIo, websocket } from './io'
+import { io, websocket } from './io'
+import { createSocketApp, registerSocketAuth } from './socketGuard'
 import { loadServices } from '../lib/services'
-import { loadSockets } from '../lib/sockets'
+import { syncSockets, stopSockets } from '../lib/sockets'
 import { syncWorkflows } from '../lib/workflow'
 import { syncMcpTools } from '../lib/mcp'
 import { syncAgents, agentsStats } from '../lib/agents'
@@ -161,7 +162,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
         // Loaders only needed when an API is served — skipped when the API is off
         if (caps.api) {
             await loadServices(); // load services
-            if (caps.sockets) await loadSockets(); // load websocket handlers
+            if (caps.sockets) await syncSockets(); // load websocket handlers (sockets/**/*.ws.ts)
             await syncWorkflows();
             await syncMcpTools(); // load MCP tools per tenant (mcp/**/*.tool.ts)
             await syncAgents(); // load agents per tenant (agents/**/*.agent.ts)
@@ -204,6 +205,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
             const shutdownReplicationOnly = async (signal: string) => {
                 console.log(`\n${signal} received — stopping replication…`.gray);
                 clearInterval(keepAlive);
+                try { await stopSockets(); } catch {}
                 try { await stopTasks(); } catch {}
                 try { await runOnDestroy(signal as 'SIGINT' | 'SIGTERM'); } catch {}
                 try { await stopReplication(); } catch {}
@@ -307,6 +309,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
                 console.log(`\n${signal} received — shutting down workers…`.gray);
                 try { master.shutdown(); } catch {}
                 try { metricsServer.stop(true); } catch {}
+                try { await stopSockets(); } catch {}
                 try { await stopTasks(); } catch {}
                 try { await runOnDestroy(signal as 'SIGINT' | 'SIGTERM'); } catch {}
                 try { await stopReplication(); } catch {}
@@ -346,6 +349,11 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
 
         const app = createApp();
 
+        // Socket.IO: the engine path is guarded like the API — CORS, IP and
+        // security headers (#60); `authorize` is the optional handshake hook
+        const socketApp = caps.sockets ? createSocketApp() : null;
+        if (caps.sockets) registerSocketAuth();
+
         const server = Bun.serve({
             port: PORT,
             reusePort: reusePort || isWorker,
@@ -362,7 +370,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
 
                 if (caps.sockets && url.pathname === "/socket.io/") {
                     const start = performance.now();
-                    return respond(engineIo.handleRequest(req, server)).then((res) => {
+                    return respond(socketApp!.fetch(req, server)).then((res) => {
                         // Access log for the Socket.IO upgrade path (handled outside Hono) —
                         // same Caddy-compatible structure as the API access log
                         const remote: any = (server as any).requestIP?.(req);
@@ -415,6 +423,7 @@ async function bootApp(options: BootAppOptions = {} as BootAppOptions) {
         const shutdownServer = async (signal: string) => {
             console.log(`\n${signal} received — shutting down…`.gray);
             try { server.stop(true); } catch {}
+            try { await stopSockets(); } catch {}
             try { await stopTasks(); } catch {}
             try { await runOnDestroy(signal as 'SIGINT' | 'SIGTERM'); } catch {}
             try { await stopReplication(); } catch {}

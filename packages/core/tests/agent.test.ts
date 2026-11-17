@@ -209,7 +209,10 @@ describe("agent … unified messages", () => {
             type: "function",
             function: { name: "forecast", arguments: '{"city":"Paris"}' },
         });
-        expect(messages[3]).toEqual({ role: "tool", tool_call_id: "call_1", content: '{"celsius":21}' });
+        expect(messages[3]).toEqual({
+            role: "tool", tool_call_id: "call_1",
+            content: '<tool_output tool="forecast" untrusted="true">\n{"celsius":21}\n</tool_output>',
+        });
         expect(messages[4].content).toEqual([{ type: "text", text: "and in Lyon?" }]);
 
         expect(result.text).toBe("21°C and sunny");
@@ -744,7 +747,10 @@ describe("agent.generate", () => {
         expect(second).toHaveLength(4);
         expect(second[2].role).toBe("assistant");
         expect(second[2].tool_calls[0].id).toBe("call_1");
-        expect(second[3]).toEqual({ role: "tool", tool_call_id: "call_1", content: '{"city":"Paris","celsius":21}' });
+        expect(second[3]).toEqual({
+            role: "tool", tool_call_id: "call_1",
+            content: '<tool_output tool="forecast" untrusted="true">\n{"city":"Paris","celsius":21}\n</tool_output>',
+        });
     });
 
     it("reports invalid tool arguments instead of running the tool", async () => {
@@ -796,7 +802,8 @@ describe("agent.generate", () => {
         const result = await agent.generate("ping");
 
         expect(result.text).toBe("ok");
-        expect(request(provider, 1).body.messages[3].content).toBe("echoed:hi");
+        expect(request(provider, 1).body.messages[3].content)
+            .toBe('<tool_output tool="echo" untrusted="true">\nechoed:hi\n</tool_output>');
     });
 
     it("stops at maxSteps and says so", async () => {

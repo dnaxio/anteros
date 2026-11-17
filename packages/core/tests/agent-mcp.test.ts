@@ -12,7 +12,7 @@ import { InMemoryAgentMemory } from "../lib/agent";
 import { cfg, formatConfig } from "../server/config";
 import { syncTenants } from "../database/tenant";
 import { syncMcpTools } from "../lib/mcp";
-import { closeMcpClients, mcpToolsFor } from "../lib/mcpClient";
+import { closeMcpClients, mcpClientStats, mcpToolsFor } from "../lib/mcpClient";
 import { createApp } from "../server/hono";
 import { jwt } from "../utils/func";
 import { at, fakeProvider, openaiText, openaiTool, request, type Fake } from "./fixtures/fake-provider";
@@ -68,7 +68,7 @@ describe("agent mcp — authentication", () => {
 
     it("loads the tools when the header carries a valid token", async () => {
         const tools = await mcpToolsFor([{ url: mcpUrl, headers: { Authorization: `Bearer ${token}` } }]);
-        expect(tools.map((tool) => tool.id).sort()).toEqual(["badge", "echo"]);
+        expect(tools.map((tool) => tool.id).sort()).toEqual(["badge", "echo", "hang"]);
     });
 });
 
@@ -89,8 +89,10 @@ describe("agent mcp — a remote server's tools", () => {
         const entry = at(result.toolResults, 0);
         expect(entry.error).toBeUndefined();
         expect(entry.result.content[0].text).toContain("hello mcp");
-        // What the model saw is the flattened text, not the protocol envelope
+        // What the model saw is the flattened text, not the protocol envelope —
+        // and it is marked untrusted (#57)
         const toolMessage = result.messages.find((message) => message.role === "tool");
+        expect(toolMessage?.content).toContain('<tool_output tool="echo" untrusted="true">');
         expect(toolMessage?.content).toContain("hello mcp");
         expect(result.text).toBe("done");
     });
@@ -176,5 +178,34 @@ describe("agent mcp — reserved tool name (#59)", () => {
         } finally {
             srv.stop(true);
         }
+    }, 20_000);
+});
+
+describe("agent mcp — deadlines and cleanup (#56)", () => {
+    const call = () => mcpToolsFor([{ url: mcpUrl, headers: { Authorization: `Bearer ${token}` } }]);
+
+    it("fails a `callTool` that never answers, and drops the wedged client", async () => {
+        const tools = await call();
+        const hang = tools.find((tool) => tool.id === "hang")!;
+        const before = mcpClientStats().clients;
+        const previous = process.env.ANTEROS_MCP_CALL_TIMEOUT_MS;
+        process.env.ANTEROS_MCP_CALL_TIMEOUT_MS = "200";
+
+        try {
+            await expect(hang.execute!({}, {} as any)).rejects.toThrow(/did not answer within 200ms/);
+            // The dead client is closed and forgotten: the next run reconnects
+            expect(mcpClientStats().clients).toBe(before - 1);
+        } finally {
+            if (previous === undefined) delete process.env.ANTEROS_MCP_CALL_TIMEOUT_MS;
+            else process.env.ANTEROS_MCP_CALL_TIMEOUT_MS = previous;
+        }
+
+        expect((await call()).map((tool) => tool.id)).toContain("hang");
+    }, 20_000);
+
+    it("closes the client when the server cannot be reached", async () => {
+        const before = mcpClientStats().clients;
+        expect(await mcpToolsFor(["http://127.0.0.1:1/mcp"])).toEqual([]);
+        expect(mcpClientStats().clients).toBe(before);
     }, 20_000);
 });

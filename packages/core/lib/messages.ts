@@ -53,28 +53,50 @@ function invalid(message: string): AppError {
     return new AppError(message, { status: 400, code: "INVALID_INPUT" });
 }
 
+/**
+ * The tool name is ours (an id or an MCP `name`), but it lands in an attribute:
+ * escape it so a hostile name cannot break the tag.
+ */
+function toolNameAttr(name: string): string {
+    return String(name ?? "tool").replace(/[&<>"]/g, (char) =>
+        char === "&" ? "&amp;" : char === "<" ? "&lt;" : char === ">" ? "&gt;" : "&quot;");
+}
+
+/**
+ * A tool output is **data, never instructions** — the block is what tells the
+ * model so. A tool result can carry an injected instruction (a fetched document,
+ * a compromised MCP server); the delimiter plus the `untrusted` attribute is the
+ * provenance marker the prompt relies on.
+ */
+function wrapToolOutput(name: string, body: string): string {
+    return `<tool_output tool="${toolNameAttr(name)}" untrusted="true">\n${body}\n</tool_output>`;
+}
+
 /** A tool result as the model reads it — the same rendering the runtime uses. */
 function serializeToolResult(entry: AgentToolResultEntry): string {
     // The code travels with the message, so the model can branch on the cause
     // (`ORDER_NOT_FOUND`, `AGENT_TOOL_TIMEOUT`…) instead of parsing English.
-    if (entry.error) return entry.errorCode ? `Error [${entry.errorCode}]: ${entry.error}` : `Error: ${entry.error}`;
+    if (entry.error) {
+        const text = entry.errorCode ? `Error [${entry.errorCode}]: ${entry.error}` : `Error: ${entry.error}`;
+        return wrapToolOutput(entry.name, text);
+    }
     const result = entry.result;
-    if (typeof result === "string") return result;
+    if (typeof result === "string") return wrapToolOutput(entry.name, result);
     if (result && typeof result === "object" && Array.isArray((result as any).content)) {
         const texts = (result as any).content
             .filter((block: any) => block?.type === "text" && typeof block.text === "string")
             .map((block: any) => block.text);
-        if (texts.length) return texts.join("\n");
+        if (texts.length) return wrapToolOutput(entry.name, texts.join("\n"));
         // Media-only result — the text answer is a marker, the media travels beside it.
         if ((result as any).content.some((block: any) => MEDIA_BLOCK.test(String(block?.type)))) {
-            return toolMediaOf((result as any).content).map(mediaMarker).join("\n");
+            return wrapToolOutput(entry.name, toolMediaOf((result as any).content).map(mediaMarker).join("\n"));
         }
     }
-    if (result === undefined || result === null) return "OK";
+    if (result === undefined || result === null) return wrapToolOutput(entry.name, "OK");
     try {
-        return JSON.stringify(result);
+        return wrapToolOutput(entry.name, JSON.stringify(result));
     } catch {
-        return String(result);
+        return wrapToolOutput(entry.name, String(result));
     }
 }
 
